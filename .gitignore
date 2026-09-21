@@ -8,3 +8,6 @@ src/*.ino.cpp
 # Vendor factory images (~16 MB each) — reference restore blobs, not build
 # inputs. Untracked to keep the repo lean; recoverable from the vendor release.
 lib/LilyGoLib/firmware/*.bin
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
