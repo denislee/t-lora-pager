@@ -246,9 +246,10 @@ void loop()
         // BLE and WiFi both need ≥80MHz; hold there while either link is
         // up so the fake-sleep power saving doesn't drop them.
         // hw_set_cpu_freq() is a no-op when hw_power_down_all() already set
-        // this frequency; loop() just keeps it correct if hold_80 changes.
-        bool hold_80 = hw_get_ble_kb_connected() || hw_get_wifi_connected();
-        hw_set_cpu_freq(hold_80 ? 80 : 40);
+        // this frequency; loop() just keeps it correct if the link state
+        // changes mid-sleep. P5.4: the rule itself lives in
+        // hw_fake_sleep_target_freq() so this and hw_power_down_all() agree.
+        hw_set_cpu_freq(hw_fake_sleep_target_freq());
     } else {
         // Settings are an in-memory struct, but the loop runs at 20 Hz —
         // refreshing the user-configured CPU freq once per second is plenty
@@ -381,11 +382,20 @@ void loop()
     // Idle cadence. This loop is pure housekeeping (NTP re-trigger, vendor
     // instance.loop(), CPU-freq management) — LVGL rendering and rotary/NFC
     // input each run on their own FreeRTOS tasks. During fake-sleep the display
-    // is off and nothing here needs 20 Hz, so back off to 2 Hz to cut the
+    // is off and nothing here needs 20 Hz, so back off hard to cut the
     // always-on I2C/PMU polling and dynamic-power draw of the busiest task.
     // Wake is driven entirely by the separate rotary task, so display/UI
     // responsiveness on wake is unaffected.
-    delay(ui_is_fake_sleep() ? 500 : 50);
+    //
+    // P5.2: 2 Hz -> 0.5 Hz while asleep. Everything this loop still drives in
+    // that state is either self-throttled on a far longer clock (NTP backoff
+    // is 30 s at its fastest, hw_wifi_supervise() 30 s) or idempotent
+    // (hw_set_cpu_freq() no-ops when the frequency is unchanged). The vendor
+    // instance.loop() only dispatches HW_IRQ_RTC and HW_IRQ_SENSOR: the IMU is
+    // unregistered on sleep entry so no sensor interrupt can arrive, and
+    // RTC_EVENT_INTERRUPT has no registered consumer anywhere in src/. So the
+    // extra 1.5 s of latency is latency on work that does not exist.
+    delay(ui_is_fake_sleep() ? 2000 : 50);
 }
 
 #endif

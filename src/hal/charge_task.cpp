@@ -42,6 +42,14 @@ constexpr uint32_t    kFastPhaseMs        = 30000;   // first 30 s
 constexpr uint32_t    kMediumPhaseMs      = 90000;   // 30–90 s
 constexpr uint32_t    kPollMediumMs       = 2000;
 constexpr uint32_t    kPollSlowMs         = 5000;
+// P5.3 — fourth back-off stage. Past kDormantPhaseMs of uninterrupted fake
+// sleep this task is the last periodic I2C consumer on the bus, and the only
+// event it can still catch is a cable plug. Someone who plugs in a device that
+// has been asleep for ten minutes is not watching for the overlay in the first
+// few seconds, so trade that latency for a 3x cut in the residual poll rate.
+// Any VBUS edge resets last_reset_ms and drops straight back to kPollFastMs.
+constexpr uint32_t    kDormantPhaseMs     = 600000;  // 10 min
+constexpr uint32_t    kPollDormantMs      = 15000;
 constexpr uint32_t    kShowMs             = 4000;
 // Slow tick for 80 % charge-cap enforcement during fake sleep (P4.5).
 // lv_timers are frozen while fake-sleeping, so this task drives the check.
@@ -162,8 +170,10 @@ void charge_task_fn(void *)
             poll_ms = kPollFastMs;
         } else if (elapsed_since_reset < kMediumPhaseMs) {
             poll_ms = kPollMediumMs;
-        } else {
+        } else if (elapsed_since_reset < kDormantPhaseMs) {
             poll_ms = kPollSlowMs;
+        } else {
+            poll_ms = kPollDormantMs;   // P5.3
         }
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
 

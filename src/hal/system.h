@@ -84,5 +84,12 @@ void hw_get_heap_info(uint32_t &total, uint32_t &free);
 void     hw_set_cpu_freq(uint32_t mhz);
 uint32_t hw_get_cpu_freq();
 
+// P5.4 — the CPU frequency to hold while in fake sleep, resolved against the
+// current radio state. Single owner for a rule that used to be duplicated
+// (and could drift) between hw_power_down_all() and factory.ino's loop():
+// BLE and WiFi both need >= 80 MHz, so return 80 while either link is up;
+// otherwise return the deep idle floor. Cheap — two bool reads.
+uint32_t hw_fake_sleep_target_freq();
+
 // UI helper exposed from factory/ui_main for HAL-layer callers.
 void ui_msg_pop_up(const char *title_txt, const char *msg_txt);

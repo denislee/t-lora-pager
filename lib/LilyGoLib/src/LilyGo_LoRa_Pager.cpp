@@ -1294,9 +1294,31 @@ static bool getButtonState()
 // File-scope so external callers (e.g. a keyboard shortcut) can request the
 // same fake-sleep toggle that a center-button long-press does, and the state
 // stays in sync no matter which path drove the transition.
-static bool s_display_off = false;
+// [LOCAL PATCH P5.1] volatile: read from s_rotary_c_isr() on the interrupt path.
+static volatile bool s_display_off = false;
 static uint8_t s_saved_brightness = 127;
 static volatile bool s_request_fake_sleep_toggle = false;
+
+// [LOCAL PATCH P5.1] Interrupt-driven wake from fake sleep.
+//
+// Before this patch rotaryTask polled ROTARY_C with delay(100) for the entire
+// duration of fake sleep — 10 GPIO reads/s, forever, on a priority-10 task,
+// purely to notice a press that may never come. ROTARY_C (GPIO 7) has no other
+// owner (the encoder itself polls ROTARY_A/ROTARY_B and attaches no ISR), so we
+// can hang a CHANGE interrupt on it and let the task block instead.
+//
+// The ISR only signals while the display is off: awake, the adaptive 2/15 ms
+// poll already covers the button and a stray notification would just cost one
+// spurious loop iteration on the next sleep entry.
+static TaskHandle_t s_rotary_task_handle = NULL;
+
+static void ARDUINO_ISR_ATTR s_rotary_c_isr()
+{
+    if (!s_display_off) return;
+    BaseType_t hpw = pdFALSE;
+    if (s_rotary_task_handle) vTaskNotifyGiveFromISR(s_rotary_task_handle, &hpw);
+    if (hpw) portYIELD_FROM_ISR();
+}
 
 static void perform_fake_sleep_toggle()
 {
@@ -1323,6 +1345,11 @@ static void perform_fake_sleep_toggle()
 extern "C" void lilygo_request_fake_sleep_toggle()
 {
     s_request_fake_sleep_toggle = true;
+    // [LOCAL PATCH P5.1] rotaryTask now blocks on a notification while fake
+    // sleep is idle, so a request raised from another task must kick it — the
+    // 2000 ms stranding guard is not an acceptable latency for an explicit
+    // toggle. Harmless when the task is awake and polling.
+    if (s_rotary_task_handle) xTaskNotifyGive(s_rotary_task_handle);
 }
 
 static void rotaryTask(void *p)
@@ -1339,6 +1366,10 @@ static void rotaryTask(void *p)
 
     instance.rotary.begin();
     pinMode(ROTARY_C, INPUT_PULLUP);
+    // [LOCAL PATCH P5.1] Arm the wake interrupt before the first fake-sleep
+    // block below can ever be reached.
+    s_rotary_task_handle = xTaskGetCurrentTaskHandle();
+    attachInterrupt(digitalPinToInterrupt(ROTARY_C), s_rotary_c_isr, CHANGE);
     while (1) {
         // We handle the button manually here to support long-press
         bool btn_curr_state = digitalRead(ROTARY_C);
@@ -1379,11 +1410,11 @@ static void rotaryTask(void *p)
 
         btn_prev_state = btn_curr_state;
 
-        uint8_t result = instance.rotary.process();
-        if (s_display_off) {
-            result = 0; // Ignore rotary scroll events when display is off
-        }
-        
+        // [LOCAL PATCH P5.1] Don't even read the encoder while the display is
+        // off — process() samples ROTARY_A/ROTARY_B and runs the quadrature
+        // state machine, and the result was unconditionally discarded below.
+        uint8_t result = s_display_off ? 0 : instance.rotary.process();
+
         if (result || msg.centerBtnPressed) {
             last_activity_ms = millis();   // [LOCAL PATCH P4.11]
             switch (result) {
@@ -1401,19 +1432,30 @@ static void rotaryTask(void *p)
         }
         // Poll fast (2 ms) while the display is on for responsive scrolling and
         // clicks. During fake-sleep (display off) the only event that matters is
-        // the >1000 ms center-button hold to wake — 100 ms resolution detects
-        // that with ample margin (worst-case ~100 ms extra wake latency, still
-        // imperceptible against a 1 s hold) and cuts this task's GPIO polling on
-        // a second core to 10 Hz while nothing is on screen. Scroll events are
-        // already ignored above when the display is off, so nothing else is lost.
+        // the >1000 ms center-button hold to wake; scroll events are already
+        // ignored above when the display is off, so nothing else is lost.
         // [LOCAL PATCH P4.11] Idle-adaptive poll. Stay at 2 ms for 2 s after the
         // last detent or button edge so a scroll burst stays crisp, then back off
         // to 15 ms (~66 Hz). An idle home screen drops this task from 500 GPIO
         // polls/s to ~66, which is also the precondition for ever reaching
         // ESP-IDF tickless idle (PB.21). Stay fast while a press is in flight so
         // the >1000 ms hold detection keeps its resolution.
+        // [LOCAL PATCH P5.1] During fake sleep with no press in flight there is
+        // nothing to sample: block on the ROTARY_C interrupt instead of the old
+        // 10 Hz poll. The timeout is a stranding guard, not a hold detector — if
+        // the ISR ever failed to fire, a 1 s hold could fall entirely inside the
+        // window and be missed either way, so it is sized to cut idle wake-ups
+        // (10 Hz -> 0.5 Hz) rather than to back up the edge. A press that *is*
+        // in flight keeps the 2 ms cadence so the >1000 ms hold threshold still
+        // fires with the same resolution as when awake — the ISR timestamps the
+        // falling edge, so wake latency is now better than the old 100 ms poll,
+        // not worse.
         uint32_t idle_ms = millis() - last_activity_ms;
-        delay(s_display_off ? 100 : ((long_press_active || idle_ms < 2000) ? 2 : 15));
+        if (s_display_off && !long_press_active) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
+        } else {
+            delay(s_display_off ? 2 : ((long_press_active || idle_ms < 2000) ? 2 : 15));
+        }
     }
     vTaskDelete(NULL);
 }

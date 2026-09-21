@@ -52,6 +52,32 @@ uint32_t hw_get_cpu_freq()
     return s_cpu_freq_mhz;
 }
 
+// P5.4 — deep idle floor for fake sleep, down from the previous 40 MHz.
+//
+// On the ESP32-S3 any frequency below 80 MHz already runs the CPU straight off
+// the 40 MHz XTAL with the PLL powered down; 20 MHz is simply XTAL/2 and halves
+// core dynamic power again on top of that. It is only selected when neither BLE
+// nor WiFi is associated, so the >= 80 MHz requirement of both stacks is never
+// violated, and by then every other consumer is parked: LVGL, keyboard and
+// rotary tasks are blocked, the radio is asleep and the display is off.
+//
+// The one real consequence is that APB tracks the CPU when the PLL is off, so
+// peripheral clocks divide with it — a bus configured for 400 kHz I2C runs near
+// 100 kHz here. That is bounded and harmless: the charge task's VBUS read is the
+// only periodic bus traffic left in this state, and hw_power_up_all() restores
+// the user frequency before anything throughput-sensitive runs again.
+//
+// ⚠️ Bench note: this is the item in the P5 batch most worth a meter. If the
+// measured delta from 40 MHz is noise, or anything misbehaves at XTAL/2, revert
+// by setting this constant back to 40 — nothing else needs to change.
+static constexpr uint32_t FAKE_SLEEP_IDLE_FREQ_MHZ = 20;
+
+uint32_t hw_fake_sleep_target_freq()
+{
+    bool link_up = hw_get_ble_kb_connected() || hw_get_wifi_connected();
+    return link_up ? 80 : FAKE_SLEEP_IDLE_FREQ_MHZ;
+}
+
 // Settings blob schema guard.
 //
 // The stored NVS blob is a `SettingsHeader` followed by a raw
@@ -709,10 +735,10 @@ void hw_power_down_all()
     // SD Card is left on to avoid mount/unmount overhead and potential filesystem issues
 
     // Lower CPU frequency for power saving during fake sleep. BLE and WiFi
-    // both need ≥80MHz — dropping to 40MHz while either link is up severs
-    // it, so hold at 80MHz in that case.
-    bool hold_80 = hw_get_ble_kb_connected() || hw_get_wifi_connected();
-    hw_set_cpu_freq(hold_80 ? 80 : 40);
+    // both need ≥80MHz — dropping below that while either link is up severs
+    // it, so hw_fake_sleep_target_freq() holds at 80MHz in that case and
+    // otherwise returns the deep idle floor (P5.4).
+    hw_set_cpu_freq(hw_fake_sleep_target_freq());
 
     // Sleep the radio chip — vendor lightSleep() parity (LilyGo_LoRa_Pager.cpp:687).
     // STANDBY_RC draws ~0.6–1.6 mA; sleep is <1 µA. SPI lock required because
