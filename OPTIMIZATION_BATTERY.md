@@ -1007,3 +1007,33 @@ Measure at the battery (or USB with charging complete/disabled), 30 s settle per
 
 The "vendor light sleep" row is the target floor for the fake-sleep column: every mA
 of gap is exactly the PB.2–PB.6 list.
+
+### P5 rows — isolating the fake-sleep residual-drain batch
+
+Added from `OPTIMIZATION_PHASE5.md` §4. These four rows sit on top of the table
+above and exist to split the P5 batch into its wake-rate half and its
+operating-point half, because only the latter can plausibly regress:
+
+| Row | Setup | mA (measured) |
+|---|---|---|
+| Fake sleep, radios off, **at `8405a2a`** | baseline for this batch (pre-P5) | |
+| Fake sleep, radios off, P5.1+P5.2+P5.3 only | build with `FAKE_SLEEP_IDLE_FREQ_MHZ = 40` in `src/hal/system.cpp` — isolates the wake-rate work (12.2 → 1.07 wake-ups/s) | |
+| Fake sleep, radios off, full P5 | stock tree (20 MHz floor) — isolates P5.4 | |
+| Fake sleep, WiFi associated, full P5 | confirms `hw_fake_sleep_target_freq()`'s 80 MHz hold still engages | |
+
+If row 3 is not measurably below row 2, P5.4 is buying nothing: set
+`FAKE_SLEEP_IDLE_FREQ_MHZ` back to `40` and keep the rest of the batch.
+
+**Functional smoke test for the same session (no meter needed), in this order:**
+
+1. Long-press wheel → sleeps. Long-press again → wakes. Repeat 5x.
+2. Short-press while asleep → **nothing happens** (no wake, and no click landing
+   in the UI on the next wake).
+3. Sleep, wait >10 min, plug cable → charging overlay appears within ~15 s
+   (P5.3's dormant stage), then re-sleeps.
+4. Sleep with WiFi associated → confirm the link survives (P5.4's 80 MHz hold).
+5. Auto-sleep via `disp_timeout_second` → confirm it still fires (P5.1 changed
+   the notify path `lilygo_request_fake_sleep_toggle()` takes).
+6. Wake and scroll immediately → confirm no lost or phantom detents (P5.1 skips
+   `rotary.process()` while asleep). Worst case by code reading is one swallowed
+   detent, never a phantom scroll; verify on hardware anyway.
