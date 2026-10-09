@@ -84,6 +84,16 @@ void hw_get_heap_info(uint32_t &total, uint32_t &free);
 void     hw_set_cpu_freq(uint32_t mhz);
 uint32_t hw_get_cpu_freq();
 
+// P6.11 — called from the keyboard/rotary reader tasks on every input event.
+// Restores the user's active CPU frequency immediately (loop() drops to 80 MHz
+// after 2 s idle and only restores it on its own 50 ms tick, so the click that
+// opens an app used to build and render at a third of the speed), and stamps
+// the input time so loop() does not drop the clock again before LVGL has
+// processed the event. No-op in fake sleep.
+void     hw_cpu_boost_for_input();
+// Milliseconds since the last hw_cpu_boost_for_input() call (UINT32_MAX if never).
+uint32_t hw_ms_since_input();
+
 // P5.4 — the CPU frequency to hold while in fake sleep, resolved against the
 // current radio state. Single owner for a rule that used to be duplicated
 // (and could drift) between hw_power_down_all() and factory.ino's loop():

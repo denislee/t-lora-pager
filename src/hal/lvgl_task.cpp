@@ -17,6 +17,7 @@
 
 #include <Arduino.h>
 #include <lvgl.h>
+#include <LV_Helper.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -48,7 +49,11 @@ constexpr uint32_t    kFakeSleepIdleMs = 1000;
 // because they return deadlines well below 33 ms.
 // Input immediacy is preserved: keyboard_task.cpp and rotary_task.cpp both
 // call hw_lvgl_task_notify_wake() from their enqueue_event() so key/scroll
-// events wake this task immediately rather than waiting up to 200 ms.
+// events wake this task immediately rather than waiting up to 200 ms. The
+// task blocks on ulTaskNotifyTake() with this deadline instead of
+// vTaskDelay(), so it actually observes those notifications, and reads the
+// encoder/keypad straight away when input is what woke it instead of waiting
+// for the next indev read timer.
 constexpr uint32_t    kMaxTickMs    = 200;
 // FFat reads plus mbedTLS AES-CBC decrypt plus nested LVGL event dispatch
 // (e.g. menu rebuild from a click handler) easily cleared 6KB on 8KB stacks.
@@ -77,7 +82,14 @@ void lvgl_task_fn(void *)
 
         if (next > kMaxTickMs) next = kMaxTickMs;
         if (next == 0)         next = 1;
-        vTaskDelay(pdMS_TO_TICKS(next));
+        // P6.6: vTaskDelay ignored the input wake from keyboard_task/rotary_task,
+        // so a keypress waited for the next indev read timer. Block on the notify
+        // instead and, when an input woke us, read the encoder/keypad immediately.
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(next)) > 0 && !ui_is_fake_sleep()) {
+            core::ScopedInstanceLock lock;
+            if (lv_indev_t *enc = lv_get_encoder_indev())  lv_indev_read(enc);
+            if (lv_indev_t *kb  = lv_get_keyboard_indev()) lv_indev_read(kb);
+        }
     }
 }
 

@@ -274,7 +274,7 @@ void loop()
             last_settings_refresh_ms = now_ms;
         }
 
-        if (inactive_time > 2000 && cached_active_freq > 80) {
+        if (inactive_time > 2000 && hw_ms_since_input() > 2000 && cached_active_freq > 80) {
             hw_set_cpu_freq(80);
         } else {
             hw_set_cpu_freq(cached_active_freq);

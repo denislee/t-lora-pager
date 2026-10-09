@@ -39,6 +39,7 @@
 #include <freertos/queue.h>
 
 #include "../core/system_hooks.h"
+#include "system.h"
 
 #ifdef USING_INPUT_DEV_ROTARY
 
@@ -68,6 +69,7 @@ void enqueue_event(const RotaryMsg_t &ev)
     // for the kMaxTickMs (200 ms) fallback sleep. xTaskNotifyGive is cheap
     // and idempotent — multiple gives before the task's ulTaskNotifyTake
     // collapse to one.
+    hw_cpu_boost_for_input();
     hw_lvgl_task_notify_wake();
 }
 

@@ -99,6 +99,7 @@ void enqueue_event(const KeyEvent &ev)
     // idempotent — multiple gives before the task's ulTaskNotifyTake
     // collapse to one. Safe here even though the drain loop holds the
     // instance mutex: the LVGL task will simply block on it until we release.
+    hw_cpu_boost_for_input();
     hw_lvgl_task_notify_wake();
 }
 

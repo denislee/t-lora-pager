@@ -11,8 +11,15 @@
 #include "radio_chip.h"
 #include "../core/spi_lock.h"
 
+#include "../core/system_hooks.h"
+
 #include <cstring>
 #include <lvgl.h>
+
+#ifdef ARDUINO
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
 
 using std::string;
 
@@ -40,16 +47,59 @@ static bool s_imu_was_registered = false;
 
 void hw_set_cpu_freq(uint32_t mhz)
 {
-    if (mhz == 0 || mhz == s_cpu_freq_mhz) return;
+    if (mhz == 0) return;
 #ifdef ARDUINO
+    // Now called from several tasks (loop() + the keyboard/rotary reader
+    // tasks via hw_cpu_boost_for_input()), so the compare-and-set below is
+    // guarded by a lazily created mutex to keep two callers from both
+    // observing a stale s_cpu_freq_mhz and issuing redundant PLL re-locks.
+    static SemaphoreHandle_t s_cpu_freq_mutex = nullptr;
+    if (s_cpu_freq_mutex == nullptr) {
+        s_cpu_freq_mutex = xSemaphoreCreateMutex();
+    }
+    if (s_cpu_freq_mutex) xSemaphoreTake(s_cpu_freq_mutex, portMAX_DELAY);
+
+    if (mhz == s_cpu_freq_mhz) {
+        if (s_cpu_freq_mutex) xSemaphoreGive(s_cpu_freq_mutex);
+        return;
+    }
     setCpuFrequencyMhz(mhz);
-#endif
     s_cpu_freq_mhz = mhz;
+    if (s_cpu_freq_mutex) xSemaphoreGive(s_cpu_freq_mutex);
+#else
+    if (mhz == s_cpu_freq_mhz) return;
+    s_cpu_freq_mhz = mhz;
+#endif
 }
 
 uint32_t hw_get_cpu_freq()
 {
     return s_cpu_freq_mhz;
+}
+
+static volatile uint32_t s_last_input_ms = 0;
+static volatile bool     s_input_seen    = false;
+
+void hw_cpu_boost_for_input()
+{
+#ifdef ARDUINO
+    s_last_input_ms = millis();
+#else
+    s_last_input_ms = lv_tick_get();
+#endif
+    s_input_seen    = true;
+    if (ui_is_fake_sleep()) return;
+    hw_set_cpu_freq(user_setting.cpu_freq_mhz);
+}
+
+uint32_t hw_ms_since_input()
+{
+    if (!s_input_seen) return UINT32_MAX;
+#ifdef ARDUINO
+    return millis() - s_last_input_ms;
+#else
+    return lv_tick_get() - s_last_input_ms;
+#endif
 }
 
 // P5.4 — deep idle floor for fake sleep, down from the previous 40 MHz.
