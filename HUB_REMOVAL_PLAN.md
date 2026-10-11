@@ -1,15 +1,15 @@
 # Lilyhub Removal — Plan
 <!-- plan-doc: v2 -->
-**Progress:** 55% — 15/27
-**Status:** 🟡 H0–H3 firmware + mock done (H2.1–H2.6), H5.1 landed. Remaining: W27 iOS services (Mac), W15 BLE hardware gate → H4–H6
-**Last updated:** 2026-10-11 — /next: W9 weather via phone (e489487) after iOS Track C 9 (668cbef, bf12208)
+**Progress:** 57% — 16/28
+**Status:** 🟡 H0–H3 + W27 PagerKit done. Remaining: W28 iOS app wiring (Mac), W15 BLE hardware gate → H4–H6
+**Last updated:** 2026-10-11 — /next: W27 PagerKit services (efcb9cf, 7dd4927); W28 split out
 **Beads:** git-ne9bg
 
 ## Handoff
 
-Next action: none runnable from this box. W15 needs BLE (iOS plan Track A step 5) on a real pager + iPhone, and W27 needs a PagerKit DATA/ACK + fs.read port and a Mac. W16–W26 wait on W15.
-In play: /home/dns/tmp/t-lora-pager, branch master, local commits not pushed (8fe85df…e489487); baseline shots in /tmp/shots-before (predate H2.4–H2.6), latest in /tmp/shots-w9
-Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hub) stay until W16 per D-H1; iOS weather half (Open-Meteo/CoreLocation/weather.push) is iOS-plan Phase 3; emulator TCP link serves one client at a time; `make protocol-test` removes the emulator binary; kill the emulator by PID/SID, never by name
+Next action: none runnable from this box. W28 needs a Mac (wire PagerKit services into PagerCompanion, Keychain, `make -C ios test`); W15 needs BLE on a real pager + iPhone. W16–W26 wait on W15.
+In play: /home/dns/tmp/t-lora-pager, branch master, local commits not pushed (8fe85df…7dd4927); baseline shots /tmp/shots-before (predate H2.4–H2.6), latest /tmp/shots-w9
+Not in this doc: hub fallbacks stay until W16 per D-H1; iOS weather half is iOS-plan Phase 3; LinkSession silently drops >4096 B handler RES (follow-up); emulator TCP link serves one client at a time; `make protocol-test` removes the emulator binary; kill the emulator by PID/SID, never by name
 
 ## Work
 - [x] **W1** H0.1 Land the uncommitted hub work — ev: 8fe85df (server) · 7038cb7 (libhelix) · fd95e6e (firmware DC pass) · 0f018bb (docs); gate pager/emu/native/go all exit 0 · was: H0.1 · src: L270 · bd: git-ne9bg.1
@@ -27,7 +27,7 @@ Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hu
 - [x] **W10** H2.4 Chat via phone — ev: 5cbbd8b; firmware + mock only (link first, hub fallback per D-H1); smoke 30/30; neg control (CRC^1) fails the voice step · risk LOW · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
 - [x] **W11** H2.5 Notes sync via phone — ev: a443b12; firmware + mock (link first, hub fallback); smoke 32/32 incl. Salted__ byte-for-byte; native 117/117; neg controls (1-batch, plaintext CRC) fail · risk LOW · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
 - [x] **W12** H2.6 Telegram via phone — ev: 8af40f4; firmware + mock; smoke 41/41 (bulk >4096 B tg.messages, notifier once/silent/Offline); native 121/121; Go 82.9 %; neg controls (dedup, recv CRC) fail · risk LOW · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
-- [!] **W15** H4.1 Hardware acceptance, pager + iPhone, Wi-Fi off — after: W9, W10, W11, W12, W27 · blocked: D-H1 gate, BLE transport (iOS plan Track A step 5) not on hardware · was: H4.1 · src: L390 · bd: git-ne9bg.16
+- [!] **W15** H4.1 Hardware acceptance, pager + iPhone, Wi-Fi off — after: W9, W10, W11, W12, W27, W28 · blocked: D-H1 gate, BLE transport (iOS plan Track A step 5) not on hardware · was: H4.1 · src: L390 · bd: git-ne9bg.16
 - [ ] **W16** H4.2 Delete the firmware hub — left: also delete the hub fallbacks kept by D-H1 — chat_post (ui_chat), try_hub_sync + hub-upload loop (ui_notes_sync), hw_copy_all_notes_to_hub · after: W15 · was: H4.2 · src: L398 · bd: git-ne9bg.17
 - [ ] **W17** H4.3 Status bar: link indicator replaces hub_probe — after: W15 · was: H4.3 · src: L403 · bd: git-ne9bg.18
 - [ ] **W18** H4.4 One-shot NVS cleanup (hub ns, weather/hub_url, PAT) — after: W15 · was: H4.4 · src: L408 · bd: git-ne9bg.19
@@ -38,7 +38,8 @@ Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hu
 - [ ] **W24** H6.1 CLAUDE.md lilyhub sweep — after: W22 · was: H6.1 · src: L440 · bd: git-ne9bg.24
 - [ ] **W25** H6.2 REFACTOR_NOTES.md entry + README pointer — after: W22 · was: H6.2 · src: L445 · bd: git-ne9bg.25
 - [ ] **W26** H6.3 Zero-reference grep (negative control already run 2026-10-11: live hits found) — after: W24, W25 · was: H6.3 · src: L447 · bd: git-ne9bg.26
-- [!] **W27** iOS services for H2.4–H2.6: ChatService, NotesSyncService, TelegramService in PagerKit — blocked: PagerKit has no DATA/ACK engine or fs.read client (LinkSession drops .data/.ack); app target needs a Mac (iOS plan Track B). Must follow 8af40f4's tg reply shape {body}|{xfer,size,crc32} and http_error status-in-msg · after: W10, W11, W12 · bd: git-ne9bg.27
+- [x] **W27** iOS services for H2.4–H2.6: ChatService, NotesSyncService, TelegramService in PagerKit — ev: efcb9cf (DATA/ACK engine, bulk routing, fs.read client) + 7dd4927 (Chat/NotesSync/Telegram services); XCTest 13→82 in Docker; protocol-test 0; neg controls (no CRC, always-inline) fail · risk LOW · after: W10, W11, W12 · bd: git-ne9bg.27
+- [!] **W28** iOS app target for W27: wire ChatService/NotesSyncService/TelegramService into PagerCompanion (settings UI, Groq key + GitHub PAT in Keychain, Files-app folder, ATS/local-network keys) — blocked: needs a Mac — Keychain providers, phone notes dir, register() in PagerSession, make -C ios test (Darwin compile unverified), emulator e2e · after: W27 · bd: git-ne9bg.28
 
 ## Blocked / needs a human
 
@@ -68,6 +69,16 @@ Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a
 - server/ still holds lilyhub; the PagerLink Go tooling lives in tools/pagerlink.
 
 ## Log
+
+### 2026-10-11 — /next — W27 (split; W28 added)
+- No runnable items (ready 0). User chose to split W27: PagerKit half runs here (Docker swift), app-target half parked as W28 (Mac).
+- Env: local repo, master, Linux, Docker swift:6.0-jammy; nothing pushed. LOW (source + local commits); rollback = `git revert 7dd4927 efcb9cf`.
+- W27 ✅ efcb9cf: Link/Xfer.swift (port of xfer.go + CRC32), LinkSession routes DATA/ACK by xfer id, acceptBytes / sendBytes / readFile / openIncoming+receiveBytes, serial writer (no interleaved multi-packet sends), `role:` param (default .phone).
+- W27 ✅ 7dd4927: ChatService (Groq completions + Whisper, history 20, reset; missing key → unauthorized), NotesSyncService (fs.read pull, size+CRC check, github Git Data API additive push / phone dir sink, evt.notes.sync; names in repo → already, not pulled), TelegramService (tgParams/tgInt/tgXfer validation, fixed /v1 paths, trim, {body} ≤4096 B else bulk {xfer,size,crc32}; 401/403 → unauthorized, else http_error).
+- Gates: `make -C ios test-linux` 13 → 82 tests, 0 failures; `make protocol-test` exit 0; `go test ./...` (tools/pagerlink) ok.
+- Neg controls: (a) CRC check removed → `testManifestCRCMismatchIsError` 3 failures; (b) always inline → `testBulkSwitchOver4096` timeout + `testBulkWithoutXferRefused` fail. Both restored (cmp) → green.
+- Follow-up (not in this doc): LinkSession drops a handler RES >4096 B silently (peer times out); should answer ERR internal. Pre-existing behaviour.
+- Left for W28: Darwin compile unverified, no live Groq/GitHub/bridge, no BLE MTU test, PagerSession wiring + Keychain, emulator e2e.
 
 ### 2026-10-11 — /next — W9 (+ outside item: IOS_COMPANION_PLAN.md Track C item 9)
 - Env: local emulator (TCP 127.0.0.1:7600), no hardware, nothing pushed. All LOW (source + local commits); rollback = `git revert <sha>`.
