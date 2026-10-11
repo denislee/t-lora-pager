@@ -1,29 +1,21 @@
 /**
  * @file      link_transport_tcp.cpp
  * @brief     Emulator TCP transport for PagerLink (PROTOCOL.md §5) + the
- *            hw_link_* API for the emulator; Arduino stubs otherwise.
+ *            hw_link_* API for the emulator. Hardware uses the BLE GATT
+ *            transport in link_transport_ble.cpp.
  *
  * The emulator listens on 127.0.0.1:7600 (env PAGERLINK_PORT, "0" keeps the
  * link off) and serves one client at a time. Each packet is framed as a u16
  * little-endian length (1..65535) followed by the packet bytes; the TCP packet
  * size P is fixed at 244.
- *
- * On hardware the BLE GATT transport is not wired yet (blocked on Spike S1 in
- * IOS_COMPANION_PLAN.md), so the hw_link_* functions are stubs that report the
- * service as never connected.
  */
 #include "hal/link.h"
 #include "hal/link/link_service.h"
 
-#ifdef ARDUINO
-#include <esp32-hal-log.h>
-#define LINK_LOG(...) log_i(__VA_ARGS__)
-#else
+#ifndef ARDUINO
+
 #include <cstdio>
 #define LINK_LOG(fmt, ...) printf("[link] " fmt "\n", ##__VA_ARGS__)
-#endif
-
-#ifndef ARDUINO
 
 #include <atomic>
 #include <cerrno>
@@ -243,23 +235,6 @@ bool hw_link_enable(bool en) {
 }
 
 bool hw_link_enabled() { return g_enabled.load(); }
-
-bool hw_link_connected() { return pagerlink::service_connected(); }
-
-std::string hw_link_peer_name() { return pagerlink::service_peer_name(); }
-
-void hw_link_get_stats(HwLinkStats &out) { pagerlink::service_get_stats(out); }
-
-#else  // ARDUINO
-
-bool hw_link_enable(bool en) {
-    if (en) {
-        LINK_LOG("BLE transport not wired yet (Spike S1)");
-    }
-    return false;
-}
-
-bool hw_link_enabled() { return false; }
 
 bool hw_link_connected() { return pagerlink::service_connected(); }
 

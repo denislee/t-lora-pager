@@ -130,7 +130,7 @@ Go HTTP service intended to run on a LAN box (Pi/ARM). Apps point at it first an
 | XPowersLib | 0.3.1 | PMIC driver |
 | SensorLib | 0.3.3 | IMU/sensor drivers |
 | TinyGPSPlus | 1.0.3 | NMEA parsing |
-| NimBLE-Arduino | 2.2.3 | BLE stack |
+| NimBLE-Arduino | `^2.2.3` (currently resolves to 2.5.1) | BLE stack, owned by `hal/ble_stack` (HID keyboard + PagerLink) |
 | ESP8266Audio | 2.0.0 | MP3 / audio playback |
 | ST25R3916-fork | latest | NFC controller (pager + ultra only) |
 | LibSSH-ESP32 | 4.0.4 | SSH client (pager only) |

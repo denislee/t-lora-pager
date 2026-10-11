@@ -837,6 +837,33 @@ built and tested against the emulator over TCP with `pagerlink`.
 Recommended order: 1 (start the code now) and 6 whenever a Mac is at hand;
 otherwise 7 → 8 → 9 while hardware is unavailable.
 
+### 2026-10-11 — Track A: Spike S1 code + firmware BLE transport (uncommitted, needs bench)
+
+Done (firmware only; untested on hardware):
+
+- `hal/ble_stack.{h,cpp}` owns NimBLE: init once on first BT enable, never
+  deinit ("BT off" = stop advertising + disconnect). One server; HID services
+  first (keeps bonded handles), PagerLink appended. Adv: flags, appearance
+  keyboard, 0x1812, name `lilygo-pager`; scan response: PagerLink UUID.
+  ATT_MTU 247. Security unchanged (bond + SC, Just Works).
+- `hal/ble_hid.{h,cpp}`: keyboard + media keys on `NimBLEHIDDevice`, report
+  map / PnP ids / ASCII map copied from the BleKeyboard fork, which is dropped
+  from `lib_deps` (D1 = port, pending the bench check). Keyboard = peer
+  subscribed to a HID input report; reports go only to those peers.
+- `hal/link/link_transport_ble.{h,cpp}`: rx (write / write-nr, encrypted),
+  tx (notify), info (read JSON). Host callbacks queue into a PSRAM queue; the
+  `link` task (8 KB, prio 1, core 0) drives `link_service`, blocks while no
+  companion, ticks at 1 Hz while one is. Companion = first `tx` subscriber,
+  P = MTU − 3. Replaces the ARDUINO stubs in `link_transport_tcp.cpp`.
+- NimBLE resolves to 2.5.1 (`^2.2.3`). Its handle-less `notify()` reaches every
+  connected peer, subscribed or not, so HID addresses peers explicitly.
+- Evidence: tlora_pager, twatchs3, twatch_ultra, emulator_lora_pager build;
+  native 133/133.
+- Open: S1 exit (typing + media keys on iPhone), whether bonded phones need
+  "Forget This Device" to see the new service, and whether a restored `tx`
+  CCCD on reconnect marks a phone as companion while the app isn't running
+  (S2). The iOS `BLETransport` is still missing.
+
 ### 2026-10-11 — Track C item 9: weather cache + `weather.push` (`668cbef`, `bf12208`, local, not pushed)
 
 Done (firmware + Go; the iOS Open-Meteo provider and proactive push wait for Track B):

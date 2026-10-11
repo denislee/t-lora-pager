@@ -22,35 +22,15 @@
 #if !defined(USING_BLE_KEYBOARD)
 #error "USING_BLE_KEYBOARD is expected on every board (see hal/board_config.h)"
 #endif
-#include <BleKeyboard.h>
-#include <NimBLEDevice.h>
-#include <NimBLEServer.h>
-#include <NimBLEConnInfo.h>
-static BleKeyboard bleKeyboard;
+#include "ble_stack.h"
+#include "ble_hid.h"
 
-// iOS is strict about Apple's Accessory Design Guidelines for BLE HID. If the
-// connection interval / latency / supervision timeout drift outside the
-// recommended window, iPhone silently tears the link down after a few minutes.
-// These values sit inside the accepted band: 30–50 ms interval, slave latency
-// 10, 6.72 s supervision timeout. Latency 10 means the peripheral answers
-// every 11th connection event instead of every one, cutting idle radio wakes
-// ~10×. Apple-compliance check: max effective interval = 50 ms × (10+1) =
-// 550 ms ≤ 2 s; supervision timeout 6.72 s ≥ 550 ms × 3 = 1.65 s ✓.
-// The second-stage task also emits an empty HID report every 25 s so iOS
-// sees the peripheral as "live" and does not park the connection.
+// iOS is strict about Apple's Accessory Design Guidelines for BLE HID; the
+// keepalive task applies the compliant connection parameters
+// (hal::ble::apply_idle_conn_params) once a keyboard peer has settled, and
+// emits an empty HID report every 25 s so iOS sees the peripheral as "live"
+// and does not park the connection.
 static TaskHandle_t ble_kb_keepalive_handle = nullptr;
-
-static void ble_kb_apply_ios_conn_params()
-{
-    NimBLEServer *server = NimBLEDevice::getServer();
-    if (!server) return;
-    uint8_t n = server->getConnectedCount();
-    for (uint8_t i = 0; i < n; ++i) {
-        NimBLEConnInfo info = server->getPeerInfo(i);
-        // 0x18=24 (30 ms), 0x28=40 (50 ms), latency 10, timeout 0x2A0=672 (6.72 s).
-        server->updateConnParams(info.getConnHandle(), 0x18, 0x28, 10, 0x2A0);
-    }
-}
 
 static void ble_kb_keepalive_task(void *)
 {
@@ -66,16 +46,18 @@ static void ble_kb_keepalive_task(void *)
             was_connected = false;
             continue;
         }
-        bool now_connected = bleKeyboard.isConnected();
+        // "Connected" = a peer subscribed to HID input, so a companion-only
+        // connection gets neither the keepalive nor the HID conn params.
+        bool now_connected = hal::ble_hid::connected();
         if (now_connected && !was_connected) {
             // Give the iPhone a moment to finish service discovery / pairing
             // before we push a parameter update.
             vTaskDelay(pdMS_TO_TICKS(1500));
-            ble_kb_apply_ios_conn_params();
+            hal::ble::apply_idle_conn_params(hal::ble_hid::peer_conn_handle());
             last_ka_ms = millis();
         }
         if (now_connected && (millis() - last_ka_ms) >= 25000) {
-            bleKeyboard.releaseAll();
+            hal::ble_hid::release_all();
             last_ka_ms = millis();
         }
         was_connected = now_connected;
@@ -739,18 +721,11 @@ const char *hw_get_ble_kb_name()
 void hw_set_ble_kb_enable()
 {
 #ifdef ARDUINO
-    bleKeyboard.setName(hw_get_ble_kb_name());
-    bleKeyboard.begin();
-    // PB.12/Lever4: lower TX power from the +3 dBm default to 0 dBm.
-    // A BLE HID keyboard is used at < 1 m; the extra 3 dB buys nothing while
-    // idle-connected. Signature confirmed from NimBLE-Arduino 2.2.3 vendored
-    // header: setPower(int8_t dbm). Bench-tunable default.
-    NimBLEDevice::setPower(0);
-    // BleKeyboard's begin() calls setSecurityAuth(false,false,false), which
-    // leaves bonding off — iOS then re-prompts "Allow" on every reconnect.
-    // Re-enable bonding with Just Works pairing so the link key persists.
-    NimBLEDevice::setSecurityAuth(true, false, true);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    // ble_stack inits NimBLE once (HID + PagerLink on one server) and only
+    // (re)starts advertising on later calls.
+    if (!hal::ble::enable()) {
+        return;
+    }
     if (!ble_kb_keepalive_handle) {
         xTaskCreate(ble_kb_keepalive_task, "ble_kb_ka", 3072, nullptr,
                     tskIDLE_PRIORITY + 1, &ble_kb_keepalive_handle);
@@ -765,7 +740,9 @@ void hw_set_ble_kb_disable()
         vTaskDelete(ble_kb_keepalive_handle);
         ble_kb_keepalive_handle = nullptr;
     }
-    bleKeyboard.end();
+    // Stops advertising and drops peers; NimBLE stays initialised because it
+    // leaks on every deinit/init cycle (IOS_COMPANION_PLAN.md §5.1).
+    hal::ble::disable();
     log_d("Disable ble devices");
 #endif
 }
@@ -773,28 +750,24 @@ void hw_set_ble_kb_disable()
 void hw_set_ble_kb_char(const char *c)
 {
 #ifdef ARDUINO
-    if (bleKeyboard.isConnected()) {
-        bleKeyboard.print(c);
-    }
+    hal::ble_hid::type(c);
 #endif
 }
 
 bool hw_get_ble_kb_connected()
 {
 #ifdef ARDUINO
-    if (bleKeyboard.isConnected()) {
-        return true;
-    }
-#endif
+    return hal::ble_hid::connected();
+#else
     return false;
+#endif
 }
 
 std::string hw_get_ble_kb_peer_address()
 {
 #ifdef ARDUINO
-    NimBLEServer *server = NimBLEDevice::getServer();
-    if (server && server->getConnectedCount() > 0) {
-        return server->getPeerInfo(0).getAddress().toString();
+    if (hal::ble_hid::connected()) {
+        return hal::ble::peer_address(hal::ble_hid::peer_conn_handle());
     }
 #endif
     return "";
@@ -803,10 +776,8 @@ std::string hw_get_ble_kb_peer_address()
 void hw_disconnect_ble_kb()
 {
 #ifdef ARDUINO
-    NimBLEServer *server = NimBLEDevice::getServer();
-    if (server && server->getConnectedCount() > 0) {
-        NimBLEConnInfo peerInfo = server->getPeerInfo(0);
-        server->disconnect(peerInfo.getConnHandle());
+    if (hal::ble_hid::connected()) {
+        hal::ble::disconnect(hal::ble_hid::peer_conn_handle());
     }
 #endif
 }
@@ -814,26 +785,24 @@ void hw_disconnect_ble_kb()
 void hw_set_ble_key(media_key_value_t key)
 {
 #ifdef ARDUINO
-    if (bleKeyboard.isConnected()) {
-        switch (key) {
-        case MEDIA_VOLUME_UP:
-            bleKeyboard.write(KEY_MEDIA_VOLUME_UP);
-            break;
-        case MEDIA_VOLUME_DOWN:
-            bleKeyboard.write(KEY_MEDIA_VOLUME_DOWN);
-            break;
-        case MEDIA_PLAY_PAUSE:
-            bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
-            break;
-        case MEDIA_NEXT:
-            bleKeyboard.write(KEY_MEDIA_NEXT_TRACK);
-            break;
-        case MEDIA_PREVIOUS:
-            bleKeyboard.write(KEY_MEDIA_PREVIOUS_TRACK);
-            break;
-        default: return;
-        }
-
+    switch (key) {
+    case MEDIA_VOLUME_UP:
+        hal::ble_hid::media_key(hal::ble_hid::MEDIA_VOLUME_UP);
+        break;
+    case MEDIA_VOLUME_DOWN:
+        hal::ble_hid::media_key(hal::ble_hid::MEDIA_VOLUME_DOWN);
+        break;
+    case MEDIA_PLAY_PAUSE:
+        hal::ble_hid::media_key(hal::ble_hid::MEDIA_PLAY_PAUSE);
+        break;
+    case MEDIA_NEXT:
+        hal::ble_hid::media_key(hal::ble_hid::MEDIA_NEXT_TRACK);
+        break;
+    case MEDIA_PREVIOUS:
+        hal::ble_hid::media_key(hal::ble_hid::MEDIA_PREVIOUS_TRACK);
+        break;
+    default:
+        return;
     }
 #endif
 }

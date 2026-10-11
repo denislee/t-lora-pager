@@ -9,9 +9,9 @@
  * Transports:
  *  - TCP on the emulator (127.0.0.1:7600, PROTOCOL.md §5) so the iOS app can
  *    talk to the SDL build from the Simulator.
- *  - BLE GATT on hardware — NOT wired yet: it is blocked on Spike S1 in
- *    IOS_COMPANION_PLAN.md (HID and the link service must share one NimBLE
- *    server), so on ARDUINO builds hw_link_enable(true) returns false.
+ *  - BLE GATT on hardware (PROTOCOL.md §1), on the NimBLE server
+ *    hal/ble_stack.cpp shares with the HID keyboard. It is up whenever
+ *    Bluetooth is on; the phone becomes the companion by subscribing to `tx`.
  */
 #pragma once
 
@@ -21,8 +21,10 @@
 #include <string>
 
 // Start/stop the transport; returns the resulting enabled state. On hardware
-// this is a no-op that returns false until Spike S1 lands (see above); on the
-// emulator it opens the TCP listener (env PAGERLINK_PORT, "0" keeps it off).
+// the link follows Bluetooth (on by default whenever BT is on); false stops
+// accepting a companion and drops the current one, true lifts that again but
+// cannot turn Bluetooth on. On the emulator it opens the TCP listener (env
+// PAGERLINK_PORT, "0" keeps it off).
 bool hw_link_enable(bool en);
 
 // True while the transport is enabled (the listener is up).
