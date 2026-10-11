@@ -7,8 +7,12 @@ package main
 // so these steps pass against the emulator alone.
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/lilygo/pagerlink/internal/pagerlink"
@@ -16,17 +20,22 @@ import (
 
 // testResult is the evt.test.result payload. The chat steps fill step/ok/code/
 // msg/reply/transcript/bytes; the call steps fill step/ok/code/msg/json; the sink
-// step fills step/ok/code/bytes/crc32.
+// step fills step/ok/code/bytes/crc32; the notes steps fill step/ok/code/msg/
+// uploaded/already/errors/seeded.
 type testResult struct {
-	Step       string          `json:"step"`
-	OK         bool            `json:"ok"`
-	Code       string          `json:"code"`
-	Msg        string          `json:"msg"`
-	JSON       json.RawMessage `json:"json"`
-	Bytes      int             `json:"bytes"`
-	CRC32      uint32          `json:"crc32"`
-	Reply      string          `json:"reply"`
-	Transcript string          `json:"transcript"`
+	Step       string            `json:"step"`
+	OK         bool              `json:"ok"`
+	Code       string            `json:"code"`
+	Msg        string            `json:"msg"`
+	JSON       json.RawMessage   `json:"json"`
+	Bytes      int               `json:"bytes"`
+	CRC32      uint32            `json:"crc32"`
+	Reply      string            `json:"reply"`
+	Transcript string            `json:"transcript"`
+	Uploaded   int               `json:"uploaded"`
+	Already    int               `json:"already"`
+	Errors     int               `json:"errors"`
+	Seeded     map[string]string `json:"seeded"`
 }
 
 // sinkResult is what the test.sink.begin receiver goroutine reports: how many
@@ -36,7 +45,7 @@ type sinkResult struct {
 	err error
 }
 
-// smokeLink drives the six pager-initiated steps and reports each. c is the
+// smokeLink drives the eight pager-initiated steps and reports each. c is the
 // live client returned by smokeFS.
 func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	pass := true
@@ -70,6 +79,7 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	phone := &mockPhone{c: c, audio: make(map[uint16]*audioXfer)}
 	c.Handle("chat.audio.begin", phone.chatAudioBegin)
 	c.Handle("chat.ask", phone.chatAsk)
+	c.Handle("notes.sync", phone.notesSync)
 
 	// a. A pager-initiated RPC end to end.
 	r, ok := linkStep(c, timeout, map[string]any{
@@ -152,6 +162,18 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	}
 	pass = report(ok, "pager->phone chat voice 64 KB (chat.audio.begin + DATA + chat.ask)") && pass
 
+	// g. The pager syncs three internal notes; we must fetch each one and see
+	//    the raw bytes (Salted__ ciphertext) byte-for-byte.
+	pass = report(notesStep(c, timeout, phone, "github", map[string]string{
+		"a-plain.txt": "int/a-plain.txt", "b-shared.txt": "int/b-shared.txt", "c-secret.txt": "int/c-secret.txt",
+	}, 3), "pager->phone notes.sync github: 3 internal notes, raw bytes (Salted__ ciphertext) byte-for-byte") && pass
+
+	// h. With the SD volume present the manifest gains d-sdonly.txt; the
+	//    internal copy of the shared name still wins the duplicate.
+	pass = report(notesStep(c, timeout, phone, "phone", map[string]string{
+		"a-plain.txt": "int/a-plain.txt", "b-shared.txt": "int/b-shared.txt", "c-secret.txt": "int/c-secret.txt", "d-sdonly.txt": "sd/d-sdonly.txt",
+	}, 4), "pager->phone notes.sync phone: internal + SD, internal wins the duplicate") && pass
+
 	return pass
 }
 
@@ -190,4 +212,74 @@ func waitResult(c *pagerlink.Client, within time.Duration) (pagerlink.Notificati
 			return pagerlink.Notification{}, false
 		}
 	}
+}
+
+// notesStep runs one notes.sync step (mode picks the pager's fixture set), then
+// checks each fetched file in a fresh notes-out directory against the hex bytes
+// the pager reported for its seeded label in evt.test.result. wantUploaded is
+// the expected number of uploaded files and want maps each received file name
+// to the seeded label whose bytes it must equal. The c-secret.txt fixture must
+// arrive as Salted__ ciphertext.
+func notesStep(c *pagerlink.Client, timeout time.Duration, phone *mockPhone, mode string, want map[string]string, wantUploaded int) bool {
+	dir, err := os.MkdirTemp("", "pagerlink-notes-"+mode+"-")
+	if err != nil {
+		fmt.Printf("       notes: MkdirTemp: %v\n", err)
+		return false
+	}
+	defer os.RemoveAll(dir)
+
+	phone.mu.Lock()
+	phone.notesOut = dir
+	phone.mu.Unlock()
+
+	r, ok := linkStep(c, timeout, map[string]any{"notes": mode})
+	if ok && (r.Step != "notes" || !r.OK || r.Uploaded != wantUploaded || r.Errors != 0) {
+		ok = false
+	}
+	if ok {
+		for name, label := range want {
+			enc, found := r.Seeded[label]
+			if !found {
+				fmt.Printf("       notes %s: no seeded bytes for %s\n", name, label)
+				ok = false
+				break
+			}
+			expected, derr := hex.DecodeString(enc)
+			if derr != nil {
+				fmt.Printf("       notes %s: bad seeded hex %q: %v\n", name, enc, derr)
+				ok = false
+				break
+			}
+			if name == "c-secret.txt" && !bytes.HasPrefix(expected, []byte("Salted__")) {
+				fmt.Printf("       notes %s: expected Salted__ ciphertext\n", name)
+				ok = false
+				break
+			}
+			got, rerr := os.ReadFile(filepath.Join(dir, name))
+			if rerr != nil {
+				fmt.Printf("       notes %s: %v\n", name, rerr)
+				ok = false
+				break
+			}
+			if !bytes.Equal(got, expected) {
+				fmt.Printf("       notes %s: got %d bytes, want %d (%s)\n", name, len(got), len(expected), label)
+				ok = false
+				break
+			}
+		}
+	}
+	if ok {
+		entries, derr := os.ReadDir(dir)
+		if derr != nil {
+			fmt.Printf("       notes: ReadDir: %v\n", derr)
+			ok = false
+		} else if len(entries) != len(want) {
+			fmt.Printf("       notes: %d files in dir, want %d\n", len(entries), len(want))
+			ok = false
+		}
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	return ok
 }

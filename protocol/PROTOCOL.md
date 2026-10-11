@@ -169,6 +169,8 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | `evt.battery` | D→P | `{"pct","charging"}` on change ≥ 5 % or charge-state flip |
 | `chat.audio.begin` | D→P | `{"size","crc32","fmt":"wav"}` → `{"xfer"}`. Announces a voice memo (16 kHz/16-bit mono WAV, at most 15 s); the phone receives, so it allocates `xfer` (§4), then the pager streams the bytes as DATA. A CRC mismatch surfaces on the following `chat.ask` as `invalid_argument` |
 | `chat.ask` | D→P | `{"text"?,"audio_xfer"?,"reset"?}` → `{"transcript"?,"reply"}`. `audio_xfer` names a finished `chat.audio.begin` upload; `transcript` is set for voice. The phone keeps per-pager history (`reset` clears it). Timeout 60 s |
+| `notes.sync` | D→P | `{"targets":["github"\|"phone"],"files":[{"name","size","mtime","crc32","vol"}]}` → `{"job"}`. The pager announces its notes; `name` is the leaf under `/notes` on `vol` (`"int"` or `"sd"`, default `"int"`), `size`/`mtime`/`crc32` describe the raw on-disk bytes (an encrypted note's `Salted__` ciphertext). The phone answers at once, pulls the files it needs with `fs.read` (§6.1) and checks each against its `crc32`; `"github"` pushes them with the phone's repo/branch/token, `"phone"` stores them in the app's folder. The REQ cap (4096 B, §3) applies: the pager splits a long manifest into batches of at most 3500 B of params and runs them as sequential jobs |
+| `evt.notes.sync` | P→D | `{"job","phase","uploaded","already","errors":[<name>…],"done"}`. Progress for `job`, counts cumulative within the job; the last one has `done:true`. The pager fails the sync after 120 s without one |
 
 ## 6.1 Methods — Phase 2 (file service, `caps` `"fs"`)
 
@@ -203,7 +205,9 @@ Emulator builds answer `test.callback` (P→D) so `pagerlink smoke` can drive
 pager-initiated requests: `{"method","params"?,"timeout_ms"?}` makes the
 pager call `method` on the phone, and `{"sink","bytes"}` makes it call `sink`
 with `{"size","crc32"}` and stream `bytes` of a fixed pattern to the `xfer`
-the phone returns. The outcome arrives as `evt.test.result`. Hardware builds
+the phone returns. `{"chat":"text"|"voice"}` runs a chat turn, and
+`{"notes":"github"|"phone"}` seeds `/notes` on both volumes and runs that
+notes sync. The outcome arrives as `evt.test.result`. Hardware builds
 never register it (`src/hal/link/handlers_test.cpp`): it would let a phone
 make the pager call arbitrary methods.
 

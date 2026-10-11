@@ -52,12 +52,14 @@ type mockPhone struct {
 	replies map[string]json.RawMessage
 }
 
-// noteFile is one entry of a notes.sync manifest.
+// noteFile is one entry of a notes.sync manifest. Vol is the volume to read
+// from, "int" or "sd"; empty means "int".
 type noteFile struct {
 	Name  string `json:"name"`
 	Size  uint32 `json:"size"`
 	Mtime uint32 `json:"mtime"`
 	CRC32 uint32 `json:"crc32"`
+	Vol   string `json:"vol"`
 }
 
 // cmdServe implements `pagerlink serve`; the caller has already dialed.
@@ -222,13 +224,25 @@ func (s *mockPhone) notesSync(params json.RawMessage) (any, *pagerlink.RPCError)
 	return map[string]any{"job": job}, nil
 }
 
-// runNotesSync pulls each manifest file with fs.read and reports progress on
-// evt.notes.sync. A file whose bytes fail their CRC counts as an error.
+// runNotesSync pulls each manifest file with fs.read, honouring each entry's
+// vol ("int" or "sd", empty meaning "int"), and checks the bytes against the
+// manifest (size and CRC32). A mismatch, a read failure, or a non-CRC failure
+// counts as an error for that file.
 func (s *mockPhone) runNotesSync(job int, files []noteFile) {
 	uploaded := 0
 	errs := []string{}
 	for _, f := range files {
-		data, _, err := s.c.ReadFile("int", "/notes/"+f.Name, 60*time.Second)
+		vol := f.Vol
+		if vol == "" {
+			vol = "int"
+		}
+		data, _, err := s.c.ReadFile(vol, "/notes/"+f.Name, 60*time.Second)
+		if err == nil {
+			if uint32(len(data)) != f.Size || crc32.ChecksumIEEE(data) != f.CRC32 {
+				err = fmt.Errorf("manifest mismatch: got %d bytes crc32 0x%08x, manifest %d bytes crc32 0x%08x",
+					len(data), crc32.ChecksumIEEE(data), f.Size, f.CRC32)
+			}
+		}
 		if err == nil && s.notesOut != "" {
 			if werr := os.WriteFile(filepath.Join(s.notesOut, filepath.Base(f.Name)), data, 0o644); werr != nil {
 				err = werr

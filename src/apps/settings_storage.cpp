@@ -19,6 +19,8 @@
 #include "../ui_define.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/hub.h"
+#include "../hal/link.h"
+#include "../hal/notes_link.h"
 #include "../hal/storage.h"
 #include "settings_internal.h"
 
@@ -101,15 +103,37 @@ void storage_prune_now_cb(lv_event_t *) {
     ui_msg_pop_up("Storage", "Internal storage pruned to\nkeep only the 50 newest files.");
 }
 
-void storage_copy_to_hub_cb(lv_event_t *) {
-    if (!hal::hub_is_enabled()) {
-        ui_msg_pop_up("Hub",
-                      "Local Hub is disabled.\n"
-                      "Enable it in Settings " "\xC2\xBB" " Local Hub first.");
+// "Copy Notes -> Phone": phone first (notes.sync target "phone", internal +
+// SD notes, internal wins a shared name); without a phone the existing hub
+// upload (deleted in H4.2, D-H1); otherwise "Connect your phone".
+void storage_copy_notes_cb(lv_event_t *) {
+    if (hw_link_connected()) {
+        show_storage_loader("Copy Notes to Phone");
+        std::string err;
+        HalResult<NotesSyncSummary> r = notes_link_copy_to_phone(err);
+        hide_storage_loader();
+
+        char msg[160];
+        if (r) {
+            snprintf(msg, sizeof(msg), "Copied %d note(s) to phone.%s",
+                     r.value().uploaded + r.value().already,
+                     r.value().errors.empty() ? "" : "\nSome failed.");
+        } else {
+            snprintf(msg, sizeof(msg), "Copy failed: %s",
+                     err.empty() ? hal_error_string(r.error()) : err.c_str());
+        }
+        ui_msg_pop_up("Phone", msg);
         return;
     }
 
-    show_storage_loader("Upload Notes to Hub");
+    if (!hal::hub_is_enabled()) {
+        ui_msg_pop_up("Phone",
+                      "Connect your phone\n"
+                      "(or set Settings " "\xC2\xBB" " Local Hub).");
+        return;
+    }
+
+    show_storage_loader("Upload Notes via Hub");
 
     int copied = 0, failed = 0;
     std::string err;
@@ -120,7 +144,7 @@ void storage_copy_to_hub_cb(lv_event_t *) {
     char msg[160];
     if (ok) {
         snprintf(msg, sizeof(msg),
-                 "Uploaded %d note(s) to hub.%s",
+                 "Uploaded %d note(s) via hub.%s",
                  copied, failed > 0 ? "\nSome failed." : "");
     } else if (!err.empty()) {
         snprintf(msg, sizeof(msg), "Upload failed: %s\nUploaded: %d, failed: %d.",
@@ -167,9 +191,9 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     create_toggle_btn_row(sub_page, "Limit 50 files", local_param.prune_internal, storage_prune_cb);
 
     settings_action_row(sub_page, "Copy Internal -> SD", LV_SYMBOL_COPY, storage_copy_to_sd_cb);
-    // Copy all internal+SD notes to the hub. Mirrors the on-device store so
-    // the hub becomes the source of truth for the new sync flow.
-    settings_action_row(sub_page, "Copy Notes -> Hub", LV_SYMBOL_UPLOAD, storage_copy_to_hub_cb);
+    // Copy all internal+SD notes to the phone (its Files-app folder), or via
+    // the hub when no phone is connected (hardware only, until H4.2).
+    settings_action_row(sub_page, "Copy Notes -> Phone", LV_SYMBOL_UPLOAD, storage_copy_notes_cb);
     settings_action_row(sub_page, "Prune Now (Keep 50)", LV_SYMBOL_TRASH, storage_prune_now_cb);
 }
 

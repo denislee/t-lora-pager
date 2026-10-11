@@ -1,12 +1,21 @@
 /**
  * @file      ui_notes_sync.cpp
- * @brief     Hub-mediated GitHub notes sync — internal-only source.
+ * @brief     GitHub notes sync: the phone first (PagerLink notes.sync), the
+ *            lilyhub as a hardware-only fallback — internal-only source.
  *
- * The flow is now strictly:
- *   1. Mirror every internal-FFat note to the lilyhub via
- *      POST /api/notes/upload, so the hub has the canonical copy.
- *   2. POST /api/notes/sync with the same manifest; the hub does the
- *      additive GitHub push (list + PUT) on a real CPU.
+ * Route, picked per run in notes_sync_worker (HUB_REMOVAL_PLAN.md H2.5):
+ *   1. Phone connected over PagerLink → notes_link_sync() (hal/notes_link.h)
+ *      with the internal /notes manifest (vol "int", targets ["github"]).
+ *      The phone holds repo/branch/PAT (D-H2) and pulls the raw bytes with
+ *      fs.read, so this path needs no GitHub config, no Wi-Fi and no unlock.
+ *      Works in the emulator.
+ *   2. Hardware only, no phone, hub enabled → the hub flow below, unchanged
+ *      until the hub is deleted (H4.2, gated on BLE hardware: D-H1):
+ *        a. Mirror every internal-FFat note to the lilyhub via
+ *           POST /api/notes/upload, so the hub has the canonical copy.
+ *        b. POST /api/notes/sync with the same manifest; the hub does the
+ *           additive GitHub push (list + PUT) on a real CPU.
+ *   3. Neither → "Connect your phone (or set Settings » Local Hub)".
  *
  * The SD card is no longer consulted on sync. The user copies
  * SD-resident notes to the hub explicitly via the Storage settings
@@ -27,9 +36,14 @@
  * State reset on onStop (exit_cb):
  *   widgets: s_log_label, s_log_scroll               — nulled
  *   timers:  s_bg_timer (drain ticker)               — lv_timer_del + null
- *   tasks:   s_bg_task (sync worker)                 — left to finish and
- *                                                      self-delete; it only
- *                                                      touches the log queue
+ *   queue:   s_pending_log                           — cleared (under the
+ *                                                      instance lock on
+ *                                                      hardware, s_log_mu on
+ *                                                      the emulator)
+ *   tasks:   sync worker (FreeRTOS s_bg_task on      — left to finish and
+ *            hardware, detached std::thread +          self-delete/exit; it
+ *            s_bg_running on the emulator)             only touches the log
+ *                                                      queue
  * If you add a new cached LVGL pointer, timer, or FreeRTOS task, list it
  * above AND extend exit_cb() — a sync worker outliving the UI would
  * write into freed log buffers.
@@ -41,6 +55,8 @@
 #include "../hal/notes_crypto.h"
 #include "../hal/secrets.h"
 #include "../hal/hub.h"
+#include "../hal/link.h"
+#include "../hal/notes_link.h"
 #include "../hal/str_encode.h"
 #include "../hal/nvs.h"
 #include "../core/app.h"
@@ -48,6 +64,8 @@
 #include "../core/system.h"
 #include "app_registry.h"
 
+#include <atomic>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -62,6 +80,9 @@
 extern "C" {
 #include "cJSON.h"
 }
+#else
+#include <mutex>
+#include <thread>
 #endif
 
 namespace {
@@ -104,20 +125,48 @@ static lv_obj_t *s_log_scroll = nullptr;
 static std::string s_log_text;
 static bool s_syncing = false;
 
+// The sync runs on a worker (FreeRTOS task on hardware, detached std::thread
+// on the emulator) so the LVGL thread keeps servicing the keyboard/encoder.
+// The worker only ever touches `s_pending_log` (under the instance mutex on
+// hardware, s_log_mu on the emulator where the instance lock is a no-op) and
+// the `s_bg_done` flag; a UI-thread timer drains the queue and finalizes when
+// the worker is gone.
 #ifdef ARDUINO
-// HTTP runs on a FreeRTOS task so the LVGL thread keeps servicing the
-// keyboard/encoder during sync. The bg task only ever touches `s_pending_log`
-// and the `s_bg_done` flag (under the instance mutex); a UI-thread timer
-// drains the queue and finalizes when the task is gone.
 static TaskHandle_t s_bg_task = nullptr;
+#else
+static std::mutex s_log_mu;
+static std::atomic<bool> s_bg_running{false};
+#endif
 static lv_timer_t *s_bg_timer = nullptr;
 static std::vector<std::string> s_pending_log; // bg → ui log queue
-static volatile bool s_bg_done = false;
+static std::atomic<bool> s_bg_done{false};
+
+static bool bg_running()
+{
+#ifdef ARDUINO
+    return s_bg_task != nullptr;
+#else
+    return s_bg_running.load();
+#endif
+}
 
 static void bg_log_append(const char *line)
 {
+#ifdef ARDUINO
     core::ScopedInstanceLock lock;
+#else
+    std::lock_guard<std::mutex> lock(s_log_mu);
+#endif
     s_pending_log.emplace_back(line ? line : "");
+}
+
+// Drop queued lines (no UI to render them / a fresh run).
+static void bg_log_clear()
+{
+#ifndef ARDUINO
+    std::lock_guard<std::mutex> lock(s_log_mu);
+#endif
+    s_pending_log.clear();
 }
 
 static void bg_log_appendf(const char *fmt, ...)
@@ -129,7 +178,6 @@ static void bg_log_appendf(const char *fmt, ...)
     va_end(ap);
     bg_log_append(buf);
 }
-#endif
 
 static void log_append(const char *line)
 {
@@ -377,36 +425,79 @@ static void run_sync_bg()
     hal::secret_scrub(cfg.token);
 }
 
-static void notes_sync_bg_task(void *arg)
+#endif  // ARDUINO
+
+// Phone path: the internal /notes manifest goes to notes.sync with target
+// "github"; the phone pulls the raw bytes and pushes them. No GitHub config,
+// Wi-Fi or unlock needed here (D-H2): encrypted notes travel as ciphertext.
+static void run_phone_sync()
 {
-    (void)arg;
-    if (token_is_encrypted() && !notes_crypto_is_unlocked()) {
-        bg_log_append("ERR: Notes session locked. Open Notes and unlock.");
+    bg_log_append("[phone] syncing via the phone...");
+    std::vector<NoteEntry> files;
+    std::string err;
+    if (!notes_link_manifest(false, files, err)) {
+        bg_log_appendf("ERR: %s", err.c_str());
+        return;
+    }
+    bg_log_appendf("Local notes: %u (internal only)", (unsigned)files.size());
+    HalResult<NotesSyncSummary> r = notes_link_sync(
+        files, {"github"}, [](const std::string &l) { bg_log_appendf("  %s", l.c_str()); }, err);
+    if (!r) {
+        bg_log_appendf("[phone] failed: %s", err.empty() ? hal_error_string(r.error()) : err.c_str());
+        return;
+    }
+    bg_log_appendf("[phone] uploaded=%d already=%d errors=%u", r.value().uploaded,
+                   r.value().already, (unsigned)r.value().errors.size());
+}
+
+// Worker body: phone first, then (hardware only) the hub, else an error.
+static void notes_sync_worker()
+{
+    if (hw_link_connected()) {
+        run_phone_sync();
+#ifdef ARDUINO
+    } else if (hal::hub_is_enabled()) {
+        if (token_is_encrypted() && !notes_crypto_is_unlocked()) {
+            bg_log_append("ERR: Notes session locked. Open Notes and unlock.");
+        } else {
+            run_sync_bg();
+        }
+#endif
     } else {
-        run_sync_bg();
+        bg_log_append("ERR: Connect your phone (or set Settings " "\xC2\xBB" " Local Hub)");
     }
     bg_log_append("Done.");
     s_bg_done = true;
+}
+
+#ifdef ARDUINO
+static void notes_sync_bg_task(void *arg)
+{
+    (void)arg;
+    notes_sync_worker();
     s_bg_task = nullptr;
     vTaskDelete(NULL);
 }
-
-#endif  // ARDUINO
+#endif
 
 // --- UI -------------------------------------------------------------------
 
 static void back_btn_cb(lv_event_t *) { menu_show(); }
 
-#ifdef ARDUINO
-// LVGL timer: drains queued log lines from the background task and finalizes
-// once the task has exited. Runs inside `lv_timer_handler()` which already
-// holds the instance mutex, so direct reads of the shared queue are safe.
+// LVGL timer: drains queued log lines from the worker and finalizes once it
+// has exited. On hardware it runs inside `lv_timer_handler()`, which already
+// holds the instance mutex; the emulator takes s_log_mu for the swap.
 static void notes_sync_drain_tick(lv_timer_t *t)
 {
     (void)t;
-    if (!s_pending_log.empty()) {
-        std::vector<std::string> drained;
+    std::vector<std::string> drained;
+    {
+#ifndef ARDUINO
+        std::lock_guard<std::mutex> lock(s_log_mu);
+#endif
         drained.swap(s_pending_log);
+    }
+    if (!drained.empty()) {
         if (s_log_label) {
             // One label update (+ scroll) per tick regardless of how many
             // lines the bg task queued, instead of one per line.
@@ -418,7 +509,7 @@ static void notes_sync_drain_tick(lv_timer_t *t)
             log_append(batch.c_str());
         }
     }
-    if (s_bg_done && s_bg_task == nullptr) {
+    if (s_bg_done && !bg_running()) {
         s_bg_done = false;
         s_syncing = false;
         if (s_bg_timer) {
@@ -427,7 +518,6 @@ static void notes_sync_drain_tick(lv_timer_t *t)
         }
     }
 }
-#endif
 
 static void start_sync()
 {
@@ -437,12 +527,11 @@ static void start_sync()
     s_log_text.clear();
     if (s_log_label) lv_label_set_text(s_log_label, "");
     log_append("Starting sync...");
-#ifdef ARDUINO
     // Drop any leftover queue entries from a previous (cancelled-by-exit) run.
-    s_pending_log.clear();
+    bg_log_clear();
     s_bg_done = false;
 
-    if (s_bg_task != nullptr) {
+    if (bg_running()) {
         // A previous task is still finishing in the background. Adopt it
         // by starting the drain timer instead of spawning a duplicate.
         if (!s_bg_timer) {
@@ -451,6 +540,7 @@ static void start_sync()
         return;
     }
 
+#ifdef ARDUINO
     // 8 KB stack: HTTPS round-trip via mbedtls is the floor here — TLS
     // handshake plus cert chain easily eats 6 KB on its own.
     if (xTaskCreate(notes_sync_bg_task, "nsync_bg", 8192, nullptr, 2,
@@ -460,14 +550,25 @@ static void start_sync()
         s_syncing = false;
         return;
     }
+#else
+    // Emulator: no FreeRTOS; a detached thread plays the worker task (as in
+    // ui_chat).
+    s_bg_running = true;
+    try {
+        std::thread([] {
+            notes_sync_worker();
+            s_bg_running = false;
+        }).detach();
+    } catch (...) {
+        s_bg_running = false;
+        log_append("ERR: failed to start sync task");
+        s_syncing = false;
+        return;
+    }
+#endif
     if (!s_bg_timer) {
         s_bg_timer = lv_timer_create(notes_sync_drain_tick, 100, nullptr);
     }
-#else
-    log_append("Not supported on emulator.");
-    log_append("Done.");
-    s_syncing = false;
-#endif
 }
 
 static void enter(lv_obj_t *parent)
@@ -540,17 +641,15 @@ static void exit_cb(lv_obj_t *) {
     ui_hide_back_button();
     s_log_label = s_log_scroll = nullptr;
     s_log_text.clear();
-#ifdef ARDUINO
-    // Stop draining; the bg task (if any) is left to finish and self-delete.
-    // It only writes to the heap-backed log queue, never the UI tree, so it
-    // is safe to outlive the app instance. Drop queued log entries since
-    // there's no UI to render them into.
+    // Stop draining; the worker (if any) is left to finish and self-delete
+    // (or exit, on the emulator). It only writes to the heap-backed log
+    // queue, never the UI tree, so it is safe to outlive the app instance.
+    // Drop queued log entries since there's no UI to render them into.
     if (s_bg_timer) {
         lv_timer_del(s_bg_timer);
         s_bg_timer = nullptr;
     }
-    s_pending_log.clear();
-#endif
+    bg_log_clear();
     s_syncing = false;
 }
 
@@ -581,7 +680,8 @@ public:
         // encrypted but the session is still locked. ui_passphrase_unlock
         // is a no-op (fires the callback immediately) when crypto is
         // disabled or already unlocked, so the normal case costs nothing.
-        if (token_is_encrypted() && !notes_crypto_is_unlocked()) {
+        // Phone path needs no unlock (ciphertext travels as-is).
+        if (!hw_link_connected() && token_is_encrypted() && !notes_crypto_is_unlocked()) {
             ui_passphrase_unlock(on_unlocked_cb, parent);
         } else {
             start_sync();
