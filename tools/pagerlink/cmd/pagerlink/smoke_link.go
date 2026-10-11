@@ -22,7 +22,8 @@ import (
 // msg/reply/transcript/bytes; the call steps fill step/ok/code/msg/json; the sink
 // step fills step/ok/code/bytes/crc32; the notes steps fill step/ok/code/msg/
 // uploaded/already/errors/seeded; the tg steps fill step/op/ok/status/uplink/
-// count/unread_total/newest_id/marked_to/text_bytes/notified.
+// count/unread_total/newest_id/marked_to/text_bytes/notified; the weather step
+// fills step/ok/msg/city/hourly_count/daily_count.
 type testResult struct {
 	Step        string            `json:"step"`
 	OK          bool              `json:"ok"`
@@ -46,6 +47,9 @@ type testResult struct {
 	MarkedTo    int               `json:"marked_to"`
 	TextBytes   int               `json:"text_bytes"`
 	Notified    int               `json:"notified"`
+	City        string            `json:"city"`
+	HourlyCount int               `json:"hourly_count"`
+	DailyCount  int               `json:"daily_count"`
 }
 
 // sinkResult is what the test.sink.begin receiver goroutine reports: how many
@@ -193,6 +197,9 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 
 	// r. - s. weather.push + cache read-back (IOS_COMPANION_PLAN.md Track C 9).
 	pass = weatherPushSteps(c, timeout) && pass
+
+	// t. - u. weather.get via the pager's phone step (HUB_REMOVAL_PLAN.md H2.3).
+	pass = weatherGetSteps(c, timeout) && pass
 
 	return pass
 }

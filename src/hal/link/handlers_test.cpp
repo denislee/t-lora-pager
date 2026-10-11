@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "apps/telegram_test.h"
+#include "apps/weather_test.h"
 #include "hal/chat_link.h"
 #include "hal/link.h"
 #include "hal/link/fs_volume.h"
@@ -442,11 +443,42 @@ bool handle_test_weather_cache(const JsonObject &params, JsonWriter &result, Rpc
     return true;
 }
 
+/**
+ * test.weather.fetch {key} — run the Weather app's phone step (weather.get,
+ * key check, cache save; apps/weather_test.h) on a detached thread and report
+ * {step:"weather", ok, msg, city, hourly_count, daily_count} as
+ * evt.test.result. Answers {} at once, like test.callback.
+ */
+bool handle_test_weather_fetch(const JsonObject &params, JsonWriter &result, RpcError &err) {
+    (void)result;
+    std::string key;
+    if (!params.get_string("key", key) || key.empty()) {
+        err.code = hal_error_code(HalError::InvalidArgument);
+        err.msg = "key required";
+        return false;
+    }
+    std::thread([key] {
+        const apps::WeatherTestResult r = apps::weather_test_fetch(key);
+        JsonWriter w;
+        w.begin_object()
+            .key("step").str_val("weather")
+            .key("ok").bool_val(r.ok)
+            .key("msg").str_val(r.msg)
+            .key("city").str_val(r.city)
+            .key("hourly_count").int_val(r.hourly_count)
+            .key("daily_count").int_val(r.daily_count)
+            .end_object();
+        service_emit("evt.test.result", w.str());
+    }).detach();
+    return true;
+}
+
 }  // namespace
 
 void register_test_handlers(Rpc &rpc) {
     rpc.handle("test.callback", handle_test_callback);
     rpc.handle("test.weather.cache", handle_test_weather_cache);
+    rpc.handle("test.weather.fetch", handle_test_weather_fetch);
 }
 
 }  // namespace pagerlink

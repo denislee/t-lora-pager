@@ -226,7 +226,7 @@ the phone returns. `{"chat":"text"|"voice"}` runs a chat turn, and
 notes sync, and
 `{"tg":"chats"|"msgs"|"send"|"notify","bridge","token","chat_id"?,"text"?,"reset"?,"link_down"?}`
 runs one step of the Telegram worker code (list, open chat + mark-read, send,
-one unread-notifier tick). The outcome arrives as `evt.test.result`. `test.weather.cache` `{"key"}` (P→D) answers synchronously with the forecast the pager has cached under `key`, re-encoded as a ForecastPayload (§6.3), or ERR `not_found` (test-only code) when there is none.
+one unread-notifier tick). The outcome arrives as `evt.test.result`. `test.weather.cache` `{"key"}` (P→D) answers synchronously with the forecast the pager has cached under `key`, re-encoded as a ForecastPayload (§6.3), or ERR `not_found` (test-only code) when there is none. `test.weather.fetch` `{"key"}` runs the Weather app's phone step (`weather.get` → key check → cache save) and reports `{"step":"weather","ok","msg","city","hourly_count","daily_count"}` as `evt.test.result`.
 Hardware builds never register it (`src/hal/link/handlers_test.cpp`): it
 would let a phone make the pager call arbitrary methods.
 

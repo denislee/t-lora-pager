@@ -30,11 +30,16 @@
  * State reset on onStop (ui_weather_exit):
  *   widgets: hourly_col, daily_col, status_label
  *                                       — nulled (deleted with parent)
- *   timer:   s_gen_timer (1 s weather_cache_generation() poll that
- *            re-renders after a weather.push) — deleted, nulled
- *   job:     s_w_job (HTTPS fetcher + drain ticker, core::OneShotJob)
- *                                       — teardown(): drain killed, a running
+ *   timer:   s_gen_timer (100 ms: emulator worker drain + the
+ *            weather_cache_generation() poll that re-renders after a
+ *            weather.push)                — deleted, nulled
+ *   job:     s_w_job (hardware: direct HTTPS / phone-step fetcher + drain
+ *            ticker, core::OneShotJob)    — teardown(): drain killed, a running
  *                                          worker detached (frees its own result)
+ *   thread:  emulator phone-step worker (detached std::thread, s_emu_*)
+ *                                       — emu_job_teardown(): stops listening,
+ *                                          drops an undrained result; a running
+ *                                          worker frees its own result
  * If you add new cached LVGL pointers or a background task, list them
  * above AND extend ui_weather_exit() — see the file header note about
  * panel-inherited styles; the same hazard applies to leaked timers.
@@ -43,18 +48,26 @@
 #include "../hal/wireless.h"
 #include "../hal/system.h"
 #include "../hal/str_encode.h"
+#include "../hal/link.h"
 #include "../hal/weather_cache.h"
+#include "../hal/weather_link.h"
+#include "../hal/weather_payload.h"
 #include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
 #include "app_registry.h"
+#include "weather_test.h"
 #include "settings_internal.h"  // weather_city_match + the weather_* decls
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #ifdef ARDUINO
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#else
+#include <thread>
 #endif
 
 #ifdef ARDUINO
@@ -664,7 +677,6 @@ static bool fetch_weather(double lat, double lon, ForecastCache &out,
 
 #endif // ARDUINO
 
-#ifdef ARDUINO
 // What the worker hands back to the UI thread.
 struct WeatherFetchResult {
     bool          ok = false;          // `forecast` is valid → render it
@@ -673,15 +685,42 @@ struct WeatherFetchResult {
     lv_color_t    status_color;
 };
 
-// Background HTTP worker: geocode → forecast → save cache. Touches only its
-// arguments and the NVS caches, never the LVGL widget tree; the result is
-// heap-owned and freed by s_w_job after the UI thread renders it.
-static WeatherFetchResult *weather_fetch(const std::string &key,
-                                         const std::string &user_city)
+// "phone: timeout: …" (chat_link-style link error) → "timeout: …" so the
+// status reads "Phone: timeout: …" rather than repeating the prefix.
+static std::string strip_phone_prefix(const std::string &e)
 {
-    WeatherFetchResult *res = new WeatherFetchResult();
-    res->status_color = lv_palette_main(LV_PALETTE_RED);
+    static const char kPrefix[] = "phone: ";
+    if (e.compare(0, sizeof(kPrefix) - 1, kPrefix) == 0) return e.substr(sizeof(kPrefix) - 1);
+    return e;
+}
 
+// Worker side, phone step (HUB_REMOVAL_PLAN.md H2.3): weather.get for `key`.
+// A reply for another key is refused; a good one is saved (forecast, plus the
+// location when complete) and returned in `out`. Blocking.
+static bool phone_fetch(const std::string &key, WeatherPayload &out, std::string &err)
+{
+    std::string lerr;
+    HalResult<WeatherPayload> r = weather_link_get(key, lerr);
+    if (!r) {
+        err = strip_phone_prefix(lerr);
+        return false;
+    }
+    if (r.value().key != key) {
+        err = "reply for another location";
+        return false;
+    }
+    out = r.value();
+    weather_cache_save_forecast(key, out.fc);
+    if (out.has_geo) weather_cache_save_geo(key, out.geo);
+    return true;
+}
+
+#ifdef ARDUINO
+// Worker side, direct step: geocode → forecast → save cache. On failure
+// `status` holds the UI-ready error ("geo fail: …" / "forecast: …").
+static bool direct_fetch(const std::string &key, const std::string &user_city,
+                         ForecastCache &out, std::string &status)
+{
     std::string err;
     GeoData g;
     if (!weather_cache_load_geo(key, g)) {
@@ -696,19 +735,64 @@ static WeatherFetchResult *weather_fetch(const std::string &key,
             ok            = true;
         }
         if (!ok) {
-            res->status = "geo fail: " + (err.empty() ? std::string("err") : err);
-            return res;
+            status = "geo fail: " + (err.empty() ? std::string("err") : err);
+            return false;
         }
         weather_cache_save_geo(key, g);
     }
 
-    if (!fetch_weather(g.lat, g.lon, res->forecast, err)) {
-        res->status = "forecast: " + err;
+    if (!fetch_weather(g.lat, g.lon, out, err)) {
+        status = "forecast: " + err;
+        return false;
+    }
+    weather_cache_save_forecast(key, out);
+    return true;
+}
+#endif
+
+// Background worker (D-H6, direct first): the direct HTTPS path when
+// `try_direct` (hardware with Wi-Fi up); if that is unavailable or fails and
+// the phone is connected, the phone step. Touches only its arguments and the
+// caches, never the LVGL widget tree; the result is heap-owned and freed by
+// the drain after the UI thread renders it.
+static WeatherFetchResult *weather_fetch(const std::string &key,
+                                         const std::string &user_city,
+                                         bool try_direct)
+{
+    WeatherFetchResult *res = new WeatherFetchResult();
+    res->status_color = lv_palette_main(LV_PALETTE_RED);
+
+    std::string direct_status;
+#ifdef ARDUINO
+    if (try_direct) {
+        if (direct_fetch(key, user_city, res->forecast, direct_status)) {
+            res->ok = true;
+            res->status_color = UI_COLOR_MUTED;
+            return res;
+        }
+    }
+#else
+    (void)user_city;
+    (void)try_direct;
+#endif
+
+    if (hw_link_connected()) {
+        WeatherPayload p;
+        std::string err;
+        if (phone_fetch(key, p, err)) {
+            res->ok = true;
+            res->forecast = p.fc;
+            res->status = "via phone";
+            res->status_color = UI_COLOR_MUTED;
+        } else {
+            res->status = "Phone: " + err;
+        }
         return res;
     }
-    weather_cache_save_forecast(key, res->forecast);
-    res->ok = true;
-    res->status_color = UI_COLOR_MUTED;
+
+    res->status = direct_status.empty() ? std::string("Connect Wi-Fi or your phone.")
+                                        : direct_status;
+    if (direct_status.empty()) res->status_color = UI_COLOR_MUTED;
     return res;
 }
 
@@ -720,12 +804,83 @@ static void weather_fetch_done(WeatherFetchResult &r)
     set_status(r.status.c_str(), r.status_color);
 }
 
+#ifdef ARDUINO
 static core::OneShotJob<WeatherFetchResult> s_w_job(weather_fetch_done);
+#else
+// Emulator worker: OneShotJob runs inline there, which would block the LVGL
+// thread for up to WEATHER_GET_TIMEOUT_MS, so the phone step gets a detached
+// std::thread (like chat/Telegram) drained by s_gen_timer. The worker never
+// touches LVGL; s_emu_mu guards the hand-off.
+static std::mutex s_emu_mu;
+static std::atomic<bool> s_emu_running{false};
+static bool s_emu_listening = false;                 // guarded by s_emu_mu
+static WeatherFetchResult *s_emu_result = nullptr;   // guarded by s_emu_mu
+
+static bool emu_job_start(const std::string &key, const std::string &user_city)
+{
+    {
+        std::lock_guard<std::mutex> lk(s_emu_mu);
+        s_emu_listening = true;              // re-attach to a running worker
+    }
+    if (s_emu_running.exchange(true)) return true;
+    std::thread([key, user_city] {
+        WeatherFetchResult *res = weather_fetch(key, user_city, false);
+        {
+            std::lock_guard<std::mutex> lk(s_emu_mu);
+            if (s_emu_listening) {
+                delete s_emu_result;
+                s_emu_result = res;
+            } else {
+                delete res;                  // nobody is listening any more
+            }
+        }
+        s_emu_running = false;
+    }).detach();
+    return true;
+}
+
+// LVGL thread: deliver a finished result, if any.
+static void emu_job_drain()
+{
+    WeatherFetchResult *res = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(s_emu_mu);
+        res = s_emu_result;
+        s_emu_result = nullptr;
+    }
+    if (!res) return;
+    weather_fetch_done(*res);
+    delete res;
+}
+
+// LVGL thread (onStop): stop listening; drop an undrained result. A running
+// worker finishes on its own and frees its result.
+static void emu_job_teardown()
+{
+    std::lock_guard<std::mutex> lk(s_emu_mu);
+    s_emu_listening = false;
+    delete s_emu_result;
+    s_emu_result = nullptr;
+}
 #endif
 
-static void do_fetch()
+// True while this app's own fetch may still save to the cache or deliver.
+static bool fetch_in_flight()
 {
 #ifdef ARDUINO
+    return s_w_job.busy();
+#else
+    if (s_emu_running) return true;
+    std::lock_guard<std::mutex> lk(s_emu_mu);
+    return s_emu_result != nullptr;
+#endif
+}
+
+// Chain (D-H6): fresh cache → render; else Wi-Fi up → direct (hardware);
+// else / on direct failure, phone connected → weather.get; else the cache
+// (stale) or a hint.
+static void do_fetch()
+{
     std::string user_city = weather_get_user_city();
     std::string key = weather_cache_key(user_city);
 
@@ -741,7 +896,7 @@ static void do_fetch()
                        (uint32_t)now_t >= cache.ts &&
                        ((uint32_t)now_t - cache.ts) < WEATHER_FRESH_TTL_SEC;
 
-    // Fresh cache hit → pure NVS path, no WiFi, no HTTPS, no parsing a 5 KB
+    // Fresh cache hit → pure cache path, no WiFi, no HTTPS, no parsing a 5 KB
     // response. This is the whole point of the cache.
     if (cache_fresh) {
         render_cache(cache);
@@ -749,28 +904,34 @@ static void do_fetch()
         return;
     }
 
+#ifdef ARDUINO
     bool wifi_on = hw_get_wifi_enable();
     bool wifi_up = wifi_on && hw_get_wifi_connected();
+#else
+    bool wifi_up = false;  // the direct path is hardware-only
+#endif
+    bool link_up = hw_link_connected();
 
-    if (!wifi_up) {
+    if (!wifi_up && !link_up) {
         // No network. If we have *any* cache, show it — stale weather is far
-        // more useful than a blank panel. Otherwise fall back to the old
-        // error-only behavior.
+        // more useful than a blank panel.
         if (have_cache) {
             render_cache(cache);
+#ifdef ARDUINO
             set_status(wifi_on ? "Offline -- showing cached."
                                : "WiFi off -- showing cached.",
                        UI_COLOR_MUTED);
+#else
+            set_status("Offline -- showing cached.", UI_COLOR_MUTED);
+#endif
         } else {
             clear_all();
-            set_status(wifi_on ? "WiFi not connected."
-                               : "WiFi is off -- enable it in Settings.",
-                       UI_COLOR_MUTED);
+            set_status("Connect Wi-Fi or your phone.", UI_COLOR_MUTED);
         }
         return;
     }
 
-    // Have WiFi but the cache is missing or stale. Paint the stale cache
+    // Have a route but the cache is missing or stale. Paint the stale cache
     // under an "Updating..." banner so the user sees something instantly
     // while the bg fetch runs.
     if (have_cache) {
@@ -781,37 +942,31 @@ static void do_fetch()
         set_status("Fetching...", UI_COLOR_ACCENT);
     }
 
+#ifdef ARDUINO
     // A fetch still in flight (user re-tapped the panel or re-entered the
     // app) is re-attached rather than duplicated, so its result still lands.
     // 8 KB stack: Open-Meteo runs over HTTPS, and mbedtls TLS handshake
     // plus cert chain easily eats 6 KB on its own.
     auto started = s_w_job.start(
-        [key, user_city]() { return weather_fetch(key, user_city); },
+        [key, user_city, wifi_up]() { return weather_fetch(key, user_city, wifi_up); },
         8192, "wx_bg", 2);
     if (started == core::OneShotJob<WeatherFetchResult>::Start::Failed) {
         set_status("task spawn fail", lv_palette_main(LV_PALETTE_RED));
     }
 #else
-    clear_all();
-    set_status("Not supported on emulator.", UI_COLOR_MUTED);
+    emu_job_start(key, user_city);
 #endif
 }
 
-// True while this app's own fetch may still save to the cache.
-static bool fetch_in_flight()
-{
-#ifdef ARDUINO
-    return s_w_job.busy();
-#else
-    return false;
-#endif
-}
-
-// LVGL thread, 1 s: a forecast saved by someone else (weather.push) for the
-// key we display is re-rendered from the cache.
+// LVGL thread, 100 ms: (emulator) drain the phone-step worker; then, a
+// forecast saved by someone else (weather.push) for the key we display is
+// re-rendered from the cache.
 static void gen_poll_cb(lv_timer_t *t)
 {
     (void)t;
+#ifndef ARDUINO
+    emu_job_drain();
+#endif
     if (!hourly_col || fetch_in_flight()) return;
     const uint32_t gen = weather_cache_generation();
     if (gen == s_seen_gen) return;
@@ -906,7 +1061,7 @@ static void ui_weather_enter(lv_obj_t *parent)
 
     s_seen_gen = weather_cache_generation();
     do_fetch();
-    s_gen_timer = lv_timer_create(gen_poll_cb, 1000, nullptr);
+    s_gen_timer = lv_timer_create(gen_poll_cb, 100, nullptr);
 }
 
 static void ui_weather_exit(lv_obj_t *parent)
@@ -929,6 +1084,8 @@ static void ui_weather_exit(lv_obj_t *parent)
     // finished-but-undrained one is dropped so a re-entry doesn't render
     // stale data into a fresh panel.
     s_w_job.teardown();
+#else
+    emu_job_teardown();
 #endif
 }
 
@@ -949,6 +1106,21 @@ public:
 
 namespace apps {
 APP_FACTORY(make_weather_app, WeatherApp)
+
+#ifndef ARDUINO
+WeatherTestResult weather_test_fetch(const std::string &key)
+{
+    WeatherTestResult t;
+    WeatherPayload p;
+    t.ok = phone_fetch(key, p, t.msg);
+    if (t.ok) {
+        t.city = p.has_geo ? p.geo.location : std::string();
+        t.hourly_count = p.fc.hourly_count;
+        t.daily_count = p.fc.daily_count;
+    }
+    return t;
+}
+#endif
 } // namespace apps
 
 // Settings-facing helpers for the user-chosen weather city. Defined in this
