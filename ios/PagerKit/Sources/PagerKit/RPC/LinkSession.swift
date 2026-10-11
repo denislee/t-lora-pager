@@ -316,6 +316,7 @@ public actor LinkSession {
     /// `RPCError`: `internal` ("transfer failed"), `timeout` ("timeout") or
     /// `disconnected`. Mirrors the Go `Client.SendBytes`.
     public func sendBytes(xfer: UInt16, data: [UInt8], timeout: Duration) async throws {
+        if closed { throw RPCError.disconnected() }
         let transfer = Outbound()
         let sender = XferSender(
             size: UInt32(data.count), chunk: Xfer.maxDataChunk, start: 0,
@@ -405,6 +406,7 @@ public actor LinkSession {
 
     private func finishIncoming(_ xfer: UInt16, crc32: UInt32, timeout: Duration, label: String) async throws -> [UInt8] {
         defer { closeIncoming(xfer) }
+        if closed { throw RPCError.disconnected() }
         guard let transfer = inbound[xfer], let receiver = transfer.receiver else {
             throw RPCError.disconnected()
         }
