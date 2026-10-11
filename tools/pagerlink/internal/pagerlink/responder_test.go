@@ -13,6 +13,7 @@ import (
 	"hash/crc32"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -420,5 +421,81 @@ func TestEmit(t *testing.T) {
 	// An unmarshalable param fails before anything is sent.
 	if err := c.Emit("evt.bad", json.RawMessage("{")); err == nil {
 		t.Fatal("Emit with invalid params returned nil")
+	}
+}
+
+// TestSendBytesToPagerXfer drives SendBytes under a pager-allocated (odd) xfer
+// id, with the fake peer ACKing every DATA it decodes. This is the bulk-reply
+// direction: the pager started the transfer, the phone streams DATA at it.
+func TestSendBytesToPagerXfer(t *testing.T) {
+	const (
+		size = 10000
+		xfer = 33 // odd: allocated by the pager
+	)
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i*7 + 3)
+	}
+
+	clientEnd, peerEnd := net.Pipe()
+	peer := newFakePeer(t, peerEnd)
+	c := newClient(clientEnd)
+	defer c.Close()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- c.SendBytes(xfer, data, 5*time.Second) }()
+
+	// Read every DATA the client sends, in order, ACKing each one.
+	var got []byte
+	for len(got) < size {
+		m := peer.mustRecv(5 * time.Second)
+		if m.Type != Data || m.ID != xfer {
+			t.Fatalf("got type=%d id=%d, want DATA for %d", m.Type, m.ID, xfer)
+		}
+		off, chunk, ok := DecodeData(m.Payload)
+		if !ok {
+			t.Fatalf("DATA payload %d bytes: not decodable", len(m.Payload))
+		}
+		if off != uint32(len(got)) {
+			t.Fatalf("DATA offset = %d, want %d", off, len(got))
+		}
+		got = append(got, chunk...)
+		peer.send(Ack, xfer, EncodeAck(uint32(len(got)), InitialCredits))
+	}
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("SendBytes: %v", err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("peer got %d bytes, want %d identical", len(got), size)
+	}
+}
+
+// TestSendBytesTimeout has the peer stay silent: SendBytes must give up on its
+// idle ACK wait rather than block forever.
+func TestSendBytesTimeout(t *testing.T) {
+	clientEnd, peerEnd := net.Pipe()
+	newFakePeer(t, peerEnd) // reads and drops the DATA; never ACKs
+	c := newClient(clientEnd)
+	defer c.Close()
+
+	err := c.SendBytes(33, []byte("hello, pager"), 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "timeout") {
+		t.Fatalf("SendBytes = %v, want timeout", err)
+	}
+}
+
+// TestSendBytesZeroLength needs no ACK: a zero-byte transfer is Done at once.
+func TestSendBytesZeroLength(t *testing.T) {
+	clientEnd, peerEnd := net.Pipe()
+	peer := newFakePeer(t, peerEnd)
+	c := newClient(clientEnd)
+	defer c.Close()
+
+	if err := c.SendBytes(33, nil, time.Second); err != nil {
+		t.Fatalf("SendBytes zero-length: %v", err)
+	}
+	if m, ok := peer.recv(100 * time.Millisecond); ok {
+		t.Fatalf("zero-length send: peer got an unexpected message type=%d id=%d", m.Type, m.ID)
 	}
 }

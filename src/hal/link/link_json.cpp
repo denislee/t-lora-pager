@@ -410,4 +410,82 @@ bool JsonObject::get_object(const char *key, JsonObject &out) const
     return out.parse(raw);
 }
 
+// ---------------------------------------------------------------------------
+// json_array_items
+// ---------------------------------------------------------------------------
+
+bool json_array_items(const std::string &text, std::vector<std::string> &out)
+{
+    out.clear();
+
+    /* Validate the whole text as exactly one JSON array by embedding it as the
+     * value of an object member, so we reuse the complete JsonObject::parse
+     * rules (escapes, depth limit, trailing-garbage rejection). */
+    std::string wrapped = "{\"a\":";
+    wrapped += text;
+    wrapped += "}";
+
+    JsonObject obj;
+    if (!obj.parse(wrapped)) return false;
+
+    std::string raw;
+    if (!obj.get_raw("a", raw)) return false;
+    if (raw.empty() || raw[0] != '[') return false;
+    /* The member must be the whole input: `[1],"b":[2]` also wraps validly. */
+    const size_t lead = text.find_first_not_of(" \t\r\n");
+    if (lead == std::string::npos || text.compare(lead, raw.size(), raw) != 0 ||
+        text.find_first_not_of(" \t\r\n", lead + raw.size()) != std::string::npos) {
+        return false;
+    }
+
+    /* Record the raw bytes [b, e) as one element, trimming surrounding
+     * spaces/tabs/CR/LF. An empty span records nothing (empty array case). */
+    auto emit = [&out, &raw](size_t b, size_t e) {
+        while (b < e) {
+            const char c = raw[b];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') ++b;
+            else break;
+        }
+        while (e > b) {
+            const char c = raw[e - 1];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') --e;
+            else break;
+        }
+        if (e > b) out.push_back(raw.substr(b, e - b));
+    };
+
+    /* Walk raw[1 ..] tracking nesting of [ { vs ] } and whether we are inside
+     * a string; a backslash inside a string skips the next byte. A comma at
+     * depth 0 outside strings ends the current element, and the matching ']'
+     * at depth 0 (only one is possible, the input already validated) ends the
+     * array. */
+    int    depth = 0;
+    bool   in_string = false;
+    size_t start = 1;
+    for (size_t i = 1; i < raw.size(); ++i) {
+        const char c = raw[i];
+        if (in_string) {
+            if (c == '\\')       ++i;         /* skip the escaped byte */
+            else if (c == '"')   in_string = false;
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '[' || c == '{') {
+            ++depth;
+        } else if (c == ']' || c == '}') {
+            if (depth == 0) {
+                if (c != ']') return false;   /* stray close bracket */
+                emit(start, i);
+                return true;
+            }
+            --depth;
+        } else if (c == ',' && depth == 0) {
+            emit(start, i);
+            start = i + 1;
+        }
+    }
+    return false; /* no matching final ']' */
+}
+
 }  // namespace pagerlink

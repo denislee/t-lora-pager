@@ -73,6 +73,27 @@ struct State {
         uint32_t last_acked; /* acked() at that last progress */
     };
     std::vector<Outbound> outbound;
+
+    /* Inbound (phone -> pager) bulk into memory, opened by service_accept_open().
+     * The pager allocated the odd xfer id; the phone streams DATA after it
+     * announced {xfer,size,crc32}. DATA arriving before service_accept_expect()
+     * sets the size is kept in `early` and replayed. */
+    struct Inbound {
+        uint16_t xfer;
+        uint32_t max_size;
+        std::vector<std::string> early; /* DATA payloads before expect() */
+        size_t early_bytes;             /* sum of early payload sizes */
+        bool expecting;                 /* expect() ran; rx is live */
+        bool failed;                    /* overflowed before expect() */
+        uint32_t crc;                   /* expected CRC-32 of the whole body */
+        std::string buf;                /* reassembled bytes */
+        std::unique_ptr<XferReceiver> rx;
+        std::function<void(bool, std::string &)> done;
+        uint32_t last_ms;  /* steady_ms() at expect() or the last DATA */
+        uint32_t stall_ms; /* no-DATA timeout checked by service_tick() */
+    };
+    std::vector<Inbound> inbound;
+    uint16_t next_inbound_id = 32769; /* odd; fs.write counts up from 1 */
 };
 
 State &state() {
@@ -125,6 +146,88 @@ void outbound_reset() {
     while (!state().outbound.empty()) {
         finish_outbound(0, false);
     }
+}
+
+/** Index of inbound receiver `xfer`, or -1. */
+long inbound_find(uint16_t xfer) {
+    State &s = state();
+    for (size_t i = 0; i < s.inbound.size(); ++i) {
+        if (s.inbound[i].xfer == xfer) return static_cast<long>(i);
+    }
+    return -1;
+}
+
+/**
+ * Finish inbound receiver `i` that has a waiter: verify, take the callback and
+ * the bytes, and leave the entry in place (spent) for service_accept_close().
+ * Runs with g_mutex held.
+ */
+void finish_inbound(size_t i, bool ok) {
+    State &s = state();
+    State::Inbound &in = s.inbound[i];
+    if (ok) {
+        const uint32_t got = crc32_update(0, reinterpret_cast<const uint8_t *>(in.buf.data()),
+                                          in.buf.size());
+        if (got != in.crc) {
+            LINK_LOG("accept crc mismatch id=%u", static_cast<unsigned>(in.xfer));
+            ok = false;
+        }
+    }
+    std::function<void(bool, std::string &)> done = std::move(in.done);
+    in.done = nullptr;
+    in.rx.reset();
+    std::string bytes;
+    bytes.swap(in.buf);
+    LINK_LOG("accept %s id=%u size=%u", ok ? "done" : "failed", static_cast<unsigned>(in.xfer),
+             static_cast<unsigned>(bytes.size()));
+    if (!ok) bytes.clear();
+    if (done) done(ok, bytes);
+}
+
+/** Fail every waiting inbound receiver and drop them all (disconnect). */
+void inbound_reset() {
+    State &s = state();
+    for (size_t i = 0; i < s.inbound.size(); ++i) {
+        if (s.inbound[i].done) finish_inbound(i, false);
+    }
+    s.inbound.clear();
+}
+
+/** Feed one DATA payload to a live receiver and finish it on Done/Failed. */
+void inbound_feed(size_t i, const uint8_t *payload, size_t len) {
+    State::Inbound &in = state().inbound[i];
+    if (!in.rx || !in.done) return;
+    in.last_ms = steady_ms();
+    const XferState st = in.rx->on_data(payload, len);
+    if (st == XferState::Done) {
+        finish_inbound(i, true);
+    } else if (st == XferState::Failed) {
+        finish_inbound(i, false);
+    }
+}
+
+/** Route a DATA to an inbound receiver; returns false when the id is not ours. */
+bool inbound_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
+    const long idx = inbound_find(xfer);
+    if (idx < 0) return false;
+    if (type != MsgType::Data) return true; /* an ACK on a download: ignore */
+    State::Inbound &in = state().inbound[static_cast<size_t>(idx)];
+    if (in.expecting) {
+        inbound_feed(static_cast<size_t>(idx), payload, len);
+        return true;
+    }
+    if (in.failed) return true;
+    /* Not expecting yet: buffer, bounded by max_size plus one chunk's header. */
+    if (in.early_bytes + len > static_cast<size_t>(in.max_size) + 4 * (in.early.size() + 1)) {
+        LINK_LOG("accept overflow id=%u", static_cast<unsigned>(xfer));
+        in.failed = true;
+        in.early.clear();
+        in.early_bytes = 0;
+        return true;
+    }
+    in.early.emplace_back(reinterpret_cast<const char *>(payload), len);
+    in.early_bytes += len;
+    return true;
 }
 
 /** Route an ACK to an outbound transfer; anything else is not ours. */
@@ -194,6 +297,7 @@ void service_on_connect(const TransportOps &ops) {
     if (s.rpc) {
         s.connected = false; /* done() callbacks must not start a new transfer */
         outbound_reset();
+        inbound_reset();
         fs_reset();
         s.total_resets += s.rpc->stats().link_resets;
         s.total_malformed += s.rpc->stats().malformed;
@@ -236,7 +340,8 @@ void service_on_connect(const TransportOps &ops) {
     /* Bulk passthrough: the fs.* transfers claim their ids first; everything
      * else may be an outbound transfer the pager started. */
     s.rpc->on_bulk([](MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
-        if (!fs_on_bulk(type, xfer, payload, len)) {
+        if (!fs_on_bulk(type, xfer, payload, len) &&
+            !inbound_on_bulk(type, xfer, payload, len)) {
             outbound_on_bulk(type, xfer, payload, len);
         }
     });
@@ -287,6 +392,7 @@ void service_on_disconnect() {
 
     s.connected = false; /* refuse new calls; done() must not restart a transfer */
     outbound_reset();
+    inbound_reset();
 
     if (s.rpc) {
         fs_reset();
@@ -319,6 +425,15 @@ void service_tick() {
             finish_outbound(i, false); /* erases index i; do not advance */
         } else {
             ++i;
+        }
+    }
+
+    /* Inbound receivers with a waiter that saw no DATA for their stall window fail. */
+    for (size_t i = 0; i < s.inbound.size(); ++i) {
+        State::Inbound &in = s.inbound[i];
+        if (in.done && static_cast<uint32_t>(now - in.last_ms) > in.stall_ms) {
+            LINK_LOG("accept stalled id=%u", static_cast<unsigned>(in.xfer));
+            finish_inbound(i, false); /* entry stays (spent) until close */
         }
     }
 
@@ -441,6 +556,105 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
         finish_outbound(i, false);
     }
     return true; /* true even when done already ran */
+}
+
+uint16_t service_accept_open(uint32_t max_size) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    State &s = state();
+    if (!s.connected || !s.rpc) {
+        return 0;
+    }
+    uint16_t id = s.next_inbound_id;
+    size_t tries = 0;
+    while (inbound_find(id) >= 0 || fs_owns_xfer(id)) {
+        id = (id == 65535) ? 1 : static_cast<uint16_t>(id + 2);
+        if (++tries > 32768) return 0;
+    }
+    s.next_inbound_id = (id == 65535) ? 1 : static_cast<uint16_t>(id + 2);
+
+    State::Inbound in;
+    in.xfer = id;
+    in.max_size = max_size;
+    in.early_bytes = 0;
+    in.expecting = false;
+    in.failed = false;
+    in.crc = 0;
+    in.last_ms = steady_ms();
+    in.stall_ms = 0;
+    s.inbound.push_back(std::move(in));
+    LINK_LOG("accept open id=%u max=%u", static_cast<unsigned>(id),
+             static_cast<unsigned>(max_size));
+    return id;
+}
+
+bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_t stall_ms,
+                           std::function<void(bool ok, std::string &bytes)> done) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    State &s = state();
+    const long idx = inbound_find(xfer);
+    if (idx < 0) return false;
+    const size_t i = static_cast<size_t>(idx);
+    if (s.inbound[i].expecting) return false;
+
+    State::Inbound &in = s.inbound[i];
+    in.expecting = true;
+    in.done = std::move(done);
+    in.crc = crc32;
+    in.stall_ms = stall_ms;
+    in.last_ms = steady_ms();
+    if (in.failed || size > in.max_size || !s.connected || !s.rpc) {
+        finish_inbound(i, false);
+        return true;
+    }
+    in.buf.clear();
+    in.buf.reserve(size);
+    in.rx.reset(new XferReceiver(
+        size,
+        [xfer](uint32_t off, const uint8_t *bytes, size_t n) -> bool {
+            const long k = inbound_find(xfer);
+            if (k < 0) return false;
+            std::string &b = state().inbound[static_cast<size_t>(k)].buf;
+            if (off != b.size()) return false;
+            b.append(reinterpret_cast<const char *>(bytes), n);
+            return true;
+        },
+        [xfer](const std::string &payload) -> bool {
+            State &st = state();
+            return st.rpc && st.rpc->send_bulk(MsgType::Ack, xfer, payload);
+        },
+        INITIAL_CREDITS, 4, 0));
+    LINK_LOG("accept expect id=%u size=%u early=%u", static_cast<unsigned>(xfer),
+             static_cast<unsigned>(size), static_cast<unsigned>(in.early.size()));
+
+    if (in.rx->state() == XferState::Done) { /* zero-length body */
+        finish_inbound(i, true);
+        return true;
+    }
+    /* Replay what arrived before we knew the size. Re-find by id each time: a
+     * finish leaves the entry in place, but stay defensive. */
+    std::vector<std::string> early;
+    early.swap(in.early);
+    in.early_bytes = 0;
+    for (const std::string &p : early) {
+        const long k = inbound_find(xfer);
+        if (k < 0 || !s.inbound[static_cast<size_t>(k)].done) break;
+        inbound_feed(static_cast<size_t>(k), reinterpret_cast<const uint8_t *>(p.data()),
+                     p.size());
+    }
+    return true;
+}
+
+void service_accept_close(uint16_t xfer) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    const long idx = inbound_find(xfer);
+    if (idx < 0) return;
+    State &s = state();
+    s.inbound.erase(s.inbound.begin() + idx);
+}
+
+bool service_accept_owns(uint16_t xfer) {
+    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    return inbound_find(xfer) >= 0;
 }
 
 bool service_emit(const std::string &event, const std::string &params_json) {

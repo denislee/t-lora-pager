@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "apps/telegram_test.h"
 #include "hal/chat_link.h"
 #include "hal/link.h"
 #include "hal/link/fs_volume.h"
@@ -212,6 +213,32 @@ void run_notes_step(const std::string &mode) {
 }
 
 /**
+ * Telegram step of test.callback: run one apps::tg_test_step() against the
+ * phone's stub bridge and report {step:"tg", op, ok, status, uplink, count,
+ * unread_total, newest_id, marked_to, text_bytes, notified} as evt.test.result.
+ */
+void run_tg_step(const std::string &op, const std::string &bridge, const std::string &token,
+                 long long chat_id, const std::string &text, bool reset, bool link_down) {
+    const apps::TgTestResult r =
+        apps::tg_test_step(op, bridge, token, chat_id, text, reset, link_down);
+    JsonWriter w;
+    w.begin_object()
+        .key("step").str_val("tg")
+        .key("op").str_val(op)
+        .key("ok").bool_val(r.ok)
+        .key("status").str_val(r.status)
+        .key("uplink").str_val(r.uplink)
+        .key("count").int_val(r.count)
+        .key("unread_total").int_val(r.unread_total)
+        .key("newest_id").int_val(r.newest_id)
+        .key("marked_to").int_val(r.marked_to)
+        .key("text_bytes").int_val(r.text_bytes)
+        .key("notified").int_val(r.notified)
+        .end_object();
+    service_emit("evt.test.result", w.str());
+}
+
+/**
  * test.callback — drive one pager-initiated exchange from the phone and report
  * the outcome back as evt.test.result. Exactly one of:
  *   method + params + timeout_ms -> call `method` and report the result.
@@ -223,6 +250,9 @@ void run_notes_step(const std::string &mode) {
  *   notes:"github"|"phone"       -> seed /notes on int+sd, run the notes sync
  *                                   (github) or copy-to-phone path, report
  *                                   counts + seeded bytes (hex).
+ *   tg:"chats"|"msgs"|"send"|"notify" + bridge + token [+ chat_id, text,
+ *                                   reset, link_down] -> one Telegram worker
+ *                                   step (apps/telegram_test.h).
  * The work runs on a detached thread so the RES can answer immediately; the
  * phone then observes the follow-up evt.test.result.
  */
@@ -238,10 +268,32 @@ bool handle_test_callback(const JsonObject &params, JsonWriter &result, RpcError
     const bool has_chat = params.get_string("chat", chat);
     std::string notes;
     const bool has_notes = params.get_string("notes", notes);
-    if (int(has_method) + int(has_sink) + int(has_chat) + int(has_notes) != 1) {
+    std::string tg;
+    const bool has_tg = params.get_string("tg", tg);
+    if (int(has_method) + int(has_sink) + int(has_chat) + int(has_notes) + int(has_tg) != 1) {
         err.code = hal_error_code(HalError::InvalidArgument);
-        err.msg = "exactly one of method/sink/chat/notes";
+        err.msg = "exactly one of method/sink/chat/notes/tg";
         return false;
+    }
+    if (has_tg) {
+        std::string bridge, token, text;
+        int64_t chat_id = 0;
+        bool reset = false, link_down = false;
+        if ((tg != "chats" && tg != "msgs" && tg != "send" && tg != "notify") ||
+            !params.get_string("bridge", bridge) || !params.get_string("token", token) ||
+            (params.has("chat_id") && !params.get_int("chat_id", chat_id)) ||
+            (params.has("text") && !params.get_string("text", text)) ||
+            (params.has("reset") && !params.get_bool("reset", reset)) ||
+            (params.has("link_down") && !params.get_bool("link_down", link_down))) {
+            err.code = hal_error_code(HalError::InvalidArgument);
+            err.msg = "bad tg params";
+            return false;
+        }
+        std::thread([tg, bridge, token, chat_id, text, reset, link_down] {
+            run_tg_step(tg, bridge, token, static_cast<long long>(chat_id), text, reset,
+                        link_down);
+        }).detach();
+        return true;
     }
     if (has_chat && chat != "text" && chat != "voice") {
         err.code = hal_error_code(HalError::InvalidArgument);

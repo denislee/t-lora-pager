@@ -21,21 +21,31 @@ import (
 // testResult is the evt.test.result payload. The chat steps fill step/ok/code/
 // msg/reply/transcript/bytes; the call steps fill step/ok/code/msg/json; the sink
 // step fills step/ok/code/bytes/crc32; the notes steps fill step/ok/code/msg/
-// uploaded/already/errors/seeded.
+// uploaded/already/errors/seeded; the tg steps fill step/op/ok/status/uplink/
+// count/unread_total/newest_id/marked_to/text_bytes/notified.
 type testResult struct {
-	Step       string            `json:"step"`
-	OK         bool              `json:"ok"`
-	Code       string            `json:"code"`
-	Msg        string            `json:"msg"`
-	JSON       json.RawMessage   `json:"json"`
-	Bytes      int               `json:"bytes"`
-	CRC32      uint32            `json:"crc32"`
-	Reply      string            `json:"reply"`
-	Transcript string            `json:"transcript"`
-	Uploaded   int               `json:"uploaded"`
-	Already    int               `json:"already"`
-	Errors     int               `json:"errors"`
-	Seeded     map[string]string `json:"seeded"`
+	Step        string            `json:"step"`
+	OK          bool              `json:"ok"`
+	Code        string            `json:"code"`
+	Msg         string            `json:"msg"`
+	JSON        json.RawMessage   `json:"json"`
+	Bytes       int               `json:"bytes"`
+	CRC32       uint32            `json:"crc32"`
+	Reply       string            `json:"reply"`
+	Transcript  string            `json:"transcript"`
+	Uploaded    int               `json:"uploaded"`
+	Already     int               `json:"already"`
+	Errors      int               `json:"errors"`
+	Seeded      map[string]string `json:"seeded"`
+	Op          string            `json:"op"`
+	Status      string            `json:"status"`
+	Uplink      string            `json:"uplink"`
+	Count       int               `json:"count"`
+	UnreadTotal int               `json:"unread_total"`
+	NewestID    int               `json:"newest_id"`
+	MarkedTo    int               `json:"marked_to"`
+	TextBytes   int               `json:"text_bytes"`
+	Notified    int               `json:"notified"`
 }
 
 // sinkResult is what the test.sink.begin receiver goroutine reports: how many
@@ -45,8 +55,8 @@ type sinkResult struct {
 	err error
 }
 
-// smokeLink drives the eight pager-initiated steps and reports each. c is the
-// live client returned by smokeFS.
+// smokeLink drives the seventeen pager-initiated steps and reports each. c is
+// the live client returned by smokeFS.
 func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	pass := true
 	sinkCh := make(chan sinkResult, 1)
@@ -80,6 +90,10 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	c.Handle("chat.audio.begin", phone.chatAudioBegin)
 	c.Handle("chat.ask", phone.chatAsk)
 	c.Handle("notes.sync", phone.notesSync)
+	c.Handle("tg.chats", phone.tgChats)
+	c.Handle("tg.messages", phone.tgMessages)
+	c.Handle("tg.read", phone.tgRead)
+	c.Handle("tg.send", phone.tgSend)
 
 	// a. A pager-initiated RPC end to end.
 	r, ok := linkStep(c, timeout, map[string]any{
@@ -173,6 +187,148 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	pass = report(notesStep(c, timeout, phone, "phone", map[string]string{
 		"a-plain.txt": "int/a-plain.txt", "b-shared.txt": "int/b-shared.txt", "c-secret.txt": "int/c-secret.txt", "d-sdonly.txt": "sd/d-sdonly.txt",
 	}, 4), "pager->phone notes.sync phone: internal + SD, internal wins the duplicate") && pass
+
+	// i. - q. The Telegram via the phone steps (HUB_REMOVAL_PLAN.md H2.6).
+	pass = tgSteps(c, timeout, phone) && pass
+
+	return pass
+}
+
+// tgSteps runs the Telegram-via-the-phone steps (HUB_REMOVAL_PLAN.md H2.6): the
+// pager runs ui_telegram's worker code through test.callback {tg}; the mock
+// phone's stub bridge answers. Each step is reported like the others.
+func tgSteps(c *pagerlink.Client, timeout time.Duration, phone *mockPhone) bool {
+	pass := true
+	const bridge = "http://stub-bridge.invalid"
+	const token = "tok"
+
+	// tg runs one test.callback {tg:…} step, filling in the stub bridge and
+	// token the pager forwards to the phone. ok is false on a transport failure
+	// or when the step was not the tg hook.
+	tg := func(params map[string]any) (testResult, bool) {
+		params["bridge"] = bridge
+		if _, has := params["token"]; !has {
+			params["token"] = token
+		}
+		r, ok := linkStep(c, timeout, params)
+		if !ok || r.Step != "tg" {
+			return r, false
+		}
+		return r, true
+	}
+
+	// i. The pager lists the phone's chats through the stub bridge.
+	r, ok := tg(map[string]any{"tg": "chats"})
+	if ok && !(r.OK && r.Status == "via phone" && r.Uplink == "phone" && r.Count == 3 && r.UnreadTotal == 3) {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone tg.chats: 3 chats, 3 unread, status \"via phone\"") && pass
+
+	// j. A bad token makes the bridge answer 401.
+	r, ok = tg(map[string]any{"tg": "chats", "token": "bad"})
+	if ok && !(!r.OK && r.Status == "HTTP 401") {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone tg.chats bad token -> unauthorized -> \"HTTP 401\"") && pass
+
+	// k. A non-integer chat_id is rejected before it reaches the bridge.
+	r, ok = linkStep(c, timeout, map[string]any{
+		"method": "tg.messages",
+		"params": map[string]any{"bridge": bridge, "token": token, "chat_id": "-100200", "limit": 20},
+	})
+	if ok && !(r.Step == "call" && !r.OK && r.Code == "invalid_argument") {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone tg.messages non-integer chat_id -> invalid_argument") && pass
+
+	// l. A reply over 4096 B streams as DATA; all 20 messages parse and the chat
+	//    is marked read up to the newest id.
+	bulkBefore := phone.tgBulk()
+	wantN, wantBytes, wantNewest := phone.tgExpect(-100200, 20)
+	r, ok = tg(map[string]any{"tg": "msgs", "chat_id": -100200})
+	if ok && !(r.OK && wantN == 20 && wantBytes > 4096 && r.Count == wantN && r.TextBytes == wantBytes &&
+		r.NewestID == wantNewest && r.MarkedTo == wantNewest && phone.tgBulk() == bulkBefore+1 &&
+		phone.tgLastRead(-100200) == wantNewest) {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       want N=%d bytes=%d newest=%d\n", wantN, wantBytes, wantNewest)
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone tg.messages bulk >4096 B (DATA to the pager): all 20 messages parsed, mark-read") && pass
+
+	// m. Sending appends an outgoing message to the chat.
+	r, ok = tg(map[string]any{"tg": "send", "chat_id": 101, "text": "hi from pager"})
+	last := phone.tgLastMsg(101)
+	if ok && !(r.OK && r.Status == "Sent" && last.Text == "hi from pager" && last.Out) {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone tg.send appends to the chat") && pass
+
+	// n. Opening a chat inline carries the messages and the read marker zeroes
+	//    the unread count.
+	wantN, _, wantNewest = phone.tgExpect(101, 20)
+	r, ok = tg(map[string]any{"tg": "msgs", "chat_id": 101})
+	if ok && !(r.OK && r.Status == "via phone" && r.Count == wantN && r.MarkedTo == wantNewest &&
+		phone.tgUnread(101) == 0 && phone.tgLastRead(101) == wantNewest) {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone open chat inline + tg.read zeroes unread") && pass
+
+	// o. Regression test (H2.6): with Wi-Fi down and the link up, exactly one new
+	//    message fires the notifier once, and only once.
+	r, ok = tg(map[string]any{"tg": "notify", "reset": true})
+	if ok && !(r.OK && r.Notified == 0 && r.Uplink == "phone") {
+		ok = false
+	}
+	if ok {
+		phone.tgAddIncoming(303, "ping 1")
+		r, ok = tg(map[string]any{"tg": "notify"})
+		if ok && !(r.OK && r.Notified == 1) {
+			ok = false
+		}
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "notifier, Wi-Fi down + link up: a new message fires exactly once") && pass
+
+	// p. With no new message the notifier stays silent, deduping the earlier one.
+	r, ok = tg(map[string]any{"tg": "notify"})
+	if ok && !(r.OK && r.Notified == 0) {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "notifier: no new message -> silent (dedup)") && pass
+
+	// q. With the link down too, a new message stays quiet and the status is
+	//    "Offline".
+	phone.tgAddIncoming(303, "ping 2")
+	r, ok = tg(map[string]any{"tg": "notify", "link_down": true})
+	if ok && !(!r.OK && r.Notified == 0 && r.Status == "Offline" && r.Uplink == "none") {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "notifier, link down too: silent, status \"Offline\"") && pass
 
 	return pass
 }

@@ -77,6 +77,37 @@ HwLinkResult hw_link_call(const char *method, const std::string &params_json,
 bool hw_link_send_bytes(uint16_t xfer, const uint8_t *data, size_t len,
                         uint32_t stall_ms = 10000);
 
+/*
+ * Phone -> pager bulk into memory (PROTOCOL.md §4: the receiver allocates the
+ * transfer id, so the pager's ids are odd). For a request whose answer may be
+ * too big for a RES (4096 B): open a receiver, send its id as "xfer" in the
+ * request params, and if the phone answers {xfer,size,crc32} instead of an
+ * inline result, wait for the bytes. Close on every exit path.
+ *
+ *   uint16_t x = hw_link_accept_open(64 * 1024);
+ *   ... hw_link_call(method, params-with-"xfer":x) ...
+ *   ... if the RES is {xfer,size,crc32}: hw_link_accept_wait(x, size, crc, out) ...
+ *   hw_link_accept_close(x);
+ *
+ * DATA that arrives before hw_link_accept_wait() (it can overtake the waiter
+ * being woken by the RES) is buffered and replayed. Same threading rules as
+ * hw_link_call(): accept_wait blocks.
+ */
+
+// Allocate an odd transfer id and install a memory receiver accepting at most
+// `max_size` bytes. Returns 0 when no phone is connected or no id is free.
+uint16_t hw_link_accept_open(uint32_t max_size);
+
+// Wait until the `size` bytes the phone announced for `xfer` have arrived and
+// their CRC-32/ISO-HDLC equals `crc32`; true moves them into `out`. False on a
+// size above the open's max, a CRC mismatch, a stall (no DATA for `stall_ms`),
+// a disconnect, or an unknown id. Call at most once per open.
+bool hw_link_accept_wait(uint16_t xfer, uint32_t size, uint32_t crc32, std::string &out,
+                         uint32_t stall_ms = 10000);
+
+// Drop the receiver (and anything it buffered). Unknown ids are ignored.
+void hw_link_accept_close(uint16_t xfer);
+
 // Subscribe to a phone event (e.g. "evt.notes.sync"). `fn` receives the event's
 // params as JSON object text and runs on the link task: copy what you need and
 // return — no LVGL calls, no blocking, no hw_link_call. Returns a token (> 0).

@@ -105,3 +105,40 @@ int hw_link_subscribe(const char *event, HwLinkEventFn fn) {
 }
 
 void hw_link_unsubscribe(int token) { pagerlink::service_unsubscribe(token); }
+
+uint16_t hw_link_accept_open(uint32_t max_size) { return pagerlink::service_accept_open(max_size); }
+
+bool hw_link_accept_wait(uint16_t xfer, uint32_t size, uint32_t crc32, std::string &out,
+                         uint32_t stall_ms) {
+    struct AcceptWait {
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+        bool ok = false;
+        std::string bytes;
+    };
+    /* No std::make_shared: the hardware toolchain targets C++11. */
+    std::shared_ptr<AcceptWait> w(new AcceptWait);
+    const bool started = pagerlink::service_accept_expect(
+        xfer, size, crc32, stall_ms, [w](bool ok, std::string &bytes) {
+            std::lock_guard<std::mutex> lock(w->m);
+            w->ok = ok;
+            w->bytes.swap(bytes);
+            w->done = true;
+            w->cv.notify_all();
+        });
+    if (!started) {
+        return false;
+    }
+
+    /* The service guarantees done (all bytes + CRC check, stall, disconnect),
+     * so no guard is needed here — the same contract as hw_link_send_bytes(). */
+    std::unique_lock<std::mutex> lock(w->m);
+    w->cv.wait(lock, [w] { return w->done; });
+    if (w->ok) {
+        out.swap(w->bytes);
+    }
+    return w->ok;
+}
+
+void hw_link_accept_close(uint16_t xfer) { pagerlink::service_accept_close(xfer); }

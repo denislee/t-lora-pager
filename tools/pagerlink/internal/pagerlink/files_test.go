@@ -25,6 +25,7 @@ type fakeConfig struct {
 	readData    map[string][]byte // path -> bytes fs.read serves
 	crcOverride map[string]uint32 // path -> CRC reported instead of the real one
 	failBegin   bool              // answer fs.write.begin with ERR invalid_argument
+	dropData    bool              // ignore upload DATA (never ACK), to stall WriteFile
 }
 
 // fakeXfer is one live transfer on the fake pager.
@@ -237,6 +238,9 @@ func (f *fakePager) onWriteBegin(reqID uint16, params json.RawMessage) {
 }
 
 func (f *fakePager) handleData(msg Message) {
+	if f.cfg.dropData {
+		return
+	}
 	x, ok := f.xfers[msg.ID]
 	if !ok || !x.upload || x.rx == nil {
 		return
@@ -362,6 +366,36 @@ func TestWriteFileError(t *testing.T) {
 	}
 	if re.Code != "invalid_argument" {
 		t.Fatalf("WriteFile code = %q, want invalid_argument", re.Code)
+	}
+}
+
+func TestWriteFileTimeoutAborts(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	f := newFakePager(t, serverEnd, fakeConfig{dropData: true})
+	c := newClient(clientEnd)
+	defer c.Close()
+
+	// More than the initial credit window, so the sender must wait for an ACK
+	// the fake pager never sends.
+	data := make([]byte, 20*MaxDataChunk)
+	err := c.WriteFile("int", "/x.bin", data, false, 100*time.Millisecond)
+	if err == nil || err.Error() != "fs.write: timeout" {
+		t.Fatalf("WriteFile error = %v, want fs.write: timeout", err)
+	}
+
+	// The abort RPC arrives asynchronously; poll for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		n := len(f.aborts)
+		f.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake pager saw no fs.write.abort")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

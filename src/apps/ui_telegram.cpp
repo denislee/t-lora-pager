@@ -1,12 +1,19 @@
 /**
  * @file      ui_telegram.cpp
- * @brief     Telegram client via tg-bridge (HTTPS + bearer).
+ * @brief     Telegram client via tg-bridge (HTTPS + bearer), direct or via
+ *            the phone.
  *
  * Single-account polling client. The bridge (a Go service the user runs on
  * a Raspberry Pi or VPS) holds the MTProto session; this app only speaks
  * a narrow JSON/bearer API to it. No WebSocket client on-device — we poll
  * /v1/chats and /v1/chats/{id}/messages on an LVGL timer while the
  * relevant view is open.
+ *
+ * Uplink (tg_uplink(), HUB_REMOVAL_PLAN.md §2.2 / H2.6): Direct when Wi-Fi is
+ * up and the internet probe passed (hardware only), else Phone when a
+ * PagerLink peer is connected (tg_http_request maps each bridge call onto its
+ * typed tg.* method, hal/tg_link.h; the status pill says "via phone"), else
+ * None ("Offline"). The phone path also runs on the emulator.
  *
  * Bridge URL and bearer token are managed from the Settings app
  * (Settings → Telegram). The cfg helpers at the bottom of this file are
@@ -22,8 +29,13 @@
  *                                       — nulled (deleted with parent)
  *   timers:  s_timer (poll scheduler)   — lv_timer_del + null
  *            s_drain_timer (result drain)— lv_timer_del + null
- *   tasks:   s_bg_task (HTTPS worker)    — left to self-delete; the epoch bump
- *                                          makes any late result be discarded
+ *   tasks:   network worker slot (FreeRTOS s_bg_task on hardware, detached
+ *            std::thread + s_bg_running on the emulator) — left to finish;
+ *            the epoch bump makes any late result be discarded. A phone-path
+ *            worker's link receiver (hw_link_accept_*) is opened and closed
+ *            inside tg_link_request(), so nothing link-side outlives it.
+ *   results: s_fg_result / s_fg_done      — dropped by fg_discard() (under
+ *            s_tg_mu on the emulator, where the instance lock is a no-op)
  *   note:    s_bg_timer is the global background notifier (fast: 60 s / slow: 5 min)
  *            created once at boot by tg_begin_background_poll(); it is NOT torn
  *            down here.  onStart() snaps its period back to TG_BG_POLL_FAST_MS.
@@ -42,12 +54,19 @@
 #include "../hal/secrets.h"
 #include "../hal/nvs.h"
 #include "../hal/str_encode.h"
+#include "../hal/link.h"
+#include "../hal/link/link_json.h"
+#include "../hal/tg_link.h"
 #include "../core/app.h"
 #include "../core/app_manager.h"
 #include "../core/notify.h"
 #include "../core/system.h"
 #include "../core/input_focus.h"
 #include "app_registry.h"
+#include <atomic>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <set>
@@ -58,9 +77,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "../core/scoped_lock.h"
-extern "C" {
-#include "cJSON.h"
-}
+#else
+#include <mutex>
+#include <thread>
+#include "telegram_test.h"
 #endif
 
 namespace {
@@ -74,6 +94,8 @@ namespace {
 #define TG_BG_POLL_FAST_MS  60000   // background poll: 60 s while user active
 #define TG_BG_POLL_SLOW_MS  300000  // background poll: 5 min while user idle
 #define TG_BG_IDLE_MS       180000  // inactivity threshold for slow cadence (3 min)
+// Re-check cadence while the view is parked on "Offline" (no uplink yet).
+static const uint32_t TG_INET_RETRY_MS = 1500;
 
 // --- persisted config ------------------------------------------------------
 
@@ -166,10 +188,8 @@ static std::vector<Message> s_msgs;
 // invalid whenever a page is (re)built so the first render always happens.
 static bool     s_chats_sig_valid = false;
 static bool     s_msgs_sig_valid = false;
-#ifdef ARDUINO
 static uint32_t s_chats_sig = 0;
 static uint32_t s_msgs_sig = 0;
-#endif
 
 // Favorite chat IDs. The chat list in the Telegram app filters to this set;
 // the full list is only visible from Settings → Telegram → Favorites.
@@ -185,7 +205,6 @@ static bool s_favorites_loaded = false;
 // (see tg_bg_timer below).
 static int s_unread_total = 0;
 
-#ifdef ARDUINO
 static lv_timer_t *s_bg_timer = nullptr;
 
 // Baseline for the background notifier. -1 means "not initialized yet": the
@@ -193,11 +212,77 @@ static lv_timer_t *s_bg_timer = nullptr;
 // that arrived while the device was off. Subsequent polls fire enabled
 // notifiers only when `sum > s_last_notified_unread`.
 static int s_last_notified_unread = -1;
+// Notifier bursts fired so far (fire_notifications with delta > 0); the
+// emulator test hook diffs it around one tick.
+static int s_notify_fired = 0;
 
-// s_bg_task is the single HTTPS worker slot, shared between the background
-// unread notifier and the foreground poll/send worker so the two never run a
-// TLS session at the same time (each costs several KB of internal heap).
+// The single network worker slot, shared between the background unread
+// notifier and the foreground poll/send worker so the two never run a TLS
+// session (or a phone request) at the same time (each TLS session costs
+// several KB of internal heap). A FreeRTOS task on hardware, a detached
+// std::thread on the emulator.
+#ifdef ARDUINO
 static TaskHandle_t s_bg_task = nullptr;
+// Worker <-> UI coordination: the instance mutex (the LVGL thread holds it
+// while timers and events run).
+typedef core::ScopedInstanceLock TgLock;
+#else
+static std::atomic<bool> s_bg_running{false};
+// The emulator's instance lock is a no-op, so worker <-> UI state gets its own
+// mutex; UI-thread code takes it explicitly where it touches that state.
+static std::mutex s_tg_mu;
+struct TgLock {
+    TgLock() { s_tg_mu.lock(); }
+    ~TgLock() { s_tg_mu.unlock(); }
+    TgLock(const TgLock &) = delete;
+    TgLock &operator=(const TgLock &) = delete;
+};
+#endif
+
+static bool worker_busy()
+{
+#ifdef ARDUINO
+    return s_bg_task != nullptr;
+#else
+    return s_bg_running.load();
+#endif
+}
+
+// Start `fn(arg)` in the worker slot. False (slot left free) when the spawn fails.
+static bool worker_spawn(void (*fn)(void *), const char *name, void *arg)
+{
+#ifdef ARDUINO
+    if (xTaskCreate(fn, name, 8192, arg, 2, &s_bg_task) != pdPASS) {
+        s_bg_task = nullptr;
+        return false;
+    }
+    return true;
+#else
+    (void)name;
+    s_bg_running = true;
+    std::thread(fn, arg).detach();
+    return true;
+#endif
+}
+
+// Worker side: free the slot (the fg worker does this under TgLock).
+static void worker_release()
+{
+#ifdef ARDUINO
+    s_bg_task = nullptr;
+#else
+    s_bg_running = false;
+#endif
+}
+
+// Worker side, last statement: a FreeRTOS task deletes itself; the emulator
+// thread simply returns.
+static void worker_end()
+{
+#ifdef ARDUINO
+    vTaskDelete(NULL);
+#endif
+}
 // Mirrors the period currently set on s_bg_timer so tg_bg_tick() can detect
 // when it needs to change without a second lv_timer API call.
 // Also kept in sync by onStart() which snaps back to the fast cadence on open.
@@ -233,7 +318,7 @@ struct FgResult {
 };
 
 static lv_timer_t   *s_drain_timer = nullptr;
-static volatile bool s_fg_done   = false;
+static std::atomic<bool> s_fg_done{false};
 static FgResult     *s_fg_result = nullptr;   // heap-owned; the drain frees it
 // Bumped by onStop/onStart; a worker whose captured epoch no longer matches
 // discards its result instead of publishing into a torn-down / fresh view.
@@ -242,7 +327,19 @@ static uint32_t      s_fg_epoch  = 0;
 // here so a keystroke-send is never dropped; the drain launches it once free.
 static std::string   s_pending_send;
 static long long     s_pending_send_chat = 0;
+
+// Drop a published-but-undrained foreground result; bump_epoch also makes any
+// worker still running discard its result. UI thread only (on hardware it
+// already holds the instance mutex there).
+static void fg_discard(bool bump_epoch)
+{
+#ifndef ARDUINO
+    TgLock lock;
 #endif
+    if (bump_epoch) s_fg_epoch++;
+    s_fg_done = false;
+    if (s_fg_result) { delete s_fg_result; s_fg_result = nullptr; }
+}
 
 // --- forward decls --------------------------------------------------------
 
@@ -417,7 +514,6 @@ static std::string ascii_safe(const std::string &in)
     return out;
 }
 
-#ifdef ARDUINO
 // Serialize a single {"text":"..."} JSON body.
 static std::string json_text_body(const char *text)
 {
@@ -425,6 +521,8 @@ static std::string json_text_body(const char *text)
 }
 
 // --- HTTP -----------------------------------------------------------------
+
+#ifdef ARDUINO
 
 // Cached internet reachability. WiFi-associated does not imply the bridge is
 // reachable (captive portals, ISP outage, DNS down), and the bridge HTTPS
@@ -441,7 +539,6 @@ static std::string json_text_body(const char *text)
 static const uint32_t TG_INET_OK_TTL_MS   = 30000;
 static const uint32_t TG_INET_FAIL_TTL_MS = 5000;
 static const uint32_t TG_INET_PING_MS     = 1500;
-static const uint32_t TG_INET_RETRY_MS    = 1500;
 static uint32_t s_inet_check_ts = 0;
 static bool     s_inet_ok       = false;
 static volatile bool s_inet_probe_running = false;
@@ -485,17 +582,157 @@ static bool internet_available()
     return s_inet_ok;
 }
 
+#endif  // ARDUINO
+
+// --- uplink ---------------------------------------------------------------
+
+enum TgUplink { TG_UP_NONE, TG_UP_DIRECT, TG_UP_PHONE };
+
+#ifndef ARDUINO
+// Test hook only (tg_test_step): make this tick see no phone link.
+static std::atomic<bool> s_test_link_down{false};
+#endif
+
+// Worker-safe uplink verdict from cached state only: Direct when Wi-Fi is up
+// and the last internet probe passed (hardware only — the emulator has no
+// Wi-Fi), Phone when a PagerLink peer is connected, None otherwise.
+static TgUplink tg_uplink_now()
+{
+#ifdef ARDUINO
+    if (hw_get_wifi_connected() && s_inet_ok) return TG_UP_DIRECT;
+#else
+    if (s_test_link_down) return TG_UP_NONE;
+#endif
+    if (hw_link_connected()) return TG_UP_PHONE;
+    return TG_UP_NONE;
+}
+
+// UI thread: refresh the cached probe verdict (never blocks), then decide.
+static TgUplink tg_uplink()
+{
+#ifdef ARDUINO
+    (void)internet_available();
+#endif
+    return tg_uplink_now();
+}
+
+// Status-pill text for a view that can't fetch: no uplink at all.
+static const char *TG_OFFLINE = "Offline";
+
+// Parse a decimal integer that must fill the whole string.
+static bool tg_parse_ll(const std::string &s, long long &out)
+{
+    if (s.empty()) return false;
+    char *end = nullptr;
+    errno = 0;
+    long long v = strtoll(s.c_str(), &end, 10);
+    if (errno != 0 || end != s.c_str() + s.size()) return false;
+    out = v;
+    return true;
+}
+
+// Phone path of tg_http_request: map one of the four bridge calls this file
+// builds onto its typed tg.* method. The phone gets the bridge base URL and
+// typed params and builds the /v1/... path itself, so it never fetches a
+// path the pager made up; anything else is refused here.
+static bool tg_phone_request(const std::string &url, const char *method,
+                             const char *body, size_t body_len,
+                             const char *auth_header, std::string &out_body,
+                             int *out_code, std::string *err)
+{
+    static const char kChats[] = "/v1/chats";
+    static const char kBearer[] = "Bearer ";
+    if (out_code) *out_code = 0;
+
+    const size_t at = url.find(kChats);
+    if (at == std::string::npos || !auth_header ||
+        strncmp(auth_header, kBearer, sizeof(kBearer) - 1) != 0) {
+        if (err) *err = "Bad request";
+        return false;
+    }
+    const bool get = !method || strcmp(method, "GET") == 0;
+    const std::string rest = url.substr(at + sizeof(kChats) - 1);
+    const char *tg = nullptr;
+
+    pagerlink::JsonWriter w;
+    w.begin_object()
+        .key("bridge").str_val(url.substr(0, at))
+        .key("token").str_val(auth_header + sizeof(kBearer) - 1);
+
+    long long n = 0;
+    if (get && rest.compare(0, 7, "?limit=") == 0 && tg_parse_ll(rest.substr(7), n)) {
+        tg = "tg.chats";
+        w.key("limit").int_val(n);
+    } else if (!rest.empty() && rest[0] == '/') {
+        const size_t slash = rest.find_first_of("/?", 1);
+        long long chat_id = 0;
+        const std::string sub = slash == std::string::npos ? std::string() : rest.substr(slash);
+        if (slash != std::string::npos && tg_parse_ll(rest.substr(1, slash - 1), chat_id)) {
+            const std::string b = body ? std::string(body, body_len) : std::string();
+            pagerlink::JsonObject jb;
+            int64_t up_to = 0;
+            std::string text;
+            if (get && sub.compare(0, 16, "/messages?limit=") == 0 &&
+                tg_parse_ll(sub.substr(16), n)) {
+                tg = "tg.messages";
+                w.key("chat_id").int_val(chat_id).key("limit").int_val(n);
+            } else if (!get && sub == "/read" && jb.parse(b) && jb.get_int("up_to", up_to)) {
+                tg = "tg.read";
+                w.key("chat_id").int_val(chat_id).key("up_to").int_val(up_to);
+            } else if (!get && sub == "/messages" && jb.parse(b) && jb.get_string("text", text)) {
+                tg = "tg.send";
+                w.key("chat_id").int_val(chat_id).key("text").str_val(text);
+            }
+        }
+    }
+    w.end_object();
+
+    // The writer's buffer holds the bearer: take a copy, then scrub the
+    // buffer in place (w is a local, non-const object).
+    std::string params = w.str();
+    hal::secret_scrub(const_cast<std::string &>(w.str()));
+    if (!tg) {
+        hal::secret_scrub(params);
+        if (err) *err = "Bad request";
+        return false;
+    }
+
+    int status = 0;
+    std::string e;
+    const bool ok = tg_link_request(tg, params, out_body, status, e);
+    hal::secret_scrub(params);
+    if (out_code) *out_code = status;
+    if (!ok && err) *err = e;
+    return ok;
+}
+
+// Every bridge call goes through here; the transport is picked per call from
+// the cached uplink verdict, so the four callers don't change.
 static bool tg_http_request(const std::string &url, const char *method,
                             const char *body, size_t body_len,
                             const char *content_type, const char *auth_header,
                             std::string &out_body, int *out_code, std::string *err)
 {
-    return hw_http_request(url.c_str(), method, body, body_len,
-                           content_type, auth_header, out_body, out_code, err);
+    const TgUplink up = tg_uplink_now();
+#ifdef ARDUINO
+    if (up == TG_UP_DIRECT) {
+        return hw_http_request(url.c_str(), method, body, body_len,
+                               content_type, auth_header, out_body, out_code, err);
+    }
+#else
+    (void)content_type;
+#endif
+    if (up == TG_UP_PHONE) {
+        return tg_phone_request(url, method, body, body_len, auth_header,
+                                out_body, out_code, err);
+    }
+    if (out_code) *out_code = 0;
+    if (err) *err = TG_OFFLINE;
+    return false;
 }
 
 // --- chat list ------------------------------------------------------------
-// Rendering is driven by tg_drain_tick (hardware-only worker results).
+// Rendering is driven by tg_drain_tick (worker results).
 
 static void chat_click_cb(lv_event_t *e)
 {
@@ -640,6 +877,17 @@ static bool load_bridge_auth(std::string &url, std::string &auth, std::string *e
     return true;
 }
 
+// Numeric member read the way the old cJSON parser did (valuedouble cast),
+// but integers stay exact: 0 when absent or not a number.
+static long long tg_json_num(const pagerlink::JsonObject &o, const char *key)
+{
+    int64_t i = 0;
+    if (o.get_int(key, i)) return (long long)i;
+    double d = 0;
+    if (o.get_double(key, d)) return (long long)d;
+    return 0;
+}
+
 // GET <base_url>/v1/chats through tg_http_request and parse it into `out`.
 // Worker-safe: no LVGL, no shared state.
 // *unread_total (optional) gets the sum of the positive per-chat unread counts.
@@ -657,60 +905,54 @@ static bool fetch_chats(std::string base_url, const std::string &auth,
                          auth.c_str(), body, &code, err)) {
         return false;
     }
-    cJSON *arr = cJSON_Parse(body.c_str());
-    if (!arr || !cJSON_IsArray(arr)) {
-        if (arr) cJSON_Delete(arr);
+    std::vector<std::string> items;
+    if (!pagerlink::json_array_items(body, items)) {
         if (err) *err = "Parse error";
         return false;
     }
-    int n = cJSON_GetArraySize(arr);
-    out.reserve((size_t)n);
+    out.reserve(items.size());
     int unread_sum = 0;
-    for (int i = 0; i < n; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
+    for (const std::string &raw : items) {
+        // A non-object element yields the defaults, as the cJSON parser did.
+        pagerlink::JsonObject it;
+        const bool obj = it.parse(raw);
         Chat c;
-        cJSON *jid  = cJSON_GetObjectItemCaseSensitive(it, "id");
-        cJSON *jti  = cJSON_GetObjectItemCaseSensitive(it, "title");
-        cJSON *junr = cJSON_GetObjectItemCaseSensitive(it, "unread");
-        c.id     = (jid  && cJSON_IsNumber(jid))  ? (long long)jid->valuedouble : 0;
-        c.title  = (jti  && cJSON_IsString(jti))  ? jti->valuestring : "(no title)";
-        c.unread = (junr && cJSON_IsNumber(junr)) ? (int)junr->valuedouble : 0;
+        c.id     = obj ? tg_json_num(it, "id") : 0;
+        if (!obj || !it.get_string("title", c.title)) c.title = "(no title)";
+        c.unread = obj ? (int)tg_json_num(it, "unread") : 0;
         if (c.unread > 0) unread_sum += c.unread;
         out.push_back(std::move(c));
     }
-    cJSON_Delete(arr);
     if (unread_total) *unread_total = unread_sum;
     return true;
 }
 
-// Parse a /v1/chats/{id}/messages array (worker thread) into res->msgs.
-// Returns the newest message id seen (for the mark-read decision).
-static int tg_parse_msgs(cJSON *arr, FgResult *res)
+// Parse a /v1/chats/{id}/messages array body (worker thread) into res->msgs.
+// False when the body is not a JSON array; otherwise *newest gets the newest
+// message id seen (for the mark-read decision).
+static bool tg_parse_msgs(const std::string &body, FgResult *res, int *newest)
 {
-    int n = cJSON_GetArraySize(arr);
-    res->msgs.reserve((size_t)n);
+    std::vector<std::string> items;
+    if (!pagerlink::json_array_items(body, items)) return false;
+    res->msgs.reserve(items.size());
     int newest_id = 0;
-    for (int i = 0; i < n; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
+    for (const std::string &raw : items) {
+        // A non-object element yields the defaults, as the cJSON parser did.
+        pagerlink::JsonObject it;
+        const bool obj = it.parse(raw);
         Message m;
-        cJSON *jid  = cJSON_GetObjectItemCaseSensitive(it, "id");
-        cJSON *jtxt = cJSON_GetObjectItemCaseSensitive(it, "text");
-        cJSON *jfr  = cJSON_GetObjectItemCaseSensitive(it, "from");
-        cJSON *jout = cJSON_GetObjectItemCaseSensitive(it, "out");
-        m.id   = (jid  && cJSON_IsNumber(jid))  ? (int)jid->valuedouble : 0;
-        m.text = (jtxt && cJSON_IsString(jtxt)) ? jtxt->valuestring : "";
-        m.from = (jfr  && cJSON_IsString(jfr))  ? jfr->valuestring : "";
-        m.out  = (jout && cJSON_IsBool(jout))   ? cJSON_IsTrue(jout) : false;
+        bool out = false;
+        m.id   = obj ? (int)tg_json_num(it, "id") : 0;
+        if (!obj || !it.get_string("text", m.text)) m.text.clear();
+        if (!obj || !it.get_string("from", m.from)) m.from.clear();
+        m.out  = obj && it.get_bool("out", out) && out;
         m.media_w = 0;
         m.media_h = 0;
-        cJSON *jmd = cJSON_GetObjectItemCaseSensitive(it, "media");
-        if (jmd && cJSON_IsObject(jmd)) {
-            cJSON *jmt = cJSON_GetObjectItemCaseSensitive(jmd, "type");
-            cJSON *jmw = cJSON_GetObjectItemCaseSensitive(jmd, "w");
-            cJSON *jmh = cJSON_GetObjectItemCaseSensitive(jmd, "h");
-            if (jmt && cJSON_IsString(jmt)) m.media_type = jmt->valuestring;
-            if (jmw && cJSON_IsNumber(jmw)) m.media_w = (int)jmw->valuedouble;
-            if (jmh && cJSON_IsNumber(jmh)) m.media_h = (int)jmh->valuedouble;
+        pagerlink::JsonObject md;
+        if (obj && it.get_object("media", md)) {
+            if (!md.get_string("type", m.media_type)) m.media_type.clear();
+            m.media_w = (int)tg_json_num(md, "w");
+            m.media_h = (int)tg_json_num(md, "h");
         }
         // Sanitize once here (worker thread) instead of on every render_msgs()
         // call — glyph-table lookups are the same cost either way, but this
@@ -720,24 +962,25 @@ static int tg_parse_msgs(cJSON *arr, FgResult *res)
         if (m.id > newest_id) newest_id = m.id;
         res->msgs.push_back(std::move(m));
     }
-    return newest_id;
+    *newest = newest_id;
+    return true;
 }
 
-// The HTTPS worker. Runs one request (chats / messages / send), parses into a
-// heap FgResult, and publishes it under the instance mutex for the drain tick.
-// Never touches the LVGL tree (parsing produces plain strings; only rendering
-// happens on the UI thread), so it is safe to outlive the app. tg_parse_msgs
-// does run ascii_safe here, i.e. LVGL glyph lookups — see that function.
-static void tg_fg_task(void *arg)
+// Run one foreground request (chats / messages + mark-read / send) into
+// `res`. Worker-safe: no LVGL tree, no shared state (tg_parse_msgs does run
+// ascii_safe, i.e. LVGL glyph lookups — see that function). Split out of
+// tg_fg_task so the emulator test hook runs exactly this code.
+static void tg_run_fg(const FgReq *req, FgResult *res)
 {
-    FgReq *req = (FgReq *)arg;
-    FgResult *res = new FgResult();
     res->op           = req->op;
     res->ok           = false;
     res->chat_id      = req->chat_id;
     res->unread_total = 0;
     res->marked_to    = 0;
     res->status_color = UI_COLOR_MUTED;
+
+    // Label a phone-path fetch like the weather source label does.
+    const bool via_phone = tg_uplink_now() == TG_UP_PHONE;
 
     std::string base = req->base_url;
     if (!base.empty() && base.back() == '/') base.pop_back();
@@ -746,6 +989,7 @@ static void tg_fg_task(void *arg)
         std::string err;
         if (fetch_chats(base, req->auth, res->chats, &res->unread_total, &err)) {
             res->ok = true;
+            if (via_phone) res->status = "via phone";
         } else {
             res->status = err;
             res->status_color = lv_palette_main(LV_PALETTE_RED);
@@ -760,13 +1004,13 @@ static void tg_fg_task(void *arg)
             res->status = err;
             res->status_color = lv_palette_main(LV_PALETTE_RED);
         } else {
-            cJSON *arr = cJSON_Parse(body.c_str());
-            if (!arr || !cJSON_IsArray(arr)) {
+            int newest_id = 0;
+            if (!tg_parse_msgs(body, res, &newest_id)) {
                 res->status = "Parse error";
                 res->status_color = lv_palette_main(LV_PALETTE_RED);
             } else {
-                int newest_id = tg_parse_msgs(arr, res);
                 res->ok = true;
+                if (via_phone) res->status = "via phone";
                 // Fire-and-forget mark-read once the newest id advances past
                 // what the UI last acked (req->mark_from). Done here so the UI
                 // thread never blocks on the extra POST; the new high-water
@@ -787,7 +1031,6 @@ static void tg_fg_task(void *arg)
                     }
                 }
             }
-            if (arr) cJSON_Delete(arr);
         }
     } else { // FG_SEND
         std::string bodyj = json_text_body(req->send_text.c_str());
@@ -804,24 +1047,35 @@ static void tg_fg_task(void *arg)
             res->status = "Sent";
         }
     }
+}
 
-    // Publish under the instance mutex — the drain tick reads these under the
-    // same lock. Discard if the app moved on (epoch bumped by onStop/onStart)
-    // so a late worker can't flash a result into a torn-down / fresh view.
+// The network worker. Runs one request (chats / messages / send) into a heap
+// FgResult and publishes it under TgLock for the drain tick. Never touches
+// the LVGL tree (parsing produces plain strings; only rendering happens on
+// the UI thread), so it is safe to outlive the app.
+static void tg_fg_task(void *arg)
+{
+    FgReq *req = (FgReq *)arg;
+    FgResult *res = new FgResult();
+    tg_run_fg(req, res);
+
+    // Publish under TgLock — the drain tick reads these under the same lock.
+    // Discard if the app moved on (epoch bumped by onStop/onStart) so a late
+    // worker can't flash a result into a torn-down / fresh view.
     {
-        core::ScopedInstanceLock lock;
+        TgLock lock;
         if (req->epoch == s_fg_epoch) {
             if (s_fg_result) { delete s_fg_result; s_fg_result = nullptr; }
             s_fg_result = res;
             s_fg_done   = true;
             res = nullptr;
         }
-        s_bg_task = nullptr;
+        worker_release();
     }
     if (res) delete res;
     hal::secret_scrub(req->auth);
     delete req;
-    vTaskDelete(NULL);
+    worker_end();
 }
 
 static void ensure_drain_timer()
@@ -847,11 +1101,10 @@ static FgReq *make_req(FgOp op)
 // after freeing req — if the single worker slot is busy or the spawn fails.
 static bool kick_worker(FgReq *req)
 {
-    if (s_bg_task != nullptr) { hal::secret_scrub(req->auth); delete req; return false; }
+    if (worker_busy()) { hal::secret_scrub(req->auth); delete req; return false; }
     // 8 KB stack: the mbedtls TLS handshake + cert chain dominates, same as the
     // weather worker; parsing 30 chats / 20 messages is cheap next to it.
-    if (xTaskCreate(tg_fg_task, "tg_fg", 8192, req, 2, &s_bg_task) != pdPASS) {
-        s_bg_task = nullptr;
+    if (!worker_spawn(tg_fg_task, "tg_fg", req)) {
         hal::secret_scrub(req->auth);
         delete req;
         return false;
@@ -876,7 +1129,7 @@ static bool kick_fetch_msgs()
 static void kick_send(const char *text)
 {
     if (s_current_chat_id == 0 || !text || !*text) return;
-    if (s_bg_task != nullptr) {
+    if (worker_busy()) {
         // Worker busy with a poll fetch — queue the send so the keystroke is
         // never dropped; the drain launches it as soon as the slot frees.
         s_pending_send = text;
@@ -926,10 +1179,16 @@ static uint32_t msgs_signature(const std::vector<Message> &v)
 static void tg_drain_tick(lv_timer_t *t)
 {
     (void)t;
-    if (!s_fg_done) return;
-    s_fg_done = false;
-    FgResult *res = s_fg_result;
-    s_fg_result = nullptr;
+    FgResult *res = nullptr;
+    {
+#ifndef ARDUINO
+        TgLock lock;   // hardware: lv_timer_handler already holds the instance mutex
+#endif
+        if (!s_fg_done) return;
+        s_fg_done = false;
+        res = s_fg_result;
+        s_fg_result = nullptr;
+    }
     if (!res) return;
 
     switch (res->op) {
@@ -983,7 +1242,7 @@ static void tg_drain_tick(lv_timer_t *t)
 
     // Flush a send that was queued while the worker was busy (same chat only).
     if (!s_pending_send.empty()) {
-        if (s_bg_task == nullptr && s_view == V_CHAT &&
+        if (!worker_busy() && s_view == V_CHAT &&
             s_pending_send_chat == s_current_chat_id) {
             FgReq *r = make_req(FG_SEND);
             r->send_text.swap(s_pending_send);   // moves out & clears the slot
@@ -995,9 +1254,6 @@ static void tg_drain_tick(lv_timer_t *t)
         }
     }
 }
-#else
-static void kick_send(const char *) {}
-#endif
 
 // --- polling --------------------------------------------------------------
 
@@ -1006,12 +1262,11 @@ static void stop_timer()
     if (s_timer) { lv_timer_del(s_timer); s_timer = nullptr; }
 }
 
-#ifdef ARDUINO
 static void poll_tick(lv_timer_t *t)
 {
     if (!configured()) return;
-    if (!internet_available()) {
-        set_status("No internet", UI_COLOR_MUTED);
+    if (tg_uplink() == TG_UP_NONE) {
+        set_status(TG_OFFLINE, UI_COLOR_MUTED);
         return;
     }
     // Don't churn the widget tree while the composer (or any textarea) is
@@ -1020,7 +1275,7 @@ static void poll_tick(lv_timer_t *t)
     // re-render on drain still would, so keep the pause.
     if (core::isTextInputFocused()) return;
 
-    if (s_bg_task != nullptr) return;   // a fetch/send is already in flight
+    if (worker_busy()) return;   // a fetch/send is already in flight
 
     bool kicked = false;
     switch (s_view) {
@@ -1046,7 +1301,6 @@ static void start_timer(uint32_t period_ms)
     stop_timer();
     s_timer = lv_timer_create(poll_tick, period_ms, nullptr);
 }
-#endif
 
 // --- view switching -------------------------------------------------------
 
@@ -1239,15 +1493,11 @@ static void show_chat_list()
         set_status("Not configured — Settings → Telegram", UI_COLOR_MUTED);
         return;
     }
-#ifdef ARDUINO
-    if (!hw_get_wifi_connected()) {
-        set_status("WiFi not connected", UI_COLOR_MUTED);
-        return;
-    }
-    if (!internet_available()) {
-        // The verdict may still be pending on the async probe — keep re-checking
-        // so the list loads as soon as it flips, instead of dead-ending here.
-        set_status("No internet", UI_COLOR_MUTED);
+    if (tg_uplink() == TG_UP_NONE) {
+        // No Wi-Fi internet and no phone (the probe verdict may still be
+        // pending) — keep re-checking so the list loads as soon as either
+        // comes up, instead of dead-ending here.
+        set_status(TG_OFFLINE, UI_COLOR_MUTED);
         start_timer(TG_INET_RETRY_MS);
         return;
     }
@@ -1256,9 +1506,6 @@ static void show_chat_list()
     // into the normal poll cadence.
     bool kicked = kick_fetch_chats();
     start_timer(kicked ? TG_LIST_POLL_MS : 1000);
-#else
-    set_status("Not supported on emulator.", UI_COLOR_MUTED);
-#endif
 }
 
 static void show_chat(long long id, const char *title)
@@ -1332,16 +1579,15 @@ static void show_chat(long long id, const char *title)
     set_input_collapsed(s_input_ta, true);
 
     s_msgs.clear();
-#ifdef ARDUINO
-    if (!internet_available()) {
-        // Keep re-checking while the async probe settles; recover without a re-open.
-        set_status("No internet", UI_COLOR_MUTED);
+    if (tg_uplink() == TG_UP_NONE) {
+        // Keep re-checking while the probe settles / a phone connects;
+        // recover without a re-open.
+        set_status(TG_OFFLINE, UI_COLOR_MUTED);
         start_timer(TG_INET_RETRY_MS);
         return;
     }
     bool kicked = kick_fetch_msgs();
     start_timer(kicked ? TG_CHAT_POLL_MS : 1000);
-#endif
 }
 
 // --- not-configured placeholder -------------------------------------------
@@ -1420,7 +1666,6 @@ public:
         s_root = parent;
         reload_config();
 
-#ifdef ARDUINO
         // Snap the background notifier back to the fast poll cadence so that
         // when the app closes the first background tick fires promptly.
         // While the app is open tg_bg_tick() early-returns (s_view != V_NONE),
@@ -1434,11 +1679,11 @@ public:
         // tore down (no drain timer was live to collect it) so it can't flash
         // into this fresh view. onStop already bumped the epoch, so a still-
         // running worker will discard rather than publish a new one.
-        s_fg_done = false;
-        if (s_fg_result) { delete s_fg_result; s_fg_result = nullptr; }
+        fg_discard(false);
         s_pending_send.clear();
         s_pending_send_chat = 0;
 
+#ifdef ARDUINO
         // If the token is at rest encrypted but the session is locked,
         // trigger the notes unlock modal before showing any app content.
         // ui_passphrase_unlock() fires the callback immediately when crypto
@@ -1463,19 +1708,15 @@ public:
 
     void onStop() override {
         stop_timer();
-#ifdef ARDUINO
         // §2.1 async teardown: stop draining and abandon any in-flight/pending
-        // result. The worker itself is left to self-delete — it only writes
-        // heap state under the instance mutex, never the LVGL tree, so it is
-        // safe to outlive us; bumping the epoch makes its late result be
-        // discarded instead of published into a freed view.
-        s_fg_epoch++;
+        // result. The worker itself is left to finish — it only writes heap
+        // state under TgLock, never the LVGL tree, so it is safe to outlive
+        // us; bumping the epoch makes its late result be discarded instead of
+        // published into a freed view.
         if (s_drain_timer) { lv_timer_del(s_drain_timer); s_drain_timer = nullptr; }
-        s_fg_done = false;
-        if (s_fg_result) { delete s_fg_result; s_fg_result = nullptr; }
+        fg_discard(true);
         s_pending_send.clear();
         s_pending_send_chat = 0;
-#endif
         ui_hide_back_button();
         s_view = V_NONE;
         s_current_chat_id = 0;
@@ -1503,7 +1744,6 @@ public:
 static int8_t s_notif_toast_cache = -1;
 static int8_t s_notif_vib_cache   = -1;
 
-#ifdef ARDUINO
 static bool notif_toast_enabled()
 {
     if (s_notif_toast_cache < 0)
@@ -1524,6 +1764,7 @@ static bool notif_vib_enabled()
 static void fire_notifications(int delta)
 {
     if (delta <= 0) return;
+    s_notify_fired++;
     bool toast = notif_toast_enabled();
     bool vib   = notif_vib_enabled();
 
@@ -1547,47 +1788,55 @@ static void fire_notifications(int delta)
     }
 }
 
+// The notifier decision for one successful poll's unread `sum` (caller holds
+// TgLock). Seed the baseline on the first successful poll so we don't fire on
+// messages that arrived before the device booted. After that, any positive
+// delta triggers the enabled notifiers once and becomes the new baseline (the
+// dedup: the same unread count never fires twice).
+static void tg_bg_apply(int sum)
+{
+    s_unread_total = sum;
+    if (s_last_notified_unread < 0) {
+        s_last_notified_unread = sum;
+    } else if (sum > s_last_notified_unread) {
+        fire_notifications(sum - s_last_notified_unread);
+        s_last_notified_unread = sum;
+    } else if (sum < s_last_notified_unread) {
+        // Chats read elsewhere — follow the count down so we re-arm cleanly.
+        s_last_notified_unread = sum;
+    }
+}
+
+// One background unread poll on the calling worker: skip with no uplink,
+// else fetch the chat list (direct or via the phone) and apply it. Worker-
+// safe gate only: tg_bg_tick() already checked the uplink on the UI thread,
+// and internet_available() itself is UI-thread only.
+static bool tg_bg_poll(const std::string &url, const std::string &auth)
+{
+    if (tg_uplink_now() == TG_UP_NONE) return false;
+    std::vector<Chat> chats;
+    int sum = 0;
+    if (!fetch_chats(url, auth, chats, &sum, nullptr)) return false;
+    TgLock lock;
+    tg_bg_apply(sum);
+    return true;
+}
+
 static void tg_bg_task(void *arg)
 {
     (void)arg;
-    // Worker-safe gate only: tg_bg_tick() already checked the cached internet
-    // verdict on the UI thread, and internet_available() itself is UI-thread
-    // only (it reads lv_tick and may spawn the probe task).
     std::string url, auth;
-    std::vector<Chat> chats;
-    int sum = 0;
-    bool ok = hw_get_wifi_connected() &&
-              load_bridge_auth(url, auth, nullptr) &&
-              fetch_chats(url, auth, chats, &sum, nullptr);
+    if (load_bridge_auth(url, auth, nullptr)) (void)tg_bg_poll(url, auth);
     hal::secret_scrub(auth);
-
-    if (ok) {
-        core::ScopedInstanceLock lock;
-        s_unread_total = sum;
-
-        // Seed the baseline on the first successful poll so we don't fire on
-        // messages that arrived before the device booted. After that, any
-        // positive delta triggers the enabled notifiers once.
-        if (s_last_notified_unread < 0) {
-            s_last_notified_unread = sum;
-        } else if (sum > s_last_notified_unread) {
-            fire_notifications(sum - s_last_notified_unread);
-            s_last_notified_unread = sum;
-        } else if (sum < s_last_notified_unread) {
-            // Chats read elsewhere — follow the count down so we re-arm cleanly.
-            s_last_notified_unread = sum;
-        }
-    }
-
-    s_bg_task = nullptr;
-    vTaskDelete(NULL);
+    worker_release();
+    worker_end();
 }
 
 static void tg_bg_tick(lv_timer_t *t)
 {
     if (s_view != V_NONE) return;               // app is open → its timer drives updates
-    if (!internet_available()) return;
-    // Skip while typing elsewhere: this tick runs an HTTPS fetch (~1s).
+    if (tg_uplink() == TG_UP_NONE) return;
+    // Skip while typing elsewhere: this tick runs a fetch (~1s).
     if (core::isTextInputFocused()) return;
 
     // Adaptive cadence: poll every TG_BG_POLL_FAST_MS while the user has
@@ -1606,12 +1855,11 @@ static void tg_bg_tick(lv_timer_t *t)
         s_bg_timer_period = want_period;
     }
 
-    if (s_bg_task != nullptr) return;           // previous fetch still in flight
+    if (worker_busy()) return;                  // previous fetch still in flight
 
-    // Launch background task to avoid blocking the LVGL timer thread
-    xTaskCreate(tg_bg_task, "tg_bg", 8192, nullptr, 2, &s_bg_task);
+    // Launch the worker to avoid blocking the LVGL timer thread
+    (void)worker_spawn(tg_bg_task, "tg_bg", nullptr);
 }
-#endif
 
 } // namespace
 
@@ -1687,14 +1935,21 @@ bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
                             std::string *err)
 {
     out.clear();
-#ifdef ARDUINO
-    // Runs on the Settings favourites worker, so only worker-safe checks here
-    // (internet_available() is UI-thread only).
+    // Runs on the Settings favourites worker (synchronously on the emulator),
+    // so only worker-safe checks here (internet_available() is UI-thread only).
     std::string url, auth;
     if (!load_bridge_auth(url, auth, err)) return false;
-    if (!hw_get_wifi_connected()) {
+#ifdef ARDUINO
+    // No probe has run yet (Telegram never opened, first bg tick pending):
+    // settle the verdict inline — we're on a worker — so Direct isn't missed.
+    if (hw_get_wifi_connected() && s_inet_check_ts == 0) {
+        s_inet_ok = hw_ping_internet("1.1.1.1", 53, TG_INET_PING_MS, nullptr, nullptr);
+        s_inet_check_ts = lv_tick_get();
+    }
+#endif
+    if (tg_uplink_now() == TG_UP_NONE) {
         hal::secret_scrub(auth);
-        if (err) *err = "WiFi not connected";
+        if (err) *err = TG_OFFLINE;
         return false;
     }
     std::vector<Chat> chats;
@@ -1706,15 +1961,9 @@ bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
         if (c.id != 0) out.emplace_back(c.id, std::move(c.title));
     }
     return true;
-#else
-    (void)out;
-    if (err) *err = "Not supported on emulator.";
-    return false;
-#endif
 }
 
 void tg_begin_background_poll() {
-#ifdef ARDUINO
     if (s_bg_timer) return;
     // Start at the fast cadence (TG_BG_POLL_FAST_MS = 60 s).  tg_bg_tick()
     // backs off to TG_BG_POLL_SLOW_MS (5 min) once the LVGL inactive time
@@ -1722,7 +1971,64 @@ void tg_begin_background_poll() {
     // user interacts or the Telegram app is opened (onStart).
     s_bg_timer_period = TG_BG_POLL_FAST_MS;
     s_bg_timer = lv_timer_create(tg_bg_tick, TG_BG_POLL_FAST_MS, nullptr);
-#endif
 }
+
+#ifndef ARDUINO
+// Emulator-only test hook (telegram_test.h): the same worker code the app runs,
+// with explicit bridge creds instead of NVS. Blocking; never the LVGL thread.
+TgTestResult tg_test_step(const std::string &op, const std::string &bridge,
+                          const std::string &token, long long chat_id,
+                          const std::string &text, bool reset, bool link_down)
+{
+    TgTestResult out;
+    std::string auth = "Bearer " + token;
+
+    if (op == "notify") {
+        int before = 0;
+        {
+            TgLock lock;
+            if (reset) s_last_notified_unread = -1;
+            before = s_notify_fired;
+        }
+        s_test_link_down = link_down;
+        const TgUplink up = tg_uplink_now();
+        out.ok = tg_bg_poll(bridge, auth);
+        s_test_link_down = false;
+        {
+            TgLock lock;
+            out.notified = s_notify_fired - before;
+            out.unread_total = s_unread_total;
+        }
+        out.uplink = up == TG_UP_PHONE ? "phone" : up == TG_UP_DIRECT ? "direct" : "none";
+        // What poll_tick / the views show for this verdict.
+        out.status = up == TG_UP_NONE ? TG_OFFLINE : up == TG_UP_PHONE ? "via phone" : "";
+    } else {
+        FgReq req;
+        req.op        = op == "chats" ? FG_FETCH_CHATS : op == "msgs" ? FG_FETCH_MSGS : FG_SEND;
+        req.base_url  = bridge;
+        req.auth      = auth;
+        req.chat_id   = chat_id;
+        req.mark_from = 0;
+        req.send_text = text;
+        req.epoch     = 0;
+        FgResult res;
+        tg_run_fg(&req, &res);
+        hal::secret_scrub(req.auth);
+        const TgUplink up = tg_uplink_now();
+        out.uplink = up == TG_UP_PHONE ? "phone" : up == TG_UP_DIRECT ? "direct" : "none";
+        out.ok = res.ok;
+        out.status = res.status;
+        out.unread_total = res.unread_total;
+        out.marked_to = res.marked_to;
+        out.count = (int)(req.op == FG_FETCH_CHATS ? res.chats.size() : res.msgs.size());
+        for (const Message &m : res.msgs) {
+            if (m.id > out.newest_id) out.newest_id = m.id;
+            out.text_bytes += (long long)m.text.size();
+        }
+    }
+    hal::secret_scrub(auth);
+    return out;
+}
+#endif
 
 } // namespace apps

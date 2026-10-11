@@ -208,6 +208,60 @@ static void test_duplicate_key_last_wins(void)
     TEST_ASSERT_EQUAL_INT64(2, a);
 }
 
+/* ------------------------------------------------------ json_array_items */
+
+static void test_array_items_basic(void)
+{
+    std::vector<std::string> items;
+    TEST_ASSERT_TRUE(json_array_items(
+        "[1, \"a,b\", {\"x\":[1,2]}, [3,4], true, null]", items));
+    TEST_ASSERT_EQUAL(6, (int)items.size());
+    TEST_ASSERT_EQUAL_STRING("1", items[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("\"a,b\"", items[1].c_str());
+    TEST_ASSERT_EQUAL_STRING("{\"x\":[1,2]}", items[2].c_str());
+    TEST_ASSERT_EQUAL_STRING("[3,4]", items[3].c_str());
+    TEST_ASSERT_EQUAL_STRING("true", items[4].c_str());
+    TEST_ASSERT_EQUAL_STRING("null", items[5].c_str());
+}
+
+static void test_array_items_escapes(void)
+{
+    std::vector<std::string> items;
+    TEST_ASSERT_TRUE(json_array_items("[\"q\\\"\", \"\\\\\"]", items));
+    TEST_ASSERT_EQUAL(2, (int)items.size());
+    TEST_ASSERT_EQUAL_STRING("\"q\\\"\"", items[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("\"\\\\\"", items[1].c_str());
+}
+
+static void test_array_items_empty(void)
+{
+    std::vector<std::string> items;
+    TEST_ASSERT_TRUE(json_array_items("[]", items));
+    TEST_ASSERT_EQUAL(0, (int)items.size());
+
+    TEST_ASSERT_TRUE(json_array_items("  [ ]  ", items));
+    TEST_ASSERT_EQUAL(0, (int)items.size());
+}
+
+static void test_array_items_rejects(void)
+{
+    static const char *const bad[] = {
+        "{}",
+        "[1,]",
+        "[1",
+        "1",
+        "[1] x",
+        "",
+        "[1],\"a\":[2]",
+    };
+    for (const char *src : bad) {
+        std::vector<std::string> items;
+        items.push_back("stale");
+        TEST_ASSERT_FALSE(json_array_items(src, items));
+        TEST_ASSERT_EQUAL(0, (int)items.size());
+    }
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -224,5 +278,9 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_depth_limit);
     RUN_TEST(test_whitespace_around_accepted);
     RUN_TEST(test_duplicate_key_last_wins);
+    RUN_TEST(test_array_items_basic);
+    RUN_TEST(test_array_items_escapes);
+    RUN_TEST(test_array_items_empty);
+    RUN_TEST(test_array_items_rejects);
     return UNITY_END();
 }

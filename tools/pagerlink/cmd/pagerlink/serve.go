@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -118,6 +119,11 @@ func (s *mockPhone) register() {
 	s.handle("chat.audio.begin", s.chatAudioBegin)
 	s.handle("notes.sync", s.notesSync)
 
+	s.handle("tg.chats", s.tgChats)
+	s.handle("tg.messages", s.tgMessages)
+	s.handle("tg.read", s.tgRead)
+	s.handle("tg.send", s.tgSend)
+
 	for method, result := range s.replies {
 		m, r := method, result
 		s.handle(m, func(json.RawMessage) (any, *pagerlink.RPCError) {
@@ -132,6 +138,9 @@ func (s *mockPhone) handle(method string, h pagerlink.Handler) {
 		p := string(params)
 		if p == "" {
 			p = "{}"
+		}
+		if strings.HasPrefix(method, "tg.") {
+			p = "{…}" // tg.* params carry the bridge bearer (D-H7): never log them
 		}
 		fmt.Printf("serve: %s %s\n", method, truncate(p, 200))
 		return h(params)

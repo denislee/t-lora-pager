@@ -160,4 +160,12 @@ private:
     std::vector<Member> members_;
 };
 
+/**
+ * Split a JSON array into the raw text of each top-level element (exact bytes,
+ * surrounding whitespace trimmed). The whole text must be one valid JSON array
+ * (surrounding whitespace allowed; validated with the same rules and depth
+ * limit as JsonObject::parse). Returns false, leaving `out` cleared, otherwise.
+ */
+bool json_array_items(const std::string &text, std::vector<std::string> &out);
+
 }  // namespace pagerlink

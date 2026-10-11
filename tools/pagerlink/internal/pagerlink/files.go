@@ -11,8 +11,16 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"time"
+)
+
+// Sentinel errors for SendBytes. WriteFile prefixes them with "fs.write: ",
+// so its error strings are unchanged.
+var (
+	errSendFailed  = errors.New("transfer failed")
+	errSendTimeout = errors.New("timeout")
 )
 
 // FileInfo is the fs.read / fs.stat metadata for one file. Protected reports
@@ -126,21 +134,39 @@ func (c *Client) WriteFile(vol, path string, data []byte, overwrite bool, timeou
 	if err != nil {
 		return err
 	}
-	ch := c.openXfer(id)
-	defer c.closeXfer(id)
+	if err := c.SendBytes(id, data, timeout); err != nil {
+		c.abortWrite(id, timeout)
+		if err == ErrDisconnected {
+			return err
+		}
+		return fmt.Errorf("fs.write: %w", err)
+	}
+
+	_, err = c.Call("fs.write.commit", map[string]any{"xfer": id}, 60*time.Second)
+	return err
+}
+
+// SendBytes streams data as DATA under transfer xfer, an id the PAGER allocated
+// (odd; e.g. the "xfer" a pager request carries for a bulk reply, PROTOCOL.md
+// section 4), honouring the pager credit window. It returns once every byte is
+// acknowledged; timeout bounds each idle wait for an ACK. Errors: "transfer
+// failed", "timeout", or ErrDisconnected.
+func (c *Client) SendBytes(xfer uint16, data []byte, timeout time.Duration) error {
+	ch := c.openXfer(xfer)
+	defer c.closeXfer(xfer)
 
 	s := NewSender(uint32(len(data)), MaxDataChunk, 0,
 		func(off uint32, n int) ([]byte, error) {
 			return data[off : off+uint32(n)], nil
 		},
 		func(payload []byte) error {
-			return c.SendBulk(Data, id, payload)
+			return c.SendBulk(Data, xfer, payload)
 		},
 	)
 
 	var ferr error
 	if s.Pump() == XferFailed {
-		ferr = errors.New("fs.write: transfer failed")
+		ferr = errSendFailed
 	}
 	for ferr == nil && s.State() == XferActive {
 		select {
@@ -150,21 +176,15 @@ func (c *Client) WriteFile(vol, path string, data []byte, overwrite bool, timeou
 			}
 			s.OnAck(msg.Payload)
 			if s.Pump() == XferFailed {
-				ferr = errors.New("fs.write: transfer failed")
+				ferr = errSendFailed
 			}
 		case <-time.After(timeout):
-			ferr = errors.New("fs.write: timeout")
+			ferr = errSendTimeout
 		case <-c.done:
 			ferr = ErrDisconnected
 		}
 	}
-	if ferr != nil {
-		c.abortWrite(id, timeout)
-		return ferr
-	}
-
-	_, err = c.Call("fs.write.commit", map[string]any{"xfer": id}, 60*time.Second)
-	return err
+	return ferr
 }
 
 // abortWrite drops a half-finished upload, best effort: a failure here must not

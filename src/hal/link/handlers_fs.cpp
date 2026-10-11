@@ -199,7 +199,7 @@ std::string parent_of(const std::string &path) {
 /** Next odd transfer id the pager owns, skipping any still active. */
 uint16_t alloc_upload_id() {
     uint16_t id = g_next_upload_id;
-    for (size_t i = 0; i < 32768 && find(id); ++i) {
+    for (size_t i = 0; i < 32768 && (find(id) || service_accept_owns(id)); ++i) {
         id = (id == 65535) ? 1 : static_cast<uint16_t>(id + 2);
     }
     g_next_upload_id = (id == 65535) ? 1 : static_cast<uint16_t>(id + 2);
@@ -555,6 +555,8 @@ bool handle_rename(const JsonObject &params, JsonWriter &result, RpcError &err) 
 }
 
 }  // namespace
+
+bool fs_owns_xfer(uint16_t xfer) { return find(xfer) != nullptr; }
 
 bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
     Transfer *t = find(xfer);

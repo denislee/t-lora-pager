@@ -95,6 +95,25 @@ bool service_call(const std::string &method, const std::string &params_json, uin
 bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t stall_ms,
                         std::function<void(bool ok)> done);
 
+/**
+ * Inbound (phone -> pager) bulk into memory, backing hw_link_accept_*.
+ * service_accept_open() allocates an odd id (skipping fs.write ids) and buffers
+ * DATA until service_accept_expect() names the size and CRC; `done` then runs
+ * exactly once on the link task (or inline): true with the bytes when all
+ * `size` arrived and the CRC matches; false on size > max, CRC mismatch, a
+ * stall (no DATA for `stall_ms`, checked in service_tick), disconnect or
+ * close. service_accept_expect() returns false — and never runs `done` — for
+ * an unknown id or a second expect. service_accept_close() never runs `done`.
+ */
+uint16_t service_accept_open(uint32_t max_size);
+bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_t stall_ms,
+                           std::function<void(bool ok, std::string &bytes)> done);
+void service_accept_close(uint16_t xfer);
+/** True when `xfer` is an open inbound receiver (handlers_fs id allocation). */
+bool service_accept_owns(uint16_t xfer);
+/** True when `xfer` is a live fs transfer (handlers_fs.cpp). */
+bool fs_owns_xfer(uint16_t xfer);
+
 /** Send an EVT from any task. Returns false when there is no phone. */
 bool service_emit(const std::string &event, const std::string &params_json);
 

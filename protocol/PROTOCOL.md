@@ -132,6 +132,14 @@ Started by an RPC (`fs.read` / `fs.write.begin`) that returns
 **receive** the DATA with the same parity rule as request ids, and are
 independent of request ids.
 
+A pager request whose answer can exceed a RES payload (§3: 4096 B) may carry
+a receiver-allocated id: the pager allocates an odd `xfer` before the call
+and puts it in the request params (`tg.chats`, `tg.messages`). The phone
+either answers inline, or answers `{"xfer","size","crc32"}` with that same
+id and streams the body as DATA, which may overtake the RES on the wire (the
+pager buffers it). The pager checks size and CRC once `size` bytes are in,
+and drops the receiver when the call ends.
+
 - The receiver grants credits with ACK. The initial grant is implicit:
   **16** packets. The sender keeps at most `credits` DATA messages
   unacknowledged.
@@ -171,6 +179,14 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | `chat.ask` | D→P | `{"text"?,"audio_xfer"?,"reset"?}` → `{"transcript"?,"reply"}`. `audio_xfer` names a finished `chat.audio.begin` upload; `transcript` is set for voice. The phone keeps per-pager history (`reset` clears it). Timeout 60 s |
 | `notes.sync` | D→P | `{"targets":["github"\|"phone"],"files":[{"name","size","mtime","crc32","vol"}]}` → `{"job"}`. The pager announces its notes; `name` is the leaf under `/notes` on `vol` (`"int"` or `"sd"`, default `"int"`), `size`/`mtime`/`crc32` describe the raw on-disk bytes (an encrypted note's `Salted__` ciphertext). The phone answers at once, pulls the files it needs with `fs.read` (§6.1) and checks each against its `crc32`; `"github"` pushes them with the phone's repo/branch/token, `"phone"` stores them in the app's folder. The REQ cap (4096 B, §3) applies: the pager splits a long manifest into batches of at most 3500 B of params and runs them as sequential jobs |
 | `evt.notes.sync` | P→D | `{"job","phase","uploaded","already","errors":[<name>…],"done"}`. Progress for `job`, counts cumulative within the job; the last one has `done:true`. The pager fails the sync after 120 s without one |
+| `tg.chats` | D→P | `{"bridge","token","limit","xfer"?}` → `{"body":[{"id","title","unread"}…]}` or, above 4096 B, `{"xfer","size","crc32"}` + DATA (§4). The phone calls `GET <bridge>/v1/chats?limit=` with `Authorization: Bearer <token>` and trims each chat to the listed fields. `bridge`/`token` come with every call (D-H7); the phone uses the token for that one request and never logs or stores it. Timeout 15 s |
+| `tg.messages` | D→P | `{"bridge","token","chat_id","limit","xfer"?}` → `{"body":[{"id","text","from","out","media"?:{"type","w","h"}}…]}` newest first, or `{"xfer","size","crc32"}` + DATA. `GET /v1/chats/{chat_id}/messages?limit=`. `chat_id` and `limit` must be JSON integers (else `invalid_argument`): the phone builds the path itself and never fetches one the pager supplies. Timeout 15 s |
+| `tg.read` | D→P | `{"bridge","token","chat_id","up_to"}` → `{}`. `POST /v1/chats/{chat_id}/read {"up_to"}` |
+| `tg.send` | D→P | `{"bridge","token","chat_id","text"}` → `{}`. `POST /v1/chats/{chat_id}/messages {"text"}` |
+
+tg.* errors: a bridge 401/403 → `unauthorized`; any other non-2xx →
+`http_error` whose `msg` is the decimal HTTP status (e.g. `"502"`), which the
+pager shows as `HTTP <status>`, the same text as its direct Wi-Fi path.
 
 ## 6.1 Methods — Phase 2 (file service, `caps` `"fs"`)
 
@@ -207,9 +223,12 @@ pager call `method` on the phone, and `{"sink","bytes"}` makes it call `sink`
 with `{"size","crc32"}` and stream `bytes` of a fixed pattern to the `xfer`
 the phone returns. `{"chat":"text"|"voice"}` runs a chat turn, and
 `{"notes":"github"|"phone"}` seeds `/notes` on both volumes and runs that
-notes sync. The outcome arrives as `evt.test.result`. Hardware builds
-never register it (`src/hal/link/handlers_test.cpp`): it would let a phone
-make the pager call arbitrary methods.
+notes sync, and
+`{"tg":"chats"|"msgs"|"send"|"notify","bridge","token","chat_id"?,"text"?,"reset"?,"link_down"?}`
+runs one step of the Telegram worker code (list, open chat + mark-read, send,
+one unread-notifier tick). The outcome arrives as `evt.test.result`.
+Hardware builds never register it (`src/hal/link/handlers_test.cpp`): it
+would let a phone make the pager call arbitrary methods.
 
 The rest of the catalog (weather.*, notify.*, …) is specified in
 `IOS_COMPANION_PLAN.md` §4.5 and moves here as each phase lands. A side
