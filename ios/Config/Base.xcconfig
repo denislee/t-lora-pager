@@ -1,0 +1,13 @@
+// Shared build settings for PagerCompanion. Both the generated Xcode project
+// and the app target read this file (project.yml -> configFiles).
+//
+// BUNDLE_ID_PREFIX seeds PRODUCT_BUNDLE_IDENTIFIER. DEVELOPMENT_TEAM is left
+// empty here and is normally supplied by the untracked Config/Local.xcconfig.
+
+BUNDLE_ID_PREFIX = dev.lilygo
+DEVELOPMENT_TEAM =
+
+// Per-developer overrides (team id, bundle id prefix). Not committed; copy
+// Config/Local.xcconfig.example to Config/Local.xcconfig. The `?` makes the
+// include optional so a clean checkout still generates and builds unsigned.
+#include? "Local.xcconfig"

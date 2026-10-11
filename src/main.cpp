@@ -23,6 +23,7 @@
 #include "core/system.h"
 #include "core/system_hooks.h"
 #include "apps/app_registry.h"
+#include "hal/link.h"
 
 // hw_init() is declared in hal/system.h (reachable via hal_interface.h).
 // instanceLockTake/Give come from core/instance_lock.cpp — compiled as no-ops
@@ -96,6 +97,10 @@ extern "C" int main(void)
 
     apps::register_all();
     core::System::getInstance().init();
+
+    // PagerLink companion protocol over TCP (127.0.0.1:7600, PAGERLINK_PORT=0
+    // disables) so the iOS app in the Simulator can talk to the emulator.
+    hw_link_enable(true);
 
     hal_loop();
 }

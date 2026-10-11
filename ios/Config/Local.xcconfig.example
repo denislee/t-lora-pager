@@ -1,0 +1,19 @@
+// Template for per-developer signing settings.
+//
+// Copy this file to `Config/Local.xcconfig` and fill in your values:
+//
+//     cp Config/Local.xcconfig.example Config/Local.xcconfig
+//
+// `Config/Local.xcconfig` is untracked (see the root .gitignore), so team ids
+// and bundle prefixes never land in git. Base.xcconfig pulls it in with
+// `#include? "Local.xcconfig"`; the `?` makes it optional, so a checkout
+// without it still generates and builds (unsigned).
+
+// Your Apple Developer team id, e.g. ABCDE12345. Find it in Xcode ->
+// Settings -> Accounts, or at developer.apple.com. Required for on-device
+// signing; leave commented out for Simulator-only builds.
+// DEVELOPMENT_TEAM = ABCDE12345
+
+// Override the bundle id prefix if `dev.lilygo` is not available on your
+// account. Must end before the `.pagercompanion` suffix.
+// BUNDLE_ID_PREFIX = dev.yourname

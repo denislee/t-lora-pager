@@ -11,3 +11,14 @@ lib/LilyGoLib/firmware/*.bin
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# PagerLink golden-vector header, generated from protocol/vectors/ at test build.
+test/test_link_frame/link_vectors_gen.h
+
+# iOS companion — generated project, build products, per-user state.
+/ios/*.xcodeproj/
+/ios/**/xcuserdata/
+/ios/**/.build/
+/ios/**/DerivedData/
+/ios/**/*.xcresult
+/ios/Config/Local.xcconfig

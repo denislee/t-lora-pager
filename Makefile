@@ -9,7 +9,7 @@ UPLOAD_FLAGS += --upload-port $(PORT)
 MONITOR_FLAGS += --port $(PORT)
 endif
 
-.PHONY: all build upload monitor flash clean emulator help envs
+.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim protocol-test
 
 all: build
 
@@ -33,6 +33,21 @@ emulator:
 envs:
 	$(PIO) project config | grep '^\[env:'
 
+ios-gen:
+	$(MAKE) -C ios gen
+
+ios-test:
+	$(MAKE) -C ios test
+
+ios-sim:
+	$(MAKE) -C ios sim
+
+protocol-test:
+	python3 protocol/tools/mkvectors.py --check
+	$(PIO) test -e native_test -f test_link_frame -f test_link_rpc -f test_link_json
+	cd server && go test ./internal/pagerlink/
+	$(MAKE) -C ios test-linux
+
 help:
 	@echo "Targets:"
 	@echo "  make build          - compile (ENV=$(ENV))"
@@ -42,6 +57,10 @@ help:
 	@echo "  make clean          - clean build artifacts"
 	@echo "  make emulator       - build SDL2 emulator"
 	@echo "  make envs           - list available PlatformIO envs"
+	@echo "  make ios-gen        - generate ios/PagerCompanion.xcodeproj (XcodeGen)"
+	@echo "  make ios-test       - run ios/PagerKit tests on this host (macOS)"
+	@echo "  make ios-sim        - build the iOS app for the Simulator"
+	@echo "  make protocol-test  - check vectors, Unity + Go + PagerKit tests"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ENV=<env>           - PlatformIO env (default: tlora_pager)"
