@@ -1,15 +1,15 @@
 # Lilyhub Removal — Plan
 <!-- plan-doc: v2 -->
-**Progress:** 34% — 9/26
-**Status:** 🟡 H0, H1, H3, H5.1 landed; iOS Track C item 7 (file service) landed as cadd656. Next: H2.1 hw_link_call. H2.3 waits on Track C item 9; H4 on BLE hardware
-**Last updated:** 2026-10-11 — /next: ran iOS-plan Track C item 7 (cadd656) to unblock H2.1/H2.2
+**Progress:** 42% — 11/26
+**Status:** 🟡 H0, H1, H3, H5.1, H2.1, H2.2 landed (+ iOS Track C 7). Next: H2.4/H2.5/H2.6 (emulator). H2.3 waits on Track C 9; H4 on BLE hardware
+**Last updated:** 2026-10-11 — /next: H2.1 hw_link_call (101a65f) + H2.2 pagerlink serve (31aba6f)
 **Beads:** git-ne9bg
 
 ## Handoff
 
-Next action: W7 — H2.1 `hw_link_call(method, params, timeout_ms, cb)` + the DATA transfer-out helper in src/hal/link.h, on top of link_xfer (cadd656)
-In play: /home/dns/tmp/t-lora-pager, branch master, 11 local commits not pushed (8fe85df…c0526f3); baseline shots in /tmp/shots-before
-Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9 (hal/weather_cache + handlers_weather); `make protocol-test` leaves the emulator binary missing, so rebuild before a smoke run
+Next action: W10 — H2.4 chat via phone: rewrite ui_chat kick_off_send/send_task onto chat.audio.begin + hw_link_send_bytes + chat.ask (hw_link_call), drop chat_post; test with `pagerlink serve`
+In play: /home/dns/tmp/t-lora-pager, branch master, 15 local commits not pushed (8fe85df…31aba6f); baseline shots in /tmp/shots-before
+Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9; the emulator TCP link serves one client at a time, so `pagerlink serve` and `smoke` can't run together; `make protocol-test` removes the emulator binary
 
 ## Work
 - [x] **W1** H0.1 Land the uncommitted hub work — ev: 8fe85df (server) · 7038cb7 (libhelix) · fd95e6e (firmware DC pass) · 0f018bb (docs); gate pager/emu/native/go all exit 0 · was: H0.1 · src: L270 · bd: git-ne9bg.1
@@ -21,12 +21,12 @@ Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9 (hal/weather_ca
 - [x] **W13** H3.1 Protocol: drop hub codes + sys.info hub, add LinkOffline — ev: 557a188; make protocol-test exit 0; pagerlink smoke all steps passed · was: H3.1 · src: L377 · bd: git-ne9bg.7
 - [x] **W14** H3.2 Update IOS_COMPANION_PLAN.md — ev: d0e8e64 · was: H3.2 · src: L383 · bd: git-ne9bg.8
 - [x] **W21** H5.1 Relocate Go PagerLink tooling to tools/pagerlink — ev: 7e68e64; go test -race -cover internal/pagerlink 78.7 % (= baseline); smoke passed · was: H5.1 · src: L422 · bd: git-ne9bg.9
-- [ ] **W7** H2.1 Pager-initiated RPC API (`hw_link_call`) — left: Track C item 7 landed (cadd656: link_xfer engine, Rpc::defer, fs.* on emulator); build hw_link_call on top · was: H2.1 · src: L305 · bd: git-ne9bg.10
-- [ ] **W8** H2.2 `pagerlink serve` mock phone — left: fs.read client side exists in tools/pagerlink (ReadFile); add the responder role · after: W7 · was: H2.2 · src: L311 · bd: git-ne9bg.11
+- [x] **W7** H2.1 Pager-initiated RPC API (`hw_link_call`) — ev: 101a65f; smoke 28/28 incl. D→P call/unsupported/timeout/200 KB DATA; neg control (ACKs not routed) fails the 200 KB step · was: H2.1 · src: L305 · bd: git-ne9bg.10
+- [x] **W8** H2.2 `pagerlink serve` mock phone — ev: 31aba6f; pagerlink serve (weather.get/loc.get/chat.audio.begin/chat.ask/notes.sync); Go 82.1 % · after: W7 · was: H2.2 · src: L311 · bd: git-ne9bg.11
 - [!] **W9** H2.3 Weather via phone — blocked: iOS plan Track C item 9 (hal/weather_cache, handlers_weather) not landed · after: W8 · was: H2.3 · src: L315 · bd: git-ne9bg.12
-- [!] **W10** H2.4 Chat via phone — blocked: needs W7/W8 (DATA upload + mock phone) · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
-- [!] **W11** H2.5 Notes sync via phone — blocked: needs W7 + W8 (fs.read is in, cadd656) · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
-- [!] **W12** H2.6 Telegram via phone — blocked: needs W7/W8 (and bulk DATA for >4096 B replies) · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
+- [ ] **W10** H2.4 Chat via phone — left: unblocked by W7/W8; firmware rewrite of ui_chat + iOS ChatService · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
+- [ ] **W11** H2.5 Notes sync via phone — left: unblocked by W7/W8 + fs.read (cadd656) · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
+- [ ] **W12** H2.6 Telegram via phone — left: unblocked by W7/W8; needs DATA-delivered bodies for >4096 B replies (hw_link_send_bytes is pager→phone; phone→pager uses fs-style receiver) · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
 - [!] **W15** H4.1 Hardware acceptance, pager + iPhone, Wi-Fi off — blocked: D-H1 gate, BLE transport (iOS plan Track A step 5) not on hardware · after: W9, W10, W11, W12 · was: H4.1 · src: L390 · bd: git-ne9bg.16
 - [ ] **W16** H4.2 Delete the firmware hub — after: W15 · was: H4.2 · src: L398 · bd: git-ne9bg.17
 - [ ] **W17** H4.3 Status bar: link indicator replaces hub_probe — after: W15 · was: H4.3 · src: L403 · bd: git-ne9bg.18
@@ -57,6 +57,12 @@ Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a
 - server/ still holds lilyhub; the PagerLink Go tooling lives in tools/pagerlink.
 
 ## Log
+
+### 2026-10-11 — /next — W7, W8
+- Env: local emulator (TCP 127.0.0.1:7600), no hardware. LOW (source + local commits).
+- W7 H2.1 ✅ 101a65f: hw_link_call (blocking, worker tasks), hw_link_send_bytes, hw_link_subscribe (EVT routing was missing: Rpc::on_event never set), emulator-only test.callback. Deviation: no LVGL-posted callback; every H2.3–H2.6 consumer already runs on a worker.
+- W8 H2.2 ✅ 31aba6f: Go Client.Handle/Emit/AcceptBytes; `pagerlink serve` mock phone.
+- Evidence: `pagerlink smoke` → 28/28 (new: D→P sys.ping, unknown → unsupported, 500 ms timeout, 200 KB DATA). Neg control: outbound ACK routing removed → `[FAIL] pager->phone 200 KB DATA`; restored → pass. Six envs build; native 113/113; Go 82.1 %. `serve` connects and stops on SIGINT.
 
 ### 2026-10-11 — /next — outside item: IOS_COMPANION_PLAN.md Track C item 7
 - User chose to unblock H2 by running the iOS plan's Track C item 7. Landed as cadd656 (+ c0526f3 log in the iOS plan): fs.* handlers, link_xfer credit-window engine + CRC-32, fs_volume (real dirs on the emulator), sandbox_path, Rpc::defer, evt.fs.changed, Go ReadFile/WriteFile + CLI.
