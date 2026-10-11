@@ -828,13 +828,30 @@ built and tested against the emulator over TCP with `pagerlink`.
    `settings_connectivity.cpp`, `UI_SHOTS` states (pairing / connected /
    transfer) in every style × dark mode. Binds to `hal/link.h` only; the
    BLE-specific parts light up after Track A.
-9. **Phase 3 groundwork:** extract `ForecastCache`/`GeoData` load/save into
+9. **Done 2026-10-11 (`668cbef` + `bf12208`; consumer in `e489487`, see the log entry below).**
+   **Phase 3 groundwork:** extract `ForecastCache`/`GeoData` load/save into
    `hal/weather_cache.{h,cpp}` as a behaviour-neutral commit first, then
    `handlers_weather.cpp` (`weather.push`, and the pager-initiated
    `weather.get` step in the fetch chain) tested from `pagerlink`.
 
 Recommended order: 1 (start the code now) and 6 whenever a Mac is at hand;
 otherwise 7 → 8 → 9 while hardware is unavailable.
+
+### 2026-10-11 — Track C item 9: weather cache + `weather.push` (`668cbef`, `bf12208`, local, not pushed)
+
+Done (firmware + Go; the iOS Open-Meteo provider and proactive push wait for Track B):
+
+- `hal/weather_cache.{h,cpp}`: ForecastCache/GeoData load/save moved out of
+  `ui_weather.cpp` unchanged on hardware (`sizeof(ForecastCache) == 144`
+  asserted); RAM-backed on the emulator.
+- `hal/weather_payload` (pure ForecastPayload codec, integer fields, ranges
+  rejected), `handlers_weather.cpp` (`weather.push`), `"weather"` cap,
+  `PROTOCOL.md` §6.3 (`weather.push`, `weather.get`), `pagerlink` mock + smoke.
+- The pager-initiated `weather.get` step landed as `HUB_REMOVAL_PLAN.md` H2.3
+  (`e489487`): direct → phone → stale cache, "via phone" label.
+- Evidence: native 133/133, `make protocol-test` 0, smoke 45/45, all six envs
+  build. Negative controls: temp range check removed → native + smoke FAIL;
+  reply-key check removed → smoke step FAIL.
 
 ### 2026-10-11 — Track C item 7: Phase 2 file service on the emulator (`cadd656`, local, not pushed)
 

@@ -1,15 +1,15 @@
 # Lilyhub Removal — Plan
 <!-- plan-doc: v2 -->
-**Progress:** 51% — 14/27
-**Status:** 🟡 H0, H1, H2.1/H2.2/H2.4–H2.6 (firmware + mock), H3, H5.1 landed. Remaining: W9 (iOS Track C 9), W27 iOS services (Track B), W15 BLE hardware gate → H4–H6
-**Last updated:** 2026-10-11 — /next: W10 chat (5cbbd8b), W11 notes (a443b12), W12 Telegram (8af40f4) via phone; W27 parked
+**Progress:** 55% — 15/27
+**Status:** 🟡 H0–H3 firmware + mock done (H2.1–H2.6), H5.1 landed. Remaining: W27 iOS services (Mac), W15 BLE hardware gate → H4–H6
+**Last updated:** 2026-10-11 — /next: W9 weather via phone (e489487) after iOS Track C 9 (668cbef, bf12208)
 **Beads:** git-ne9bg
 
 ## Handoff
 
-Next action: no runnable item in this doc — W9 needs IOS_COMPANION_PLAN.md Track C item 9 (run `/next IOS_COMPANION_PLAN.md`); W27 needs a PagerKit DATA/ACK + fs.read port and a Mac; W15 needs BLE on hardware
-In play: /home/dns/tmp/t-lora-pager, branch master, 18 local commits not pushed (8fe85df…8af40f4); baseline shots in /tmp/shots-before
-Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hub) stay until W16 per D-H1; emulator TCP link serves one client at a time; `make protocol-test` removes the emulator binary; kill the emulator by PID/SID, never by name
+Next action: none runnable from this box. W15 needs BLE (iOS plan Track A step 5) on a real pager + iPhone, and W27 needs a PagerKit DATA/ACK + fs.read port and a Mac. W16–W26 wait on W15.
+In play: /home/dns/tmp/t-lora-pager, branch master, local commits not pushed (8fe85df…e489487); baseline shots in /tmp/shots-before (predate H2.4–H2.6), latest in /tmp/shots-w9
+Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hub) stay until W16 per D-H1; iOS weather half (Open-Meteo/CoreLocation/weather.push) is iOS-plan Phase 3; emulator TCP link serves one client at a time; `make protocol-test` removes the emulator binary; kill the emulator by PID/SID, never by name
 
 ## Work
 - [x] **W1** H0.1 Land the uncommitted hub work — ev: 8fe85df (server) · 7038cb7 (libhelix) · fd95e6e (firmware DC pass) · 0f018bb (docs); gate pager/emu/native/go all exit 0 · was: H0.1 · src: L270 · bd: git-ne9bg.1
@@ -23,7 +23,7 @@ Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hu
 - [x] **W21** H5.1 Relocate Go PagerLink tooling to tools/pagerlink — ev: 7e68e64; go test -race -cover internal/pagerlink 78.7 % (= baseline); smoke passed · was: H5.1 · src: L422 · bd: git-ne9bg.9
 - [x] **W7** H2.1 Pager-initiated RPC API (`hw_link_call`) — ev: 101a65f; smoke 28/28 incl. D→P call/unsupported/timeout/200 KB DATA; neg control (ACKs not routed) fails the 200 KB step · was: H2.1 · src: L305 · bd: git-ne9bg.10
 - [x] **W8** H2.2 `pagerlink serve` mock phone — ev: 31aba6f; pagerlink serve (weather.get/loc.get/chat.audio.begin/chat.ask/notes.sync); Go 82.1 % · after: W7 · was: H2.2 · src: L311 · bd: git-ne9bg.11
-- [!] **W9** H2.3 Weather via phone — blocked: iOS plan Track C item 9 (hal/weather_cache, handlers_weather) not landed · after: W8 · was: H2.3 · src: L315 · bd: git-ne9bg.12
+- [x] **W9** H2.3 Weather via phone — ev: e489487 (+ Track C 9: 668cbef, bf12208); firmware + mock; smoke 45/45; six envs 0; native 133/133; neg control (no key check) fails step (d) · risk LOW · after: W8 · was: H2.3 · src: L315 · bd: git-ne9bg.12
 - [x] **W10** H2.4 Chat via phone — ev: 5cbbd8b; firmware + mock only (link first, hub fallback per D-H1); smoke 30/30; neg control (CRC^1) fails the voice step · risk LOW · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
 - [x] **W11** H2.5 Notes sync via phone — ev: a443b12; firmware + mock (link first, hub fallback); smoke 32/32 incl. Salted__ byte-for-byte; native 117/117; neg controls (1-batch, plaintext CRC) fail · risk LOW · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
 - [x] **W12** H2.6 Telegram via phone — ev: 8af40f4; firmware + mock; smoke 41/41 (bulk >4096 B tg.messages, notifier once/silent/Offline); native 121/121; Go 82.9 %; neg controls (dedup, recv CRC) fail · risk LOW · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
@@ -52,7 +52,7 @@ Blocker lives in another plan: IOS_COMPANION_PLAN.md › Track C item 7 (Phase 2
 ### W9 — H2.3 Weather via phone
 Blocker lives in another plan: IOS_COMPANION_PLAN.md › Track C item 9 (hal/weather_cache + handlers_weather). Run it, then resume here.
 ```
-# OPEN
+# ✅ DONE 2026-10-11 — do not re-run (Track C 9 = 668cbef + bf12208; W9 = e489487)
 /next IOS_COMPANION_PLAN.md
 ```
 
@@ -68,6 +68,15 @@ Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a
 - server/ still holds lilyhub; the PagerLink Go tooling lives in tools/pagerlink.
 
 ## Log
+
+### 2026-10-11 — /next — W9 (+ outside item: IOS_COMPANION_PLAN.md Track C item 9)
+- Env: local emulator (TCP 127.0.0.1:7600), no hardware, nothing pushed. All LOW (source + local commits); rollback = `git revert <sha>`.
+- User chose to unblock W9 by running the iOS plan's Track C item 9 first.
+- Track C 9a ✅ 668cbef: `hal/weather_cache` (GeoData/ForecastCache + load/save + `weather_cache_key`), Preferences on hw, mutex-guarded RAM store on emulator/native; `static_assert(sizeof(ForecastCache) == 144)`. Gate: pager 0, emu 0, native 121/121.
+- Track C 9b ✅ bf12208: pure `hal/weather_payload` (ForecastPayload codec, integer-only, ranges rejected not clamped), `handlers_weather.cpp` (`weather.push`), `"weather"` cap, `weather_cache_generation()` + `s_gen_timer` re-render, emulator-only `test.weather.cache`, PROTOCOL.md §6.3, Go mockForecast + smoke r/s. Gate: native 133/133, protocol-test 0, smoke 43/43, Go internal 82.9 %. Neg control (temp range check removed) → `test_reject_hourly_temp_out_of_range: Expected FALSE Was TRUE [FAILED]` + `[FAIL] phone->pager weather.push temp 200 -> invalid_argument, cache unchanged`; restored → pass.
+- W9 H2.3 ✅ e489487: chain fresh cache → direct (hw, Wi-Fi) → phone (`hal/weather_link`, `weather.get` 15 s, reply key must match) → stale cache; "via phone" label; "Connect Wi-Fi or your phone." when nothing is available (replaces "WiFi not connected." on hw with no cache). Emulator Weather now works through the phone (detached std::thread worker). Gate: six envs 0, native 133/133, protocol-test 0, smoke 45/45. Neg control (key-mismatch check removed) → `[FAIL] pager->phone weather.get reply for another key -> refused, cache unchanged`; restored → pass.
+- Shots /tmp/shots-w9 vs /tmp/shots-before: 32/256 differ below row 30 = 4 pages × 8 dirs: 24-weather (expected), 05-settings_page02 (clock spinbox, known variance), 15-settings_page12 + 26-notes_sync (from a443b12/H2.5, after the baseline). /tmp/shots-before predates H2.4–H2.6, so W19 must account for those.
+- Not done here: the iOS half of weather (Open-Meteo provider, CoreLocation, proactive weather.push), which is iOS-plan Phase 3 / Track B and needs a Mac, like W27.
 
 ### 2026-10-11 — /next — W10, W11, W12
 - Env: local emulator (TCP 127.0.0.1:7600), no hardware, nothing pushed. All LOW (source + local commits); rollback = `git revert <sha>`.
