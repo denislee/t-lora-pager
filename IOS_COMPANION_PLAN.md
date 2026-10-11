@@ -1,7 +1,8 @@
 # iOS Companion App — Plan
 
-> **Status:** in progress, 2026-10-10. §12 steps 1, 2, 5 and the
-> hardware-independent half of Phase 1 have landed (`165067a`); Phase 0
+> **Status:** in progress, 2026-10-11. §12 steps 1, 2, 5, the
+> hardware-independent half of Phase 1 (`165067a`) and the Phase 2 file
+> service on the emulator (Track C item 7, `cadd656`) have landed; Phase 0
 > spikes S1–S5 are open and need a pager + iPhone. See §13 for the log.
 > **Scope:** a native iOS app ("Pager Companion") that pairs with the
 > T-LoRa-Pager over Bluetooth Low Energy, moves data both ways, and lets
@@ -810,7 +811,8 @@ built and tested against the emulator over TCP with `pagerlink`.
 
 **Track C — no hardware (emulator over TCP)**
 
-7. **Phase 2 file service (recommended next):** `handlers_fs.cpp`
+7. **Done 2026-10-11 (`cadd656`, firmware + Go; see the log entry below).**
+   **Phase 2 file service:** `handlers_fs.cpp`
    (`fs.list/stat/read/write.begin/commit/abort/delete/mkdir/rename`,
    `evt.fs.changed`), credit-window bulk transfer (§4 of `PROTOCOL.md`),
    chunked write to `<path>.part` + rename on CRC-matching commit,
@@ -833,3 +835,50 @@ built and tested against the emulator over TCP with `pagerlink`.
 
 Recommended order: 1 (start the code now) and 6 whenever a Mac is at hand;
 otherwise 7 → 8 → 9 while hardware is unavailable.
+
+### 2026-10-11 — Track C item 7: Phase 2 file service on the emulator (`cadd656`, local, not pushed)
+
+Done (firmware + Go; the iOS Files screen waits for Track B):
+
+- `fs.list/stat/read/write.begin/commit/abort/delete/mkdir/rename` and
+  `evt.fs.changed` (`src/hal/link/handlers_fs.cpp`), specified in
+  `PROTOCOL.md` §6.1. `sys.hello` caps now include `"fs"`.
+- Credit-window bulk transfer as a pure engine (`link_xfer.{h,cpp}`:
+  credits count DATA messages, go-back-N on a no-progress ACK) plus
+  CRC-32/ISO-HDLC, with CRC vectors added to `bulk.json` (zlib oracle).
+- Writes land in `<path>.part` and are renamed only on a size + CRC-matching
+  commit; abort, a 30 s stall and a link drop delete the `.part`. Max two
+  transfers. `fs.read` ids are allocated by the phone (even), `fs.write` ids
+  by the pager (odd), per §4's receiver rule.
+- Path sandbox: `sandbox_path()` in `notes_path` (`..`, backslash, control
+  bytes rejected). Encrypted notes are served raw with `protected:true`.
+- Storage goes through `fs_volume.{h,cpp}` rather than new `hw_rename_path`
+  / `hw_mkdir_path` in `hal/storage`: on the emulator it is a real directory
+  tree (`$PAGERLINK_FS_ROOT`, default `/tmp/pagerlink-fs`), separate from the
+  canned listings the UI and screenshot sweep render.
+- `Rpc::defer()` (first DATA after the RES); `hw_get_filesystem_generation()`
+  drives `evt.fs.changed` without clearing the apps' dirty flag; transfers
+  tap the P6.11 CPU boost (`hw_cpu_boost_for_input`).
+- Go: `Client.ReadFile/WriteFile`, CLI `ls|stat|get|put|rm|mkdir|mv`.
+
+Evidence:
+
+- Exit criteria, `go run ./cmd/pagerlink smoke` against the emulator → 24/24
+  PASS: 1 MiB round trip with matching CRC-32; a connection dropped after
+  8 KiB of a 64 KiB upload leaves neither the file nor its `.part`; `..`
+  paths rejected on stat/list/read/mkdir; bad CRC → `invalid_argument` and
+  no `.part`; `evt.fs.changed` received.
+- Negative controls: letting `..` through fails `test_sandbox_rejects`;
+  keeping the `.part` on drop fails the smoke's bad-CRC and dropped-upload
+  steps.
+- `pio test -e native_test` → 113/113 (new `test_link_xfer` 11, sandbox 4,
+  CRC vectors 1, `Rpc::defer` 2). `make protocol-test` green. Go
+  `internal/pagerlink` coverage 78.7 → 80.7 %.
+- All six envs build. Screenshot sweep unchanged below the status bar.
+
+Not done in item 7: resume (`resume:true` → `unsupported`), the
+trusted-phone confirm prompt (§8, needs Track A's trusted list), deferring
+fake sleep during a transfer (needs the BLE transport on hardware), the iOS
+Files screen (Track B). `make protocol-test` leaves
+`.pio/build/emulator_lora_pager/program` missing; rebuild the emulator
+before a smoke run.
