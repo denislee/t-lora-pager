@@ -41,6 +41,7 @@
 #include "../hal/wireless.h"
 #include "../hal/system.h"
 #include "../hal/str_encode.h"
+#include "../hal/weather_cache.h"
 #include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
 #include "app_registry.h"
@@ -87,8 +88,6 @@ static const char *GEO_URL =
     "http://ip-api.com/json/?fields=status,lat,lon,city,regionName,country";
 #endif
 
-#define WEATHER_PREFS_NS       "weather"
-#define WEATHER_CACHE_VER      1
 // If the on-disk forecast is younger than this, the weather app opens with
 // zero network calls. Open-meteo's free tier recommends <= 1 req per minute,
 // so 15 min leaves plenty of margin while keeping numbers recent enough.
@@ -429,11 +428,6 @@ static std::string json_str(cJSON *obj, const char *key)
     return sanitize_ascii(v->valuestring);
 }
 
-struct GeoData {
-    std::string location;
-    double lat = 0, lon = 0;
-};
-
 static bool parse_geo(const std::string &body, GeoData &out, std::string &err)
 {
     cJSON *root_json = cJSON_Parse(body.c_str());
@@ -469,46 +463,6 @@ static bool parse_geo(const std::string &body, GeoData &out, std::string &err)
 
     cJSON_Delete(root_json);
     return true;
-}
-
-// --- location cache -------------------------------------------------------
-// Skipping the geo lookup on every fetch halves the total request count. IP
-// geolocation is stable enough that caching across sessions is fine; we bump
-// WEATHER_CACHE_VER if the stored schema ever changes.
-//
-// A cache is valid only for the source it was fetched for: the `key` field is
-// "auto" for IP-based lookups or the user-supplied city name for manual mode.
-// Switching modes invalidates the cache automatically.
-
-static bool load_cached_geo(const std::string &want_key, GeoData &out)
-{
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, true)) return false;
-    int ver = p.getInt("ver", 0);
-    if (ver != WEATHER_CACHE_VER) { p.end(); return false; }
-    String key = p.getString("key", "");
-    String loc = p.getString("loc", "");
-    float lat = p.getFloat("lat", 0);
-    float lon = p.getFloat("lon", 0);
-    p.end();
-    if (loc.length() == 0) return false;
-    if (want_key != key.c_str()) return false;
-    out.location = loc.c_str();
-    out.lat = lat;
-    out.lon = lon;
-    return true;
-}
-
-static void save_cached_geo(const std::string &key, const GeoData &in)
-{
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, false)) return;
-    p.putInt("ver", WEATHER_CACHE_VER);
-    p.putString("key", key.c_str());
-    p.putString("loc", in.location.c_str());
-    p.putFloat("lat", (float)in.lat);
-    p.putFloat("lon", (float)in.lon);
-    p.end();
 }
 
 static bool fetch_geo_ip(GeoData &out, std::string &err)
@@ -562,62 +516,6 @@ static int current_local_hour()
     struct tm info;
     localtime_r(&now, &info);
     return info.tm_hour;
-}
-
-// --- forecast cache -------------------------------------------------------
-// The forecast itself is cached in NVS as a compact binary blob. Open-meteo's
-// 7-day response is ~5 KB raw and would blow past the NVS string limit, but
-// the subset we actually render (8 hourly cells, 7 daily cells) packs into
-// ~190 bytes — easy to persist and cheap to parse on open.
-//
-// The cache is keyed the same way as the geo cache (user_city or "auto"), so
-// switching location automatically invalidates it.
-
-struct CacheHour {
-    uint8_t hr;      // 0-23
-    uint8_t code;    // WMO weather code
-    int8_t  temp;    // Celsius
-    uint8_t pop;     // precipitation probability, 0-100
-};
-
-struct CacheDay {
-    char    date[11];   // "YYYY-MM-DD" + NUL — consumed by weekday_from_date()
-    uint8_t code;
-    int8_t  hi;
-    int8_t  lo;
-    uint8_t pop;
-};
-
-struct ForecastCache {
-    uint32_t  ts;           // unix time of fetch (0 = unknown clock)
-    uint8_t   hourly_count;
-    uint8_t   daily_count;
-    CacheHour hourly[8];
-    CacheDay  daily[7];
-};
-
-static bool load_forecast_cache(const std::string &want_key, ForecastCache &out)
-{
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, true)) return false;
-    int ver = p.getInt("fcv", 0);
-    if (ver != WEATHER_CACHE_VER) { p.end(); return false; }
-    String key = p.getString("fck", "");
-    if (want_key != key.c_str()) { p.end(); return false; }
-    memset(&out, 0, sizeof(out));
-    size_t got = p.getBytes("fcd", &out, sizeof(out));
-    p.end();
-    return got == sizeof(out);
-}
-
-static void save_forecast_cache(const std::string &key, const ForecastCache &in)
-{
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, false)) return;
-    p.putInt("fcv", WEATHER_CACHE_VER);
-    p.putString("fck", key.c_str());
-    p.putBytes("fcd", &in, sizeof(in));
-    p.end();
 }
 
 // --- JSON -> cache --------------------------------------------------------
@@ -772,7 +670,7 @@ static WeatherFetchResult *weather_fetch(const std::string &key,
 
     std::string err;
     GeoData g;
-    if (!load_cached_geo(key, g)) {
+    if (!weather_cache_load_geo(key, g)) {
         bool ok = user_city.empty() ? fetch_geo_ip(g, err)
                                     : fetch_geo_city(user_city, g, err);
         if (!ok && user_city == WEATHER_DEFAULT_CITY) {
@@ -787,14 +685,14 @@ static WeatherFetchResult *weather_fetch(const std::string &key,
             res->status = "geo fail: " + (err.empty() ? std::string("err") : err);
             return res;
         }
-        save_cached_geo(key, g);
+        weather_cache_save_geo(key, g);
     }
 
     if (!fetch_weather(g.lat, g.lon, res->forecast, err)) {
         res->status = "forecast: " + err;
         return res;
     }
-    save_forecast_cache(key, res->forecast);
+    weather_cache_save_forecast(key, res->forecast);
     res->ok = true;
     res->status_color = UI_COLOR_MUTED;
     return res;
@@ -814,13 +712,13 @@ static void do_fetch()
 {
 #ifdef ARDUINO
     std::string user_city = weather_get_user_city();
-    std::string key = user_city.empty() ? std::string("auto") : user_city;
+    std::string key = weather_cache_key(user_city);
 
     // Load any cached forecast for the current key up front — we'll use it
     // to render immediately (fresh *or* stale) so the panel is never blank
     // while we figure out whether to hit the network.
     ForecastCache cache;
-    bool have_cache = load_forecast_cache(key, cache);
+    bool have_cache = weather_cache_load_forecast(key, cache);
 
     time_t now_t = time(nullptr);
     bool clock_ok = now_t > 1000000000;
@@ -1038,7 +936,7 @@ void weather_set_user_city(const char *city)
     p.putString("user_city", (city && *city) ? city : "");
     // Drop the cached lat/lon *and* the cached forecast so the next fetch
     // resolves the new source from scratch — otherwise we'd render the old
-    // city's forecast until the key-mismatch check in load_forecast_cache
+    // city's forecast until the key-mismatch check in weather_cache_load_forecast
     // eventually threw it out.
     p.remove("ver");
     p.remove("key");
