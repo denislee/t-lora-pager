@@ -92,6 +92,7 @@ void register_sys_handlers(Rpc &rpc) {
             .begin_array()
             .str_val("sys")
             .str_val("fs")
+            .str_val("weather")
             .end_array()
             .key("mtu")
             .uint_val(static_cast<uint64_t>(service_packet_size() + 3))

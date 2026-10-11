@@ -191,6 +191,9 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	// i. - q. The Telegram via the phone steps (HUB_REMOVAL_PLAN.md H2.6).
 	pass = tgSteps(c, timeout, phone) && pass
 
+	// r. - s. weather.push + cache read-back (IOS_COMPANION_PLAN.md Track C 9).
+	pass = weatherPushSteps(c, timeout) && pass
+
 	return pass
 }
 

@@ -30,6 +30,8 @@
  * State reset on onStop (ui_weather_exit):
  *   widgets: hourly_col, daily_col, status_label
  *                                       — nulled (deleted with parent)
+ *   timer:   s_gen_timer (1 s weather_cache_generation() poll that
+ *            re-renders after a weather.push) — deleted, nulled
  *   job:     s_w_job (HTTPS fetcher + drain ticker, core::OneShotJob)
  *                                       — teardown(): drain killed, a running
  *                                          worker detached (frees its own result)
@@ -106,6 +108,11 @@ static lv_obj_t *hourly_col = nullptr;
 static lv_obj_t *daily_col = nullptr;
 static lv_obj_t *status_label = nullptr;
 
+// weather.push notification: polls weather_cache_generation() and re-renders
+// when a save for the current key happened outside this app's own fetch.
+static lv_timer_t *s_gen_timer = nullptr;
+static uint32_t s_seen_gen = 0;
+
 // --- async fetch state ----------------------------------------------------
 //
 // HTTP runs on a core::OneShotJob worker (s_w_job, below weather_fetch) so the
@@ -177,9 +184,9 @@ static void set_status(const char *text, lv_color_t color)
     lv_obj_set_style_text_color(status_label, color, 0);
 }
 
-#ifdef ARDUINO
-// Everything from here to make_cell() is the forecast-grid renderer; only
-// render_cache() (hardware fetch path) draws it, so it is hardware-only.
+// Everything from here to make_cell() is the forecast-grid renderer, used by
+// render_cache() on both builds (the emulator renders forecasts the phone
+// pushes or returns over PagerLink).
 
 // --- pictorial icon drawing ------------------------------------------------
 // Icons are drawn inside a fixed 20x20 widget via LV_EVENT_DRAW_MAIN. Shapes
@@ -410,7 +417,6 @@ static lv_obj_t *make_cell(lv_obj_t *parent, const char *top, int icon_kind,
     add_label(bot, lv_color_hex(0x4AA3FF));
     return cell;
 }
-#endif // ARDUINO (forecast-grid renderer)
 
 static void clear_all()
 {
@@ -507,6 +513,8 @@ static bool fetch_geo_city(const std::string &city, GeoData &out, std::string &e
     return true;
 }
 
+#endif // ARDUINO
+
 // Returns 0-23 if system time is synced, otherwise -1. Used to mark the
 // current slot in the 24h strip.
 static int current_local_hour()
@@ -517,6 +525,8 @@ static int current_local_hour()
     localtime_r(&now, &info);
     return info.tm_hour;
 }
+
+#ifdef ARDUINO
 
 // --- JSON -> cache --------------------------------------------------------
 // open-meteo's `hourly` starts at the current day's 00:00 local — we walk
@@ -580,6 +590,8 @@ static void build_daily_cache(cJSON *daily, ForecastCache &out)
     }
 }
 
+#endif // ARDUINO
+
 // --- cache -> UI ----------------------------------------------------------
 // Both the NVS-loaded cache path and the post-fetch path feed through here,
 // so the cold-start and fresh-fetch renders are pixel-identical.
@@ -610,6 +622,8 @@ static void render_cache(const ForecastCache &c)
         make_cell(daily_col, name, wmo_to_icon(d.code), tr_buf, p_buf, i == 0);
     }
 }
+
+#ifdef ARDUINO
 
 // Single open-meteo call covering hourly (24h sampled) + daily (7d). Populates
 // `out` with the compact cache form used by render_cache().
@@ -701,6 +715,7 @@ static WeatherFetchResult *weather_fetch(const std::string &key,
 // Drain callback (LVGL thread, instance mutex held by lv_timer_handler).
 static void weather_fetch_done(WeatherFetchResult &r)
 {
+    s_seen_gen = weather_cache_generation();  // our own save, already rendered
     if (r.ok) render_cache(r.forecast);
     set_status(r.status.c_str(), r.status_color);
 }
@@ -780,6 +795,31 @@ static void do_fetch()
     clear_all();
     set_status("Not supported on emulator.", UI_COLOR_MUTED);
 #endif
+}
+
+// True while this app's own fetch may still save to the cache.
+static bool fetch_in_flight()
+{
+#ifdef ARDUINO
+    return s_w_job.busy();
+#else
+    return false;
+#endif
+}
+
+// LVGL thread, 1 s: a forecast saved by someone else (weather.push) for the
+// key we display is re-rendered from the cache.
+static void gen_poll_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!hourly_col || fetch_in_flight()) return;
+    const uint32_t gen = weather_cache_generation();
+    if (gen == s_seen_gen) return;
+    s_seen_gen = gen;
+    ForecastCache cache;
+    if (!weather_cache_load_forecast(weather_cache_key(weather_get_user_city()), cache)) return;
+    render_cache(cache);
+    set_status("via phone", UI_COLOR_MUTED);
 }
 
 static void root_click_cb(lv_event_t *e)
@@ -864,7 +904,9 @@ static void ui_weather_enter(lv_obj_t *parent)
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_remove_flag(daily_col, LV_OBJ_FLAG_CLICKABLE);
 
+    s_seen_gen = weather_cache_generation();
     do_fetch();
+    s_gen_timer = lv_timer_create(gen_poll_cb, 1000, nullptr);
 }
 
 static void ui_weather_exit(lv_obj_t *parent)
@@ -879,6 +921,7 @@ static void ui_weather_exit(lv_obj_t *parent)
     hourly_col = nullptr;
     daily_col = nullptr;
     status_label = nullptr;
+    if (s_gen_timer) { lv_timer_delete(s_gen_timer); s_gen_timer = nullptr; }
 
 #ifdef ARDUINO
     // Stop draining the bg fetch, if any. A running worker is left to finish

@@ -67,3 +67,7 @@ void weather_cache_save_geo(const std::string &key, const GeoData &in);
 // Forecast cache, same keying rules as the location cache.
 bool weather_cache_load_forecast(const std::string &want_key, ForecastCache &out);
 void weather_cache_save_forecast(const std::string &key, const ForecastCache &in);
+
+// Change signal: bumped on every weather_cache_save_forecast() (any key, any
+// task). The Weather app polls it to re-render after a weather.push.
+uint32_t weather_cache_generation();

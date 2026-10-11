@@ -26,6 +26,8 @@
 #include "hal/link/link_service.h"
 #include "hal/link/link_xfer.h"
 #include "hal/notes_link.h"
+#include "hal/weather_cache.h"
+#include "hal/weather_payload.h"
 
 namespace pagerlink {
 namespace {
@@ -416,10 +418,35 @@ bool handle_test_callback(const JsonObject &params, JsonWriter &result, RpcError
     return true;
 }
 
+/**
+ * test.weather.cache {key} — the forecast (and location, when cached) stored
+ * under `key`, re-encoded as a ForecastPayload; not_found when none. The
+ * smoke read-back for weather.push / weather.get.
+ */
+bool handle_test_weather_cache(const JsonObject &params, JsonWriter &result, RpcError &err) {
+    std::string key;
+    if (!params.get_string("key", key) || key.empty()) {
+        err.code = hal_error_code(HalError::InvalidArgument);
+        err.msg = "key required";
+        return false;
+    }
+    ForecastCache fc;
+    if (!weather_cache_load_forecast(key, fc)) {
+        err.code = "not_found"; /* test-only; not a §3.4 code */
+        err.msg = "no cached forecast for key";
+        return false;
+    }
+    GeoData geo;
+    const bool has_geo = weather_cache_load_geo(key, geo);
+    result.raw_val(weather_payload_encode(key, fc, has_geo ? &geo : nullptr).c_str());
+    return true;
+}
+
 }  // namespace
 
 void register_test_handlers(Rpc &rpc) {
     rpc.handle("test.callback", handle_test_callback);
+    rpc.handle("test.weather.cache", handle_test_weather_cache);
 }
 
 }  // namespace pagerlink

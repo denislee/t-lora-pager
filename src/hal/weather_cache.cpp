@@ -4,6 +4,7 @@
  */
 #include "weather_cache.h"
 
+#include <atomic>
 #include <cstring>
 
 #ifdef ARDUINO
@@ -11,6 +12,13 @@
 #else
 #include <mutex>
 #endif
+
+static std::atomic<uint32_t> g_generation{0};
+
+uint32_t weather_cache_generation()
+{
+    return g_generation.load();
+}
 
 std::string weather_cache_key(const std::string &user_city)
 {
@@ -72,6 +80,7 @@ void weather_cache_save_forecast(const std::string &key, const ForecastCache &in
     p.putString("fck", key.c_str());
     p.putBytes("fcd", &in, sizeof(in));
     p.end();
+    g_generation.fetch_add(1);
 }
 
 #else  // !ARDUINO — process-local store (emulator, native tests)
@@ -121,6 +130,7 @@ void weather_cache_save_forecast(const std::string &key, const ForecastCache &in
     g_fc_key = key;
     memcpy(&g_fc, &in, sizeof(g_fc));
     g_fc_set = true;
+    g_generation.fetch_add(1);
 }
 
 #endif

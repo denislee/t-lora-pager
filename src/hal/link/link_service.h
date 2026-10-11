@@ -60,6 +60,8 @@ void register_sys_handlers(Rpc &rpc);
  */
 /** Register the fs.* handlers on `rpc` and adopt it for bulk sends. */
 void register_fs_handlers(Rpc &rpc);
+/** Register the weather.* handlers on `rpc` (handlers_weather.cpp). */
+void register_weather_handlers(Rpc &rpc);
 /** Route one DATA/ACK message (Rpc::on_bulk) to its transfer; returns true when
  * the xfer id belongs to an fs transfer, false when it is unknown. */
 bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);

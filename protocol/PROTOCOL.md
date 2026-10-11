@@ -226,11 +226,37 @@ the phone returns. `{"chat":"text"|"voice"}` runs a chat turn, and
 notes sync, and
 `{"tg":"chats"|"msgs"|"send"|"notify","bridge","token","chat_id"?,"text"?,"reset"?,"link_down"?}`
 runs one step of the Telegram worker code (list, open chat + mark-read, send,
-one unread-notifier tick). The outcome arrives as `evt.test.result`.
+one unread-notifier tick). The outcome arrives as `evt.test.result`. `test.weather.cache` `{"key"}` (P→D) answers synchronously with the forecast the pager has cached under `key`, re-encoded as a ForecastPayload (§6.3), or ERR `not_found` (test-only code) when there is none.
 Hardware builds never register it (`src/hal/link/handlers_test.cpp`): it
 would let a phone make the pager call arbitrary methods.
 
-The rest of the catalog (weather.*, notify.*, …) is specified in
+## 6.3 Methods — weather (`caps` `"weather"`)
+
+The phone holds the location/weather sources; the pager caches the result per
+cache key (`"auto"` for IP geolocation, otherwise the user-chosen city name)
+and renders it. Both directions carry the same JSON object, the
+**ForecastPayload**:
+
+```json
+{"key":"Sao Paulo","ts":1760000000,"hourly":[{"hr":0,"code":0,"temp":18,"pop":0}],"daily":[{"date":"2026-10-11","code":2,"hi":28,"lo":17,"pop":0}],"city":"Sao Paulo","lat":-23.55,"lon":-46.63}
+```
+
+| Field | Rule |
+|---|---|
+| `key` | required string, 1..64 bytes; the cache key the forecast belongs to |
+| `ts` | required integer, 0..4294967295; unix seconds of the forecast (0 = unknown clock) |
+| `hourly` | required array, at most 8 entries (3-hourly slots of today); each `{hr, code, temp, pop}`: integers `hr` 0..23, `code` 0..255 (WMO weather code), `temp` -128..127 °C, `pop` 0..100 % |
+| `daily` | required array, at most 7 entries; each `{date, code, hi, lo, pop}`: `date` exactly `"YYYY-MM-DD"`, the rest integers — `code` 0..255, `hi`/`lo` -128..127, `pop` 0..100 |
+| `city`, `lat`, `lon` | optional; `city` a string (stored ASCII-folded for the pager font), `lat` a number in [-90, 90], `lon` a number in [-180, 180]. The location is stored only when all three are present; a partial set is ignored, not an error |
+
+Integers must be JSON integers (a string or a fraction is rejected). A payload that breaks any rule is refused whole with `invalid_argument` and a `msg` naming the field (e.g. `hourly[0].temp out of range`); the pager never clamps or stores part of it.
+
+| Method / event | Dir | Params → result |
+|---|---|---|
+| `weather.push` | P→D | ForecastPayload → `{}`. The pager stores the forecast (and the location, when complete) under `key`; an open Weather app showing that key re-renders. Invalid → `invalid_argument` |
+| `weather.get` | D→P | `{"key"}` → ForecastPayload. The pager asks for the forecast of its current key when it has no fresh cache and no Wi-Fi (or the direct fetch failed). A reply whose `key` differs from the requested one is discarded. Timeout 15 s |
+
+The rest of the catalog (notify.*, …) is specified in
 `IOS_COMPANION_PLAN.md` §4.5 and moves here as each phase lands. A side
 that doesn't implement a method answers ERR `unsupported`; `caps` lists the
 method families each side implements (`"sys"`, `"fs"`, `"weather"`, …).

@@ -112,8 +112,14 @@ func (s *mockPhone) register() {
 	s.handle("loc.get", func(json.RawMessage) (any, *pagerlink.RPCError) {
 		return json.RawMessage(`{"lat":-23.55,"lon":-46.63,"acc_m":30,"city":"Sao Paulo"}`), nil
 	})
-	s.handle("weather.get", func(json.RawMessage) (any, *pagerlink.RPCError) {
-		return json.RawMessage(`{"src":"mock","key":"auto"}`), nil
+	s.handle("weather.get", func(params json.RawMessage) (any, *pagerlink.RPCError) {
+		var p struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || p.Key == "" {
+			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "key required"}
+		}
+		return mockForecast(p.Key, time.Now()), nil
 	})
 	s.handle("chat.ask", s.chatAsk)
 	s.handle("chat.audio.begin", s.chatAudioBegin)
