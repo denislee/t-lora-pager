@@ -19,6 +19,17 @@ import Foundation
 public final class BLETransport: NSObject, PacketTransport, @unchecked Sendable {
     /// UserDefaults key for the last connected pager's peripheral identifier.
     public static let lastPeripheralKey = "PagerLink.lastPeripheral"
+    /// GAP name the firmware advertises (`hal/ble_stack.h` `DEVICE_NAME`).
+    public static let deviceNamePrefix = "lilygo"
+
+    /// Shown when the pager is reachable but iOS doesn't list PagerLink: the
+    /// phone bonded before the service existed and is using a cached layout.
+    static let staleCacheHint = """
+        iOS has an old copy of the pager's Bluetooth services. Reboot the pager \
+        (or toggle its Bluetooth) and try again; if that doesn't help, open \
+        Settings → Bluetooth, tap ⓘ next to the pager, Forget This Device, \
+        then pair it again.
+        """
 
     public nonisolated let packets: AsyncStream<[UInt8]>
     private let continuation: AsyncStream<[UInt8]>.Continuation
@@ -127,6 +138,16 @@ public final class BLETransport: NSObject, PacketTransport, @unchecked Sendable 
             connect(p)
             return
         }
+        // The pager is connected as a keyboard but iOS doesn't list PagerLink
+        // for it (stale GATT cache, see staleCacheHint). Find it by its
+        // standard services + name so the error below can say so.
+        let standard = [CBUUID(string: "180A"), CBUUID(string: "180F")]
+        if let p = central.retrieveConnectedPeripherals(withServices: standard)
+            .first(where: { ($0.name ?? "").lowercased().hasPrefix(Self.deviceNamePrefix) }) {
+            log("found connected \(p.name ?? "pager") without PagerLink in iOS's service list")
+            connect(p)
+            return
+        }
         if let saved = UserDefaults.standard.string(forKey: Self.lastPeripheralKey),
            let id = UUID(uuidString: saved),
            let p = central.retrievePeripherals(withIdentifiers: [id]).first {
@@ -138,7 +159,10 @@ public final class BLETransport: NSObject, PacketTransport, @unchecked Sendable 
         central.scanForPeripherals(withServices: [service], options: nil)
         let timer = DispatchWorkItem { [weak self] in
             guard let self, self.peripheral == nil else { return }
-            self.close(reason: "no pager found (is Bluetooth on on the pager?)")
+            self.close(reason: """
+                no pager found. Check Bluetooth is on on the pager. If iOS shows it \
+                connected as a keyboard, \(Self.staleCacheHint)
+                """)
         }
         scanTimer = timer
         queue.asyncAfter(deadline: .now() + scanTimeout, execute: timer)
@@ -248,7 +272,7 @@ extension BLETransport: CBPeripheralDelegate {
             return
         }
         guard let service = peripheral.services?.first(where: { $0.uuid == PagerLinkUUID.serviceCB }) else {
-            fail("pager has no PagerLink service (firmware too old?)")
+            fail("pager doesn't expose PagerLink. Is the firmware updated? \(Self.staleCacheHint)")
             return
         }
         peripheral.discoverCharacteristics(

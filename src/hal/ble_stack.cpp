@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 
 #include "ble_hid.h"
 #include "link/link_transport_ble.h"
@@ -26,6 +27,12 @@ bool g_enabled = false;
 constexpr uint16_t APPEARANCE_KEYBOARD = 0x03C1;
 /** HID service, 16-bit UUID. */
 constexpr uint16_t HID_SERVICE_UUID16 = 0x1812;
+/**
+ * GATT layout revision. Bump whenever services or characteristics are added,
+ * removed or reordered. 1 = HID + PagerLink (Spike S1); the BleKeyboard fork's
+ * HID-only layout was implicitly 0.
+ */
+constexpr uint32_t GATT_REV = 1;
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onDisconnect(NimBLEServer *server, NimBLEConnInfo &info, int reason) override {
@@ -76,6 +83,30 @@ void configure_advertising() {
     adv->setPreferredParams(160, 320);
 }
 
+/**
+ * iOS caches a bonded peripheral's GATT database and only rediscovers it on a
+ * Service Changed indication (NimBLE builds without GATT caching, so there is
+ * no Database Hash). Phones bonded to an older layout would never see the
+ * PagerLink service. When the layout revision differs from the one recorded
+ * in NVS, indicate "everything changed": with no peer connected at boot,
+ * NimBLE persists the flag in each bonded peer's CCCD record and sends the
+ * indication after that peer reconnects and encrypts.
+ */
+void announce_layout_change() {
+    Preferences prefs;
+    if (!prefs.begin("ble", false)) {
+        return;
+    }
+    const uint32_t stored = prefs.getUInt("gatt_rev", 0);
+    if (stored != GATT_REV) {
+        log_i("[ble] GATT layout %u -> %u; flagging Service Changed for bonded peers",
+              static_cast<unsigned>(stored), static_cast<unsigned>(GATT_REV));
+        g_server->sendServiceChangedIndication();
+        prefs.putUInt("gatt_rev", GATT_REV);
+    }
+    prefs.end();
+}
+
 /** First enable: init NimBLE, create the shared server and its services. */
 bool init_stack() {
     if (!NimBLEDevice::init(DEVICE_NAME)) {
@@ -102,6 +133,7 @@ bool init_stack() {
     pagerlink::ble::build(g_server);
 
     g_server->start();
+    announce_layout_change();
     configure_advertising();
     return true;
 }
