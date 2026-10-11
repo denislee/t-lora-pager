@@ -116,14 +116,12 @@ the request locally with `timeout`; a later RES is dropped as late.
 | `wifi_offline` | `WifiOffline` |
 | `http_error` | `HttpError` |
 | `unauthorized` | `Unauthorized` |
-| `hub_disabled` | `HubDisabled` |
-| `hub_unreachable` | `HubUnreachable` |
 
 Link-only codes: `bad_request` (REQ payload is not a JSON object with a
 string `m`), `busy` (the handler can't accept work now; retry later),
 `timeout` and `disconnected` (local only, never sent on the wire:
 the caller's request expired, or the link dropped while it was
-outstanding).
+outstanding; `HalError::LinkOffline` maps to `disconnected`).
 
 Receivers must treat an unknown `code` as `internal`.
 
@@ -165,7 +163,7 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | Method / event | Dir | Params → result |
 |---|---|---|
 | `sys.hello` | P→D | `{"proto":1,"app":"<ver>","caps":[…]}` → `{"proto":1,"fw":"<hash>","board":"pager","name":"lilygo-pager","caps":[…],"mtu":<P+3>}`. A `proto` major mismatch → ERR `unsupported` |
-| `sys.info` | P→D | → `{"batt_pct","charging","uptime_s","wifi":{"on","connected","ssid","rssi"},"hub":{"on","reachable"},"storage":{"int":{"t","u"},"sd":{"t","u","mounted"}}}` (sizes in bytes) |
+| `sys.info` | P→D | → `{"batt_pct","charging","uptime_s","wifi":{"on","connected","ssid","rssi"},"storage":{"int":{"t","u"},"sd":{"t","u","mounted"}}}` (sizes in bytes) |
 | `sys.ping` | both | `{"t":<n>}` → `{"t":<n>}` (echo) |
 | `sys.time.set` | P→D | `{"epoch":<unix s>,"tz":"<IANA>"}` → `{}` |
 | `evt.battery` | D→P | `{"pct","charging"}` on change ≥ 5 % or charge-state flip |

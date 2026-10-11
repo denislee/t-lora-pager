@@ -2,7 +2,7 @@ import Foundation
 import PagerKit
 import SwiftUI
 
-/// Connection state, live `sys.info` (battery, storage, Wi-Fi, hub) and the
+/// Connection state, live `sys.info` (battery, storage, Wi-Fi) and the
 /// Phase-1 actions. The emulator TCP endpoint lives under a disclosure group so
 /// the BLE path can replace it later without changing the screen's shape.
 struct DashboardView: View {
@@ -66,7 +66,6 @@ struct DashboardView: View {
     private func networkSection(_ info: JSONValue) -> some View {
         Section("Network") {
             LabeledContent("Wi-Fi", value: wifiText(info["wifi"]))
-            LabeledContent("Hub", value: hubText(info["hub"]))
         }
     }
 
@@ -165,12 +164,6 @@ struct DashboardView: View {
             return "\(ssid) (\(rssi) dBm)"
         }
         return ssid
-    }
-
-    private func hubText(_ hub: JSONValue?) -> String {
-        guard let hub else { return "—" }
-        guard hub["on"]?.boolValue == true else { return "Disabled" }
-        return hub["reachable"]?.boolValue == true ? "Reachable" : "Unreachable"
     }
 }
 

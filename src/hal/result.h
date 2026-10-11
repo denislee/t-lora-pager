@@ -44,6 +44,9 @@ enum class HalError : uint8_t {
     HttpError,         /* non-2xx response */
     Unauthorized,      /* 401/403 */
 
+    /* Link */
+    LinkOffline,       /* phone not connected; no producer until hw_link_call (HUB_REMOVAL_PLAN H2.1) */
+
     /* Hub */
     HubDisabled,
     HubUnreachable,

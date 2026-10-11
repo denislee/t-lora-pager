@@ -6,7 +6,6 @@
  * info, ping and time.set. The transport/RPC plumbing lives in
  * link_service.cpp; this file only maps JSON <-> HAL calls.
  */
-#include "../hub.h"
 #include "../power.h"
 #include "../storage.h"
 #include "../system.h"
@@ -139,13 +138,6 @@ void register_sys_handlers(Rpc &rpc) {
             .str_val(ssid)
             .key("rssi")
             .int_val(rssi)
-            .end_object()
-            .key("hub")
-            .begin_object()
-            .key("on")
-            .bool_val(hal::hub_is_enabled())
-            .key("reachable")
-            .bool_val(hal::hub_last_reachable())
             .end_object()
             .key("storage")
             .begin_object()

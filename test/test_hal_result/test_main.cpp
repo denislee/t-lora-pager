@@ -25,6 +25,7 @@ static const HalError ALL_ERRORS[] = {
     HalError::WifiOffline,
     HalError::HttpError,
     HalError::Unauthorized,
+    HalError::LinkOffline,
     HalError::HubDisabled,
     HalError::HubUnreachable,
 };

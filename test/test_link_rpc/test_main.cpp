@@ -590,8 +590,7 @@ static void test_hal_error_code(void) {
     TEST_ASSERT_EQUAL_STRING("wifi_offline", hal_error_code(HalError::WifiOffline));
     TEST_ASSERT_EQUAL_STRING("http_error", hal_error_code(HalError::HttpError));
     TEST_ASSERT_EQUAL_STRING("unauthorized", hal_error_code(HalError::Unauthorized));
-    TEST_ASSERT_EQUAL_STRING("hub_disabled", hal_error_code(HalError::HubDisabled));
-    TEST_ASSERT_EQUAL_STRING("hub_unreachable", hal_error_code(HalError::HubUnreachable));
+    TEST_ASSERT_EQUAL_STRING("disconnected", hal_error_code(HalError::LinkOffline));
     TEST_ASSERT_EQUAL_STRING("internal", hal_error_code(HalError::Ok));
 }
 

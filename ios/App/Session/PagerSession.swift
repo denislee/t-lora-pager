@@ -79,7 +79,7 @@ final class PagerSession {
         #endif
     }
 
-    /// `sys.info` — battery, storage, Wi-Fi and hub status.
+    /// `sys.info` — battery, storage and Wi-Fi status.
     func refresh() async {
         guard let session else {
             appendLog("refresh: not connected")

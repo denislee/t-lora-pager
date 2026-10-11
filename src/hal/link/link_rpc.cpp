@@ -22,8 +22,9 @@ const char *hal_error_code(HalError e) {
         case HalError::WifiOffline:     return "wifi_offline";
         case HalError::HttpError:       return "http_error";
         case HalError::Unauthorized:    return "unauthorized";
-        case HalError::HubDisabled:     return "hub_disabled";
-        case HalError::HubUnreachable:  return "hub_unreachable";
+        case HalError::LinkOffline:     return "disconnected";   /* local only, never sent */
+        case HalError::HubDisabled:     /* off the wire (HUB_REMOVAL_PLAN H3.1); enumerator goes in H4.2 */
+        case HalError::HubUnreachable:
         case HalError::Ok:              break;
     }
     return "internal"; /* Ok, and any value outside the enum, reads as "internal" */

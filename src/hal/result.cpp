@@ -17,6 +17,7 @@ const char *hal_error_string(HalError e)
     case HalError::WifiOffline:         return "WiFi is offline.";
     case HalError::HttpError:           return "Server returned an error.";
     case HalError::Unauthorized:        return "Unauthorized (check token).";
+    case HalError::LinkOffline:         return "Phone not connected.";
 
     case HalError::HubDisabled:         return "Local hub is disabled.";
     case HalError::HubUnreachable:      return "Local hub is unreachable.";
