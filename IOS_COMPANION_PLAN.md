@@ -31,9 +31,9 @@
 2. **Both sides can start a request.** The phone calls `fs.list` on the
    pager, and the pager calls `weather.get` on the phone. The protocol is
    symmetric.
-3. **Works with no Wi-Fi.** When the pager has no Wi-Fi and lilyhub can't be
-   reached, the phone becomes its uplink for weather, time, location and
-   (later) chat.
+3. **Works with no Wi-Fi.** When the pager has no Wi-Fi, the phone becomes
+   its uplink for weather, time, location, chat, notes sync and Telegram.
+   It replaces lilyhub, which is being removed (`HUB_REMOVAL_PLAN.md`).
 4. **Coexists with the BLE HID keyboard / media remote.** The existing
    `Remote` app and keyboard forwarding (`src/apps/ui_media_remote.cpp`,
    `src/hal/wireless.cpp`) keep working on the same radio and the same
@@ -53,8 +53,9 @@
 - Reading other iOS apps' notifications from the companion app. iOS doesn't
   allow this. The only route is ANCS, which is a separate, optional
   firmware feature (Phase 6).
-- Replacing lilyhub. The phone is an extra uplink alongside the hub, not a
-  substitute for it.
+- ~~Replacing lilyhub~~. Superseded on 2026-10-11 by `HUB_REMOVAL_PLAN.md`:
+  lilyhub is removed, and the phone is the only uplink besides the pager's
+  own Wi-Fi.
 - Mesh/LoRa protocol design. The LoRa bridge in Phase 6 only relays text to
   the existing radio path.
 
@@ -354,7 +355,7 @@ Direction: **P→D** = phone calls device, **D→P** = device calls phone.
 | Method / event | Dir | Phase | Payload → result |
 |---|---|---|---|
 | `sys.hello` | P→D | 1 | `{proto, app, caps[]}` → `{proto, fw, board, name, caps[], mtu}`. Version gate: major mismatch → app shows "update firmware/app" |
-| `sys.info` | P→D | 1 | → `{batt_pct, charging, vbus, uptime_s, wifi:{on,ssid,rssi}, hub:{on,reachable}, storage:{int:{t,u}, sd:{t,u,mounted}}}` |
+| `sys.info` | P→D | 1 | → `{batt_pct, charging, vbus, uptime_s, wifi:{on,ssid,rssi}, storage:{int:{t,u}, sd:{t,u,mounted}}}` |
 | `sys.ping` | both | 1 | `{t}` → `{t}` (RTT shown in Diagnostics) |
 | `sys.time.set` | P→D | 1 | `{epoch, tz:"America/Sao_Paulo"}` → sets RTC + `timezone_set_user_tz`. Auto-sent on every connect |
 | `evt.battery` | D→P | 1 | `{pct, charging}` on change ≥ 5 % or charge-state flip |
@@ -372,7 +373,7 @@ Direction: **P→D** = phone calls device, **D→P** = device calls phone.
 | `phone.find` | D→P | 4 | → the phone plays a sound / posts a time-sensitive local notification |
 | `text.send` | P→D | 4 | `{text, target:"editor"\|"kb"}` types into the pager editor (phone as keyboard) |
 | `notes.index` / `notes.pull` / `notes.push` | P→D | 5 | Notes-aware sync on top of `fs.*` (mtime-based, conflict = keep both) |
-| `chat.ask` | D→P | 6 | Phone proxies the pager's chat app request to the same upstream lilyhub uses |
+| `chat.ask` | D→P | 6 | Phone runs the pager's chat request against Groq (LLM + Whisper), replacing lilyhub's `/api/chat` (`HUB_REMOVAL_PLAN.md` H2.4) |
 | `lora.send` / `evt.lora.rx` | both | 6 | Relay text to and from the existing radio path |
 | `ota.begin` / DATA / `ota.commit` | P→D | 6 | Writes the inactive `app0`/`app1` slot, verifies, sets boot partition |
 | `screen.capture` | P→D | 6 | RLE-compressed framebuffer for bug reports / docs |
@@ -467,10 +468,11 @@ firmware doesn't have.
 
 ### 5.5 Weather integration (the motivating example)
 
-Current chain in `ui_weather.cpp`: hub → direct internet. New chain:
+Current chain in `ui_weather.cpp`: direct internet (the hub step was removed
+in `HUB_REMOVAL_PLAN.md` H1.3). New chain (D-H6, direct first):
 
 ```
-hub (if enabled & reachable)  →  direct (if Wi-Fi)  →  phone (if link connected)  →  cached (stale badge)
+direct (if Wi-Fi)  →  phone (if link connected)  →  cached (stale badge)
 ```
 
 - `weather_cache.{h,cpp}` takes `ForecastCache`, `GeoData`, `load_/save_*`
@@ -498,7 +500,7 @@ hub (if enabled & reachable)  →  direct (if Wi-Fi)  →  phone (if link connec
 | Screen | Content |
 |---|---|
 | Onboarding | Explain Bluetooth use → scan → pick "lilygo-pager" → system passkey prompt (code shown on pager) → name the device |
-| Dashboard | Connection state, RTT, battery, storage bars (internal / SD), Wi-Fi/hub status, last weather push, quick actions (Find pager, Send text, Sync time) |
+| Dashboard | Connection state, RTT, battery, storage bars (internal / SD), Wi-Fi status, last weather push, quick actions (Find pager, Send text, Sync time) |
 | Files | Volume switch (Internal / SD), breadcrumb navigation, list with size/mtime, pull-to-refresh, swipe delete/rename, new folder; tap → download with progress → Quick Look / text preview; share sheet; import from Files app / Photos (upload); protected (encrypted) files shown with a lock badge |
 | Weather | What the phone will serve to the pager: location source (GPS / city), last fetch, "push now", a preview rendered like the pager does |
 | Inbox | Texts/clipboard the pager sent; compose a message to the pager (`notify.post` / `text.send`) |
@@ -593,7 +595,8 @@ policy), and "Find phone" from the pager rings a locked iPhone.
 
 ### Phase 5 — Notes / tasks / journal sync (~1.5 weeks)
 
-Phone becomes a sync target next to lilyhub's `/api/notes/sync`: mtime
+Phone becomes the notes sync target, replacing lilyhub's `/api/notes/sync`
+(`HUB_REMOVAL_PLAN.md` H2.5, `notes.sync`): mtime
 index, pull/push, conflict = keep both (`name (phone).txt`). Encrypted
 notes travel as ciphertext (§8). iOS shows decrypted text only if the user
 enters the passphrase (requires a Swift port of `notes_crypto`, decision D5).
@@ -609,7 +612,8 @@ leaves the pager in plaintext.
   within N boots.
 - **L2CAP CoC transport** if S3 shows GATT is too slow for OTA or large
   files.
-- **Chat proxy:** the pager chat app uses `chat.ask` when it's offline.
+- **Chat proxy:** the pager chat app always uses `chat.ask`; the phone is its
+  only path once lilyhub is gone (`HUB_REMOVAL_PLAN.md` H2.4).
 - **LoRa bridge:** compose and read LoRa messages on the phone.
 - **ANCS** (iPhone notifications on the pager with no app running): needs
   GATT-client role on the peripheral connection. That means dropping
