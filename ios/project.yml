@@ -29,7 +29,25 @@ targets:
         excludes:
           - Info.plist
     info:
+      # XcodeGen regenerates this file from `properties` on every `make gen`;
+      # keys edited only in the plist are lost, so keep them here.
       path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Pager Companion
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        NSBluetoothAlwaysUsageDescription: Pager Companion talks to your LilyGo pager over Bluetooth.
+        NSLocalNetworkUsageDescription: Debug builds can connect to the pager emulator on this network.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIBackgroundModes:
+          - bluetooth-central
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
     configFiles:
       Debug: Config/Base.xcconfig
       Release: Config/Base.xcconfig

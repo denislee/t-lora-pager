@@ -134,7 +134,7 @@ go run ./cmd/pagerlink smoke
   (HID + a link service on one NimBLE server we own) and S2 (iOS letting the app
   use PagerLink while the system holds the pager as a keyboard) are confirmed.
   See `IOS_COMPANION_PLAN.md` §7.
-- **The app target has not been built on macOS yet.** This scaffolding was
-  written on a Linux box, where `PagerKit` tests run but `xcodegen` /
-  `xcodebuild` are unavailable. First macOS step: `make gen`, then build the
-  Simulator scheme and fix any XcodeGen/project drift.
+- **The app target builds on macOS** (`make gen && make sim`, Xcode 26, no
+  warnings under strict concurrency). `TCPTransportTests` drives
+  `TCPTransport` + `LinkSession` against a loopback-socket pager: connect
+  readiness, refused connects and peer close.

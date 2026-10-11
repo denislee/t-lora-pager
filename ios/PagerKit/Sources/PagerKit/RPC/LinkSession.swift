@@ -17,7 +17,8 @@ public actor LinkSession {
     }
 
     /// Events delivered to the owner: incoming EVT plus the local `link.reset`
-    /// (whose params carry a `reason`).
+    /// (whose params carry a `reason`). The stream finishes when the transport's
+    /// packet stream ends, so iterating it also observes the link dropping.
     public nonisolated let events: AsyncStream<(name: String, params: JSONValue)>
     private nonisolated let eventContinuation: AsyncStream<(name: String, params: JSONValue)>.Continuation
 
@@ -35,6 +36,7 @@ public actor LinkSession {
     private var segmenter = Segmenter()
     private var reassembler = Reassembler()
     private var readTask: Task<Void, Never>?
+    private var closed = false
 
     public private(set) var stats = Stats()
 
@@ -58,6 +60,7 @@ public actor LinkSession {
                 guard let self else { return }
                 await self.receive(packet)
             }
+            await self?.transportEnded()
         }
     }
 
@@ -65,6 +68,17 @@ public actor LinkSession {
     public func stop() {
         readTask?.cancel()
         readTask = nil
+        failAllPending()
+    }
+
+    /// The transport's packet stream finished: the link is gone for good.
+    private func transportEnded() {
+        closed = true
+        failAllPending()
+        eventContinuation.finish()
+    }
+
+    private func failAllPending() {
         let doomed = pending
         pending.removeAll()
         for (_, entry) in doomed {
@@ -86,6 +100,7 @@ public actor LinkSession {
         params: [String: JSONValue] = [:],
         timeout: Duration? = nil
     ) async throws -> JSONValue {
+        if closed { throw RPCError.disconnected() }
         var request: [String: JSONValue] = ["m": .string(method)]
         if !params.isEmpty { request["p"] = .object(params) }
         guard let payload = try? JSONValue.object(request).encoded() else {

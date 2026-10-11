@@ -28,6 +28,7 @@ final class PagerSession {
     private(set) var log: [String] = []
 
     @ObservationIgnored private var session: LinkSession?
+    @ObservationIgnored private var eventsTask: Task<Void, Never>?
     #if canImport(Network)
         @ObservationIgnored private var transport: TCPTransport?
     #endif
@@ -49,11 +50,19 @@ final class PagerSession {
 
             let transport = TCPTransport(host: host, port: port)
             self.transport = transport
-            await transport.start()
+            do {
+                try await transport.start()
+            } catch {
+                self.transport = nil
+                state = .failed(String(describing: error))
+                appendLog("connect failed: \(error)")
+                return
+            }
 
             let session = LinkSession(transport: transport)
             self.session = session
             await session.start()
+            watchEvents(of: session)
 
             let sys = SysService(session: session)
             do {
@@ -70,6 +79,7 @@ final class PagerSession {
 
                 await refresh()
             } catch {
+                await disconnect()
                 state = .failed(String(describing: error))
                 appendLog("connect failed: \(error)")
             }
@@ -130,21 +140,40 @@ final class PagerSession {
     /// Tear the link down and clear the transient device state.
     func disconnect() async {
         let wasConnected = session != nil
+        // Detach first so the events watcher doesn't report this as a drop.
+        let session = self.session
+        self.session = nil
+        eventsTask?.cancel()
+        eventsTask = nil
         if let session {
             await session.stop()
         }
         #if canImport(Network)
+            let transport = self.transport
+            self.transport = nil
             if let transport {
                 await transport.stop()
             }
-            transport = nil
         #endif
-        session = nil
         info = nil
         lastRTT = nil
         state = .disconnected
         if wasConnected {
             appendLog("disconnected")
+        }
+    }
+
+    /// Log pager events and notice when the link drops (the session's event
+    /// stream finishes when the transport closes).
+    private func watchEvents(of session: LinkSession) {
+        eventsTask = Task { [weak self] in
+            for await event in session.events {
+                self?.appendLog("event \(event.name)")
+            }
+            guard let self, self.session === session else { return }
+            await self.disconnect()
+            self.state = .failed("link dropped")
+            self.appendLog("link dropped")
         }
     }
 

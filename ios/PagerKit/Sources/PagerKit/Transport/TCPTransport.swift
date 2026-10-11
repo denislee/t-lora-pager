@@ -19,6 +19,7 @@ public actor TCPTransport: PacketTransport {
     private let port: UInt16
     private var connection: NWConnection?
     private var ready = false
+    private var readyContinuation: CheckedContinuation<Void, Error>?
 
     public init(host: String = TCPTransport.defaultHost, port: UInt16 = TCPTransport.defaultPort) {
         self.host = host
@@ -28,23 +29,29 @@ public actor TCPTransport: PacketTransport {
         self.continuation = continuation
     }
 
-    /// Open the connection and begin reading length-prefixed records.
-    public func start() {
-        guard connection == nil, let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+    /// Open the connection and wait until it is ready, then begin reading
+    /// length-prefixed records. Throws `RPCError.disconnected` when the
+    /// connection fails or cannot be established (e.g. nothing listening),
+    /// rather than leaving the caller to race the first `send`.
+    public func start() async throws {
+        guard connection == nil, let nwPort = NWEndpoint.Port(rawValue: port) else {
+            if ready { return }
+            throw RPCError.disconnected("TCP transport already started or bad port")
+        }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
             Task { await self?.handleState(state) }
         }
-        connection.start(queue: .global(qos: .userInitiated))
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            readyContinuation = continuation
+            connection.start(queue: .global(qos: .userInitiated))
+        }
     }
 
     /// Close the connection and finish the packet stream.
     public func stop() {
-        connection?.cancel()
-        connection = nil
-        ready = false
-        continuation.finish()
+        close(reason: "TCP transport stopped")
     }
 
     public func send(_ packet: [UInt8]) async throws {
@@ -74,13 +81,32 @@ public actor TCPTransport: PacketTransport {
         switch state {
         case .ready:
             ready = true
+            readyContinuation?.resume()
+            readyContinuation = nil
             receiveLength()
-        case .failed, .cancelled:
-            ready = false
-            continuation.finish()
+        case .waiting(let error):
+            // Network.framework parks refused/unreachable connections in
+            // `.waiting` and retries forever; treat that as a failed connect.
+            close(reason: "TCP connect to \(host):\(port) failed: \(error)")
+        case .failed(let error):
+            close(reason: "TCP connection failed: \(error)")
+        case .cancelled:
+            close(reason: "TCP connection cancelled")
         default:
             break
         }
+    }
+
+    /// Tear down once: cancel the connection, fail a pending `start()`, and
+    /// finish the packet stream so the session sees the link drop.
+    private func close(reason: String) {
+        connection?.stateUpdateHandler = nil
+        connection?.cancel()
+        connection = nil
+        ready = false
+        readyContinuation?.resume(throwing: RPCError.disconnected(reason))
+        readyContinuation = nil
+        continuation.finish()
     }
 
     private func receiveLength() {
@@ -91,12 +117,10 @@ public actor TCPTransport: PacketTransport {
     }
 
     private func handleLength(_ data: Data?, error: NWError?) {
-        guard error == nil else {
-            continuation.finish()
-            return
-        }
-        guard let data, data.count == 2 else {
-            receiveLength()
+        guard error == nil, let data, data.count == 2 else {
+            // Error, or EOF from the peer (a clean close reports `isComplete`
+            // with no data). Either way the link is gone.
+            close(reason: error.map { "TCP receive failed: \($0)" } ?? "TCP peer closed")
             return
         }
         let start = data.startIndex
@@ -118,7 +142,7 @@ public actor TCPTransport: PacketTransport {
 
     private func handleBody(_ data: Data?, error: NWError?, remaining: Int, buffer: [UInt8]) {
         guard error == nil, let data, !data.isEmpty else {
-            continuation.finish()
+            close(reason: error.map { "TCP receive failed: \($0)" } ?? "TCP peer closed")
             return
         }
         var buffer = buffer
