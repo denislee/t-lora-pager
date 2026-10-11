@@ -11,6 +11,7 @@
 #include "evict.h"
 #include "../core/spi_lock.h"
 
+#include <atomic>
 #include <cstring>
 
 #ifdef ARDUINO
@@ -179,8 +180,19 @@ bool hw_get_filesystem_dirty()
     return filesystem_dirty;
 }
 
+// Bumped on every hw_set_filesystem_dirty(true), even when the flag is already
+// set: the flag is cleared by whichever app reloads first, so observers that
+// must not steal it (the PagerLink evt.fs.changed) watch this counter instead.
+static std::atomic<uint32_t> filesystem_generation{0};
+
+uint32_t hw_get_filesystem_generation()
+{
+    return filesystem_generation.load();
+}
+
 void hw_set_filesystem_dirty(bool dirty)
 {
+    if (dirty) filesystem_generation++;
     load_filesystem_dirty();
     if (filesystem_dirty == dirty) return;
     filesystem_dirty = dirty;

@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "hal/link/link_frame.h"
+#include "hal/link/link_xfer.h"
 
 using namespace pagerlink;
 
@@ -242,6 +243,24 @@ static void test_bulk_bad_rejected(void)
     }
 }
 
+static void test_crc32_vectors(void)
+{
+    for (size_t i = 0; i < kCrc32Count; ++i) {
+        const VecCrc32 &v = kCrc32[i];
+        const std::string bytes = hex_to_bytes(v.input_hex);
+        const uint8_t *data = reinterpret_cast<const uint8_t *>(bytes.data());
+        const size_t n = bytes.size();
+
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(v.crc32, crc32_update(0, data, n), v.name);
+
+        /* Incremental use must match the one-shot value, byte-split anywhere. */
+        const size_t half = n / 2;
+        uint32_t part = crc32_update(0, data, half);
+        part = crc32_update(part, data + half, n - half);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(v.crc32, part, v.name);
+    }
+}
+
 static void test_segmenter_send_rejects_bad_args(void)
 {
     Segmenter seg;
@@ -281,6 +300,7 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_bulk_data_roundtrip);
     RUN_TEST(test_bulk_ack_roundtrip);
     RUN_TEST(test_bulk_bad_rejected);
+    RUN_TEST(test_crc32_vectors);
     RUN_TEST(test_segmenter_send_rejects_bad_args);
     RUN_TEST(test_segmenter_send_sink_abort);
     return UNITY_END();

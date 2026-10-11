@@ -168,7 +168,34 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | `sys.time.set` | P→D | `{"epoch":<unix s>,"tz":"<IANA>"}` → `{}` |
 | `evt.battery` | D→P | `{"pct","charging"}` on change ≥ 5 % or charge-state flip |
 
-The rest of the catalog (fs.*, weather.*, notify.*, …) is specified in
+## 6.1 Methods — Phase 2 (file service, `caps` `"fs"`)
+
+`vol` is `"int"` (internal flash) or `"sd"` (SD card; `invalid_argument`
+"sd not mounted" while it is out). Every `path` is normalized against the
+volume root: an optional leading `/`, repeated `/` and `.` collapse, and
+`..`, a backslash or a control byte is rejected with `invalid_argument`
+(`sandbox_path`, `src/hal/notes_path.h`). Bytes are the on-disk bytes: an
+encrypted note is served as its `Salted__` ciphertext and flagged
+`protected:true`. `crc32` is CRC-32/ISO-HDLC over the whole file.
+
+| Method / event | Dir | Params → result |
+|---|---|---|
+| `fs.list` | P→D | `{"vol","path","cursor"?,"limit"?≤64}` → `{"entries":[{"name","dir","size","mtime"}],"cursor"?}`. Folders first, then files, each by name. `cursor` is present while entries remain; pass it back for the next page. `mtime` may be 0 in a listing |
+| `fs.stat` | P→D | `{"vol","path"}` → `{"dir","size","mtime","protected"}` |
+| `fs.read` | P→D | `{"vol","path","xfer","offset"?}` → `{"xfer","size","crc32","protected"}`, then DATA from `offset` (default 0) under §4 flow control. The phone receives, so it allocates `xfer` (even, not in use; else `invalid_argument`) |
+| `fs.write.begin` | P→D | `{"vol","path","size","crc32","overwrite"?}` → `{"xfer","offset":0}`; the pager allocates `xfer` (odd). The phone then sends DATA. Bytes land in `<path>.part`. An existing file without `overwrite` → `invalid_argument` "exists"; `resume:true` → `unsupported` in v1 |
+| `fs.write.commit` | P→D | `{"xfer"}` → `{}`. Checks size and `crc32`, then renames `.part` onto `path`. Mismatch or missing bytes → `invalid_argument` and the `.part` is deleted. Timeout 60 s |
+| `fs.write.abort` | P→D | `{"xfer"}` → `{}`; deletes the `.part` |
+| `fs.delete` | P→D | `{"vol","path"}` → `{}`. Directories are removed with their contents; the root never |
+| `fs.mkdir` | P→D | `{"vol","path"}` → `{}`. One level; the parent must exist |
+| `fs.rename` | P→D | `{"vol","from","to"}` → `{}`. `to` must not exist, and a directory can't move into itself |
+| `evt.fs.changed` | D→P | `{}` after any local write (editor save, eviction, an fs.* change). Drop listing caches |
+
+At most two transfers run at once (`busy` beyond that). A transfer with no
+DATA/ACK for 30 s is dropped, and a link drop ends every transfer: an
+upload's `.part` is deleted, so an interrupted upload leaves nothing behind.
+
+The rest of the catalog (weather.*, notify.*, …) is specified in
 `IOS_COMPANION_PLAN.md` §4.5 and moves here as each phase lands. A side
 that doesn't implement a method answers ERR `unsupported`; `caps` lists the
 method families each side implements (`"sys"`, `"fs"`, `"weather"`, …).
@@ -183,4 +210,4 @@ hex with no separators. Files:
 - `message.json` — header encode/decode, valid and malformed.
 - `segment.json` — segmentation of one message at packet sizes 20 / 182 / 244.
 - `reassemble.json` — packet sequences → delivered messages and resets.
-- `bulk.json` — DATA / ACK payload encode/decode.
+- `bulk.json` — DATA / ACK payload encode/decode, and CRC-32 check values (`crc32`).

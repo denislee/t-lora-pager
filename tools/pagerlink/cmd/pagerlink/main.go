@@ -3,9 +3,11 @@
 // 127.0.0.1:7600 — so a human can send a Phase-1 RPC by hand, see the JSON
 // result, and confirm the error paths behave.
 //
-// The `smoke` subcommand is the useful one: it walks the four methods a pager
-// must implement, checks each required error code, and finally proves the link
-// recovers after a deliberate sequence fault.
+// The `smoke` subcommand is the useful one: it walks the four system methods a
+// pager must implement, checks each required error code, proves the link
+// recovers after a deliberate sequence fault, and then exercises the fs.* file
+// service end to end (see fs.go). The ls/stat/get/put/rm/mkdir/mv commands are
+// hand tools for the same service.
 package main
 
 import (
@@ -33,7 +35,8 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "hello", "info", "ping", "time", "call", "smoke":
+	case "hello", "info", "ping", "time", "call", "smoke",
+		"ls", "stat", "get", "put", "rm", "mkdir", "mv":
 	default:
 		fmt.Fprintf(os.Stderr, "pagerlink: unknown command %q\n", cmd)
 		usage()
@@ -46,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	code := run(c, *timeout, cmd, rest)
+	code := run(c, *addr, *timeout, cmd, rest)
 	c.Close()
 	os.Exit(code)
 }
@@ -61,10 +64,17 @@ Commands:
   time [-tz ZONE]                sys.time.set with the current epoch
   call <method> [json-params]    arbitrary RPC
   smoke                          check every Phase-1 method and error path
+  ls <vol> <path>                list a directory (fs.list, paged)
+  stat <vol> <path>              show file metadata (fs.stat)
+  get <vol> <path> <local-file>  download a file (fs.read)
+  put <local-file> <vol> <path> [-f]  upload a file (fs.write; -f overwrites)
+  rm <vol> <path>                delete a file or directory (fs.delete)
+  mkdir <vol> <path>             create a directory (fs.mkdir)
+  mv <vol> <from> <to>           rename a file or directory (fs.rename)
 `)
 }
 
-func run(c *pagerlink.Client, timeout time.Duration, cmd string, args []string) int {
+func run(c *pagerlink.Client, addr string, timeout time.Duration, cmd string, args []string) int {
 	switch cmd {
 	case "hello":
 		return callOne(c, timeout, "sys.hello",
@@ -78,7 +88,21 @@ func run(c *pagerlink.Client, timeout time.Duration, cmd string, args []string) 
 	case "call":
 		return cmdCall(c, timeout, args)
 	case "smoke":
-		return cmdSmoke(c, timeout)
+		return cmdSmoke(c, addr, timeout)
+	case "ls":
+		return cmdLS(c, timeout, args)
+	case "stat":
+		return cmdStat(c, timeout, args)
+	case "get":
+		return cmdGet(c, timeout, args)
+	case "put":
+		return cmdPut(c, timeout, args)
+	case "rm":
+		return cmdRM(c, timeout, args)
+	case "mkdir":
+		return cmdMkdir(c, timeout, args)
+	case "mv":
+		return cmdMV(c, timeout, args)
 	default:
 		fmt.Fprintf(os.Stderr, "pagerlink: unknown command %q\n", cmd)
 		usage()
@@ -135,8 +159,9 @@ func cmdCall(c *pagerlink.Client, timeout time.Duration, args []string) int {
 }
 
 // cmdSmoke is the CI-friendly end-to-end check. Every step prints PASS or FAIL;
-// the process exits 1 if any step failed.
-func cmdSmoke(c *pagerlink.Client, timeout time.Duration) int {
+// the process exits 1 if any step failed. smokeFS may reconnect after a
+// deliberate drop, so close the replacement client it hands back.
+func cmdSmoke(c *pagerlink.Client, addr string, timeout time.Duration) int {
 	pass := true
 
 	// Positive path: the Phase-1 methods the pager must implement.
@@ -167,6 +192,15 @@ func cmdSmoke(c *pagerlink.Client, timeout time.Duration) int {
 	// next START, so the link must come back without any reconnect.
 	pass = report(injectBadSeq(c), "inject wrong-seq packet") && pass
 	pass = report(pingOK(c, timeout), "sys.ping after reset") && pass
+
+	// File service: directories, bulk transfer, sandboxing, CRC integrity,
+	// events, and crash recovery. The dropped-upload step reconnects, so close
+	// the replacement client here if smokeFS had to dial a new one.
+	next, fsOK := smokeFS(c, addr, timeout)
+	pass = fsOK && pass
+	if next != c {
+		next.Close()
+	}
 
 	if !pass {
 		return 1

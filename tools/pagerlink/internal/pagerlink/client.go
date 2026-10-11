@@ -74,6 +74,13 @@ type Client struct {
 	nextID  uint16
 	pending map[uint16]chan result
 
+	// Bulk-transfer sinks. xferMu guards xfers and nextXfer; each channel is
+	// written only by the reader goroutine (non-blocking) and read by whoever
+	// owns that transfer.
+	xferMu   sync.Mutex
+	xfers    map[uint16]chan Message
+	nextXfer uint16
+
 	events chan Notification
 	done   chan struct{}
 
@@ -96,11 +103,13 @@ func Dial(addr string, timeout time.Duration) (*Client, error) {
 // It is separate from Dial so tests can drive it over a net.Pipe.
 func newClient(conn net.Conn) *Client {
 	c := &Client{
-		conn:    conn,
-		nextID:  2, // the phone side uses even ids, starting at 2
-		pending: make(map[uint16]chan result),
-		events:  make(chan Notification, 32),
-		done:    make(chan struct{}),
+		conn:     conn,
+		nextID:   2, // the phone side uses even ids, starting at 2
+		pending:  make(map[uint16]chan result),
+		xfers:    make(map[uint16]chan Message),
+		nextXfer: 2, // transfer ids share the phone's even parity
+		events:   make(chan Notification, 32),
+		done:     make(chan struct{}),
 	}
 	go c.readLoop()
 	return c
@@ -161,6 +170,56 @@ func (c *Client) SendRaw(packet []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
 	return c.writeRecord(packet)
+}
+
+// SendBulk encodes one DATA or ACK message and sends it through the same
+// segmentation path as Call's REQ. payload is the bulk payload, not a whole
+// message: EncodeData / EncodeAck are the callers' job.
+func (c *Client) SendBulk(t MsgType, id uint16, payload []byte) error {
+	raw, err := Message{Type: t, ID: id, Payload: payload}.Encode()
+	if err != nil {
+		return err
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	return c.send(raw)
+}
+
+// openXfer installs a bulk sink for id and returns it. It replaces any sink
+// already registered for that id.
+func (c *Client) openXfer(id uint16) chan Message {
+	ch := make(chan Message, 64)
+	c.xferMu.Lock()
+	c.xfers[id] = ch
+	c.xferMu.Unlock()
+	return ch
+}
+
+// allocXfer reserves the next free even transfer id and installs its sink. Ids
+// advance like request ids (wrap 65534 -> 2) and any id still in xfers is
+// skipped, so two live transfers never collide.
+func (c *Client) allocXfer() (uint16, chan Message) {
+	c.xferMu.Lock()
+	defer c.xferMu.Unlock()
+	id := c.nextXfer
+	for {
+		if _, busy := c.xfers[id]; !busy {
+			break
+		}
+		id = nextEven(id)
+	}
+	c.nextXfer = nextEven(id)
+	ch := make(chan Message, 64)
+	c.xfers[id] = ch
+	return id, ch
+}
+
+// closeXfer drops the bulk sink for id. Messages already buffered for it are
+// discarded.
+func (c *Client) closeXfer(id uint16) {
+	c.xferMu.Lock()
+	delete(c.xfers, id)
+	c.xferMu.Unlock()
 }
 
 // Close shuts the link down, fails every outstanding Call with
@@ -306,8 +365,22 @@ func (c *Client) dispatch(raw []byte) {
 		case c.events <- n:
 		default: // consumer is behind; drop rather than stall the reader
 		}
+	case Data, Ack:
+		// A bulk message for a transfer this side owns. Deliver it to that
+		// transfer's sink; a full sink drops the message rather than stalling
+		// the reader, and an unknown id is ignored.
+		c.xferMu.Lock()
+		ch, ok := c.xfers[msg.ID]
+		c.xferMu.Unlock()
+		if !ok {
+			return
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
 	}
-	// REQ/DATA/ACK are for the pager side; a client ignores them.
+	// REQ is for the pager side; a client ignores it.
 }
 
 // deliver resolves the Call waiting on id, if any. A late or duplicate id has

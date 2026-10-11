@@ -39,7 +39,7 @@ void service_on_connect(const TransportOps &ops);
 void service_on_packet(const uint8_t *pkt, size_t len);
 /** The transport dropped: fail outstanding requests and tear the RPC down. */
 void service_on_disconnect();
-/** Periodic pump: expire RPC requests and publish battery changes. */
+/** Periodic pump: expire requests and stalled transfers; publish battery and fs changes. */
 void service_tick();
 
 /** True while a transport is connected. */
@@ -53,5 +53,18 @@ size_t service_packet_size();
 
 /** Register the sys.* handlers on `rpc` (implemented in handlers_sys.cpp). */
 void register_sys_handlers(Rpc &rpc);
+
+/*
+ * File service (handlers_fs.cpp, PROTOCOL.md §4 and the fs.* rows of §6).
+ * Every call runs with the service lock held, like the handlers themselves.
+ */
+/** Register the fs.* handlers on `rpc` and adopt it for bulk sends. */
+void register_fs_handlers(Rpc &rpc);
+/** Route one DATA/ACK message (Rpc::on_bulk) to its transfer. */
+void fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);
+/** Periodic pump: drop transfers idle for longer than the stall timeout. */
+void fs_tick(uint32_t now_ms);
+/** The link dropped: abort every transfer and delete upload `.part` files. */
+void fs_reset();
 
 }  // namespace pagerlink

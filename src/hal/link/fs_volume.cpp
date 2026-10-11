@@ -1,0 +1,448 @@
+/**
+ * @file      fs_volume.cpp
+ * @brief     Raw volume I/O for the PagerLink file service (fs_volume.h).
+ *
+ * Implements the byte-level filesystem primitives behind handlers_fs.cpp. On
+ * hardware the internal volume is FFat and the SD card is reached through the
+ * vendor SPI bus (every access holds a core::ScopedSpiLock); on the emulator
+ * both volumes are real directories under $PAGERLINK_FS_ROOT. No crypto and no
+ * path sandboxing live here — callers pass already-sanitised absolute paths.
+ */
+#include "hal/link/fs_volume.h"
+
+#include <algorithm>
+
+#ifdef ARDUINO
+#include <FFat.h>
+#include <LilyGoLib.h>
+#include <SD.h>
+
+#include <memory>
+
+#include "../../core/spi_lock.h"
+#include "../storage.h"
+#include "../system.h"
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#endif
+
+namespace pagerlink {
+
+bool vol_from_string(const std::string &s, Vol &out) {
+    if (s == "int") {
+        out = Vol::Int;
+        return true;
+    }
+    if (s == "sd") {
+        out = Vol::Sd;
+        return true;
+    }
+    return false;
+}
+
+#ifdef ARDUINO
+
+namespace {
+
+/** Leaf component of a path or a vendor entry.name() (SD reports full paths). */
+std::string leaf_name(const char *name) {
+    const std::string s = name ? name : "";
+    const size_t slash = s.rfind('/');
+    return slash == std::string::npos ? s : s.substr(slash + 1);
+}
+
+/** Holds the SPI bus only while the SD volume is in use; a no-op for FFat. */
+struct VolLock {
+    std::unique_ptr<core::ScopedSpiLock> l;
+    explicit VolLock(Vol v) {
+        if (v == Vol::Sd) l.reset(new core::ScopedSpiLock());
+    }
+};
+
+fs::FS &fs_for(Vol v) {
+    return v == Vol::Sd ? static_cast<fs::FS &>(SD) : static_cast<fs::FS &>(FFat);
+}
+
+/** Orders a listing: folders first, then files, each by leaf name. */
+void append_sorted(std::vector<VolEntry> &out, std::vector<VolEntry> dirs,
+                   std::vector<VolEntry> files) {
+    auto by_name = [](const VolEntry &a, const VolEntry &b) { return a.name < b.name; };
+    std::sort(dirs.begin(), dirs.end(), by_name);
+    std::sort(files.begin(), files.end(), by_name);
+    out = std::move(dirs);
+    out.insert(out.end(), files.begin(), files.end());
+}
+
+/** Recursive delete; the caller holds the volume lock for the whole walk. */
+bool remove_recursive(fs::FS &fs, const std::string &path) {
+    File f = fs.open(path.c_str());
+    if (!f) return false;
+    if (!f.isDirectory()) {
+        f.close();
+        return fs.remove(path.c_str());
+    }
+
+    std::vector<std::string> children;
+    File entry = f.openNextFile();
+    while (entry) {
+        children.push_back(path + "/" + leaf_name(entry.name()));
+        entry.close();
+        entry = f.openNextFile();
+    }
+    f.close();
+
+    for (const std::string &c : children) {
+        if (!remove_recursive(fs, c)) return false;
+    }
+    return fs.rmdir(path.c_str());
+}
+
+}  // namespace
+
+bool vol_available(Vol v) {
+    if (v == Vol::Int) return true;
+    return (HW_SD_ONLINE & hw_get_device_online()) != 0;
+}
+
+bool vol_list(Vol v, const std::string &dir, std::vector<VolEntry> &out) {
+    out.clear();
+    if (!vol_available(v)) return false;
+
+    VolLock lock(v);
+    fs::FS &fs = fs_for(v);
+    File d = fs.open(dir.c_str());
+    if (!d || !d.isDirectory()) {
+        if (d) d.close();
+        return false;
+    }
+
+    std::vector<VolEntry> dirs;
+    std::vector<VolEntry> files;
+    File entry = d.openNextFile();
+    while (entry) {
+        const bool is_dir = entry.isDirectory();
+        VolEntry e;
+        e.name = leaf_name(entry.name());
+        e.dir = is_dir;
+        e.size = is_dir ? 0u : static_cast<uint32_t>(entry.size());
+        // Skip entry.getLastWrite(): a slow f_stat lookup on FAT. mtime is 0.
+        e.mtime = 0;
+        (is_dir ? dirs : files).push_back(e);
+        entry.close();
+        entry = d.openNextFile();
+    }
+    d.close();
+
+    append_sorted(out, std::move(dirs), std::move(files));
+    return true;
+}
+
+bool vol_stat(Vol v, const std::string &path, VolEntry &out) {
+    if (!vol_available(v)) return false;
+    if (path == "/") {
+        out = VolEntry{"", true, 0, 0};
+        return true;
+    }
+
+    VolLock lock(v);
+    File f = fs_for(v).open(path.c_str());
+    if (!f) return false;
+
+    const bool dir = f.isDirectory();
+    out.name = leaf_name(path.c_str());
+    out.dir = dir;
+    out.size = dir ? 0u : static_cast<uint32_t>(f.size());
+    out.mtime = static_cast<uint32_t>(f.getLastWrite());
+    f.close();
+    return true;
+}
+
+bool vol_read_at(Vol v, const std::string &path, uint32_t offset, uint8_t *buf, size_t n) {
+    if (!vol_available(v)) return false;
+
+    VolLock lock(v);
+    File f = fs_for(v).open(path.c_str(), FILE_READ);
+    if (!f) return false;
+    if (f.isDirectory()) {
+        f.close();
+        return false;
+    }
+    if (f.size() < static_cast<uint64_t>(offset) + n) {
+        f.close();
+        return false;
+    }
+    if (!f.seek(offset)) {
+        f.close();
+        return false;
+    }
+
+    size_t got = 0;
+    while (got < n) {
+        const int r = f.read(buf + got, n - got);
+        if (r <= 0) break;
+        got += static_cast<size_t>(r);
+    }
+    f.close();
+    return got == n;
+}
+
+bool vol_write_at(Vol v, const std::string &path, uint32_t offset, const uint8_t *buf, size_t n) {
+    if (!vol_available(v)) return false;
+
+    VolLock lock(v);
+    fs::FS &fs = fs_for(v);
+
+    File f;
+    if (offset == 0) {
+        f = fs.open(path.c_str(), FILE_WRITE);  // create + truncate
+    } else {
+        f = fs.open(path.c_str(), FILE_APPEND);
+        if (!f) return false;
+        if (static_cast<uint32_t>(f.size()) != offset) {
+            f.close();
+            return false;
+        }
+    }
+    if (!f) return false;
+
+    const size_t wrote = n ? f.write(buf, n) : 0;
+    f.close();
+    return wrote == n;
+}
+
+bool vol_remove(Vol v, const std::string &path) {
+    if (!vol_available(v)) return false;
+    if (path.empty() || path == "/") return false;
+
+    VolLock lock(v);
+    return remove_recursive(fs_for(v), path);
+}
+
+bool vol_mkdir(Vol v, const std::string &path) {
+    if (!vol_available(v)) return false;
+
+    VolLock lock(v);
+    fs::FS &fs = fs_for(v);
+    File f = fs.open(path.c_str());
+    if (f) {
+        const bool dir = f.isDirectory();
+        f.close();
+        return dir;
+    }
+    return fs.mkdir(path.c_str());
+}
+
+bool vol_rename(Vol v, const std::string &from, const std::string &to) {
+    if (!vol_available(v)) return false;
+
+    VolLock lock(v);
+    fs::FS &fs = fs_for(v);
+    if (fs.exists(to.c_str())) return false;
+    return fs.rename(from.c_str(), to.c_str());
+}
+
+bool vol_free_bytes(Vol v, uint64_t &out) {
+    if (!vol_available(v)) return false;
+
+    if (v == Vol::Int) {
+        out = FFat.totalBytes() - FFat.usedBytes();
+        return true;
+    }
+
+    VolLock lock(v);
+    out = SD.totalBytes() - SD.usedBytes();
+    return true;
+}
+
+#else  // !ARDUINO — emulator: two real directories on the host.
+
+namespace {
+
+/** Leaf component of an absolute path. */
+std::string leaf(const std::string &path) {
+    const size_t slash = path.rfind('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+/** The backing root, created once: $PAGERLINK_FS_ROOT or /tmp/pagerlink-fs. */
+const std::string &root() {
+    static const std::string r = [] {
+        const char *env = std::getenv("PAGERLINK_FS_ROOT");
+        const std::string base = (env && env[0]) ? env : "/tmp/pagerlink-fs";
+        ::mkdir(base.c_str(), 0755);  // ignore EEXIST / errors
+        ::mkdir((base + "/int").c_str(), 0755);
+        ::mkdir((base + "/sd").c_str(), 0755);
+        return base;
+    }();
+    return r;
+}
+
+/** Map a volume + sandboxed path to a host path. */
+std::string host(Vol v, const std::string &path) {
+    std::string p = root();
+    p += (v == Vol::Int) ? "/int" : "/sd";
+    if (path != "/") p += path;
+    return p;
+}
+
+/** Orders a listing: folders first, then files, each by leaf name. */
+void append_sorted(std::vector<VolEntry> &out, std::vector<VolEntry> dirs,
+                   std::vector<VolEntry> files) {
+    auto by_name = [](const VolEntry &a, const VolEntry &b) { return a.name < b.name; };
+    std::sort(dirs.begin(), dirs.end(), by_name);
+    std::sort(files.begin(), files.end(), by_name);
+    out = std::move(dirs);
+    out.insert(out.end(), files.begin(), files.end());
+}
+
+/** Recursive delete of a host path. */
+bool remove_recursive(const std::string &p) {
+    struct stat st;
+    if (::stat(p.c_str(), &st) != 0) return false;
+    if (!S_ISDIR(st.st_mode)) return ::unlink(p.c_str()) == 0;
+
+    DIR *d = ::opendir(p.c_str());
+    if (!d) return false;
+    struct dirent *de;
+    while ((de = ::readdir(d)) != nullptr) {
+        const std::string name = de->d_name;
+        if (name == "." || name == "..") continue;
+        if (!remove_recursive(p + "/" + name)) {
+            ::closedir(d);
+            return false;
+        }
+    }
+    ::closedir(d);
+    return ::rmdir(p.c_str()) == 0;
+}
+
+}  // namespace
+
+bool vol_available(Vol v) {
+    (void)v;
+    return true;
+}
+
+bool vol_list(Vol v, const std::string &dir, std::vector<VolEntry> &out) {
+    out.clear();
+    DIR *d = ::opendir(host(v, dir).c_str());
+    if (!d) return false;
+
+    const std::string base = host(v, dir);
+    std::vector<VolEntry> dirs;
+    std::vector<VolEntry> files;
+    struct dirent *de;
+    while ((de = ::readdir(d)) != nullptr) {
+        const std::string name = de->d_name;
+        if (name == "." || name == "..") continue;
+
+        struct stat st;
+        if (::stat((base + "/" + name).c_str(), &st) != 0) continue;
+
+        VolEntry e;
+        e.name = name;
+        e.dir = S_ISDIR(st.st_mode);
+        e.size = e.dir ? 0u : static_cast<uint32_t>(st.st_size);
+        e.mtime = static_cast<uint32_t>(st.st_mtime);
+        (e.dir ? dirs : files).push_back(e);
+    }
+    ::closedir(d);
+
+    append_sorted(out, std::move(dirs), std::move(files));
+    return true;
+}
+
+bool vol_stat(Vol v, const std::string &path, VolEntry &out) {
+    if (path == "/") {
+        out = VolEntry{"", true, 0, 0};
+        return true;
+    }
+
+    struct stat st;
+    if (::stat(host(v, path).c_str(), &st) != 0) return false;
+
+    out.name = leaf(path);
+    out.dir = S_ISDIR(st.st_mode);
+    out.size = out.dir ? 0u : static_cast<uint32_t>(st.st_size);
+    out.mtime = static_cast<uint32_t>(st.st_mtime);
+    return true;
+}
+
+bool vol_read_at(Vol v, const std::string &path, uint32_t offset, uint8_t *buf, size_t n) {
+    const std::string h = host(v, path);
+    struct stat st;
+    if (::stat(h.c_str(), &st) != 0) return false;
+    if (S_ISDIR(st.st_mode)) return false;
+    if (static_cast<uint64_t>(st.st_size) < static_cast<uint64_t>(offset) + n) return false;
+
+    FILE *f = std::fopen(h.c_str(), "rb");
+    if (!f) return false;
+    if (std::fseek(f, static_cast<long>(offset), SEEK_SET) != 0) {
+        std::fclose(f);
+        return false;
+    }
+
+    size_t got = 0;
+    while (got < n) {
+        const size_t r = std::fread(buf + got, 1, n - got, f);
+        if (r == 0) break;
+        got += r;
+    }
+    std::fclose(f);
+    return got == n;
+}
+
+bool vol_write_at(Vol v, const std::string &path, uint32_t offset, const uint8_t *buf, size_t n) {
+    const std::string h = host(v, path);
+
+    const char *mode = "wb";  // offset 0: create + truncate
+    if (offset != 0) {
+        struct stat st;
+        if (::stat(h.c_str(), &st) != 0) return false;
+        if (static_cast<uint64_t>(st.st_size) != offset) return false;
+        mode = "ab";
+    }
+
+    FILE *f = std::fopen(h.c_str(), mode);
+    if (!f) return false;
+    const size_t wrote = n ? std::fwrite(buf, 1, n, f) : 0;
+    std::fclose(f);
+    return wrote == n;
+}
+
+bool vol_remove(Vol v, const std::string &path) {
+    if (path.empty() || path == "/") return false;
+    return remove_recursive(host(v, path));
+}
+
+bool vol_mkdir(Vol v, const std::string &path) {
+    const std::string h = host(v, path);
+    struct stat st;
+    if (::stat(h.c_str(), &st) == 0) return S_ISDIR(st.st_mode);
+    return ::mkdir(h.c_str(), 0755) == 0;
+}
+
+bool vol_rename(Vol v, const std::string &from, const std::string &to) {
+    struct stat st;
+    if (::stat(host(v, to).c_str(), &st) == 0) return false;
+    return ::rename(host(v, from).c_str(), host(v, to).c_str()) == 0;
+}
+
+bool vol_free_bytes(Vol v, uint64_t &out) {
+    (void)v;
+    struct statvfs sv;
+    if (::statvfs(root().c_str(), &sv) != 0) return false;
+    out = static_cast<uint64_t>(sv.f_bavail) * static_cast<uint64_t>(sv.f_frsize);
+    return true;
+}
+
+#endif  // ARDUINO
+
+}  // namespace pagerlink

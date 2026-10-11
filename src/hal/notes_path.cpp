@@ -52,3 +52,56 @@ void normalize_path(const char *in, char *out, size_t cap)
     if (in[0] == '/') snprintf(out, cap, "%s", in);
     else snprintf(out, cap, "/%s", in);
 }
+
+bool sandbox_path(const char *in, char *out, size_t cap)
+{
+    if (cap == 0) return false;
+    out[0] = '\0';
+    if (!in) return false;
+
+    size_t len = 0;          /* bytes written so far, excluding the NUL */
+    const char *p = in;
+
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+
+        const char *start = p;
+        while (*p && *p != '/') {
+            const unsigned char c = (unsigned char)*p;
+            if (c < 0x20 || c == 0x7f || c == '\\') {
+                out[0] = '\0';
+                return false;
+            }
+            p++;
+        }
+        const size_t clen = (size_t)(p - start);
+
+        if (clen == 1 && start[0] == '.') continue;                 /* "." */
+        if (clen == 2 && start[0] == '.' && start[1] == '.') {      /* ".." */
+            out[0] = '\0';
+            return false;
+        }
+        if (clen > 64) {
+            out[0] = '\0';
+            return false;
+        }
+
+        /* Room for '/', the component, and the NUL. Never truncate. */
+        if (len + 1 + clen + 1 > cap) {
+            out[0] = '\0';
+            return false;
+        }
+        out[len++] = '/';
+        memcpy(out + len, start, clen);
+        len += clen;
+        out[len] = '\0';
+    }
+
+    if (len == 0) {
+        if (cap < 2) return false;
+        out[0] = '/';
+        out[1] = '\0';
+    }
+    return true;
+}

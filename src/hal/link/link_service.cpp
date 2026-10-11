@@ -14,6 +14,7 @@
 #include <mutex>
 
 #include "hal/power.h"
+#include "hal/storage.h"
 
 #ifdef ARDUINO
 #include <esp32-hal-log.h>
@@ -53,6 +54,9 @@ struct State {
     int last_batt_pct = 0;
     bool last_charging = false;
     bool have_batt = false;
+
+    /* hw_get_filesystem_generation() last announced with evt.fs.changed. */
+    uint32_t last_fs_gen = 0;
 };
 
 State &state() {
@@ -105,6 +109,7 @@ void service_on_connect(const TransportOps &ops) {
     /* Fold any counters left over from a connection we never saw disconnect
      * for (defensive; normally service_on_disconnect() already did this). */
     if (s.rpc) {
+        fs_reset();
         s.total_resets += s.rpc->stats().link_resets;
         s.total_malformed += s.rpc->stats().malformed;
         s.total_timeouts += s.rpc->stats().timeouts;
@@ -138,6 +143,9 @@ void service_on_connect(const TransportOps &ops) {
         []() -> uint32_t { return steady_ms(); }));
 
     register_sys_handlers(*s.rpc);
+    register_fs_handlers(*s.rpc);
+    s.rpc->on_bulk(fs_on_bulk);
+    s.last_fs_gen = hw_get_filesystem_generation();
 
     monitor_params_t mp;
     hw_get_monitor_params(mp);
@@ -164,6 +172,7 @@ void service_on_disconnect() {
     State &s = state();
 
     if (s.rpc) {
+        fs_reset();
         s.rpc->disconnect();
         s.total_resets += s.rpc->stats().link_resets;
         s.total_malformed += s.rpc->stats().malformed;
@@ -184,6 +193,15 @@ void service_tick() {
     }
 
     s.rpc->tick();
+    fs_tick(steady_ms());
+
+    /* Any local write (editor save, link upload, eviction) bumps the
+     * generation; tell the phone to drop its listing cache. */
+    const uint32_t gen = hw_get_filesystem_generation();
+    if (gen != s.last_fs_gen) {
+        s.last_fs_gen = gen;
+        s.rpc->emit("evt.fs.changed", "{}");
+    }
 
     monitor_params_t mp;
     hw_get_monitor_params(mp);

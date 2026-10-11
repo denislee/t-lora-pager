@@ -582,6 +582,47 @@ static void test_reentrant_timeout_callback(void) {
     phone.disconnect();
 }
 
+static void test_defer_runs_after_reply(void) {
+    reset_link();
+    Rpc pager(Role::Pager, send_to_phone, fake_clock);
+
+    int defer_calls = 0;
+    int sent_when_deferred = -1;
+    pager.handle("fs.read", [&](const JsonObject &, JsonWriter &result, RpcError &) {
+        result.begin_object().end_object();
+        pager.defer([&]() {
+            defer_calls++;
+            sent_when_deferred = static_cast<int>(g_to_phone.size());
+        });
+        return true;
+    });
+
+    const std::string payload = "{\"m\":\"fs.read\"}";
+    std::string req;
+    TEST_ASSERT_TRUE(encode_message(MsgType::Req, 2, /* even: valid for the pager */
+                                    reinterpret_cast<const uint8_t *>(payload.data()),
+                                    payload.size(), req));
+    feed(pager, req);
+
+    TEST_ASSERT_EQUAL_INT(1, defer_calls);
+    /* The deferred action must have observed the RES already queued. */
+    TEST_ASSERT_EQUAL_INT(1, sent_when_deferred);
+    TEST_ASSERT_FALSE(g_to_phone.empty());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MsgType::Res), frame_type(g_to_phone.front()));
+}
+
+static void test_defer_outside_handler_runs_now(void) {
+    reset_link();
+    Rpc phone(Role::Phone, send_to_pager, fake_clock);
+
+    int calls = 0;
+    phone.defer([&]() { calls++; });
+    TEST_ASSERT_EQUAL_INT(1, calls);
+
+    phone.defer(nullptr); /* an empty action is a no-op */
+    TEST_ASSERT_EQUAL_INT(1, calls);
+}
+
 static void test_hal_error_code(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_argument", hal_error_code(HalError::InvalidArgument));
     TEST_ASSERT_EQUAL_STRING("unsupported", hal_error_code(HalError::NotSupported));
@@ -617,6 +658,8 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN_TEST(test_bulk_passthrough);
     RUN_TEST(test_event_emitted);
     RUN_TEST(test_reentrant_timeout_callback);
+    RUN_TEST(test_defer_runs_after_reply);
+    RUN_TEST(test_defer_outside_handler_runs_now);
     RUN_TEST(test_hal_error_code);
     return UNITY_END();
 }

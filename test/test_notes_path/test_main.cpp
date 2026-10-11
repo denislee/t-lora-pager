@@ -178,6 +178,125 @@ static void test_notes_dir_constants_agree(void)
     TEST_ASSERT_TRUE(notes_crypto_path_is_protected("notes/x.txt"));
 }
 
+/* ---- sandbox_path ---- */
+
+static void test_sandbox_accepts(void)
+{
+    char out[128];
+
+    TEST_ASSERT_TRUE(sandbox_path("", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("/", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("a", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/a", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("/a/b", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/a/b", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("a//b/", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/a/b", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("./a/./b", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/a/b", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("/notes/x.txt", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/notes/x.txt", out);
+
+    /* Three dots is a legal name; only an exact ".." component is rejected. */
+    TEST_ASSERT_TRUE(sandbox_path("...", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/...", out);
+
+    TEST_ASSERT_TRUE(sandbox_path("a..b", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("/a..b", out);
+}
+
+static void test_sandbox_rejects(void)
+{
+    char out[128];
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path(nullptr, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("..", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("/..", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("../etc/passwd", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("/a/../b", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("a/b/..", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("a\\b", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("a\nb", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("a\x7f", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    /* A component one byte over the 64-byte limit. */
+    char big[80];
+    memset(big, 'x', 65);
+    big[65] = '\0';
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path(big, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("", out);
+}
+
+static void test_sandbox_cap(void)
+{
+    char out[8];
+
+    /* "/abc" needs 5 bytes with the NUL — one more than cap. */
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("/abc", out, 4));
+    TEST_ASSERT_EQUAL_STRING("", out);
+
+    /* "/ab" needs exactly 4. */
+    TEST_ASSERT_TRUE(sandbox_path("/ab", out, 4));
+    TEST_ASSERT_EQUAL_STRING("/ab", out);
+
+    /* cap == 0 writes nothing at all. */
+    strcpy(out, "junk");
+    TEST_ASSERT_FALSE(sandbox_path("/ab", out, 0));
+    TEST_ASSERT_EQUAL_STRING("junk", out);
+}
+
+static void test_sandbox_64_byte_component_ok(void)
+{
+    char in[80];
+    char expected[80];
+    char out[128];
+
+    memset(in, 'x', 64);
+    in[64] = '\0';
+    expected[0] = '/';
+    memset(expected + 1, 'x', 64);
+    expected[65] = '\0';
+
+    TEST_ASSERT_TRUE(sandbox_path(in, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING(expected, out);
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -200,5 +319,9 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_normalize_truncates_and_terminates);
     RUN_TEST(test_normalize_zero_cap_writes_nothing);
     RUN_TEST(test_notes_dir_constants_agree);
+    RUN_TEST(test_sandbox_accepts);
+    RUN_TEST(test_sandbox_rejects);
+    RUN_TEST(test_sandbox_cap);
+    RUN_TEST(test_sandbox_64_byte_component_ok);
     return UNITY_END();
 }

@@ -74,6 +74,9 @@ bool hw_is_usb_msc_mounted();
 // Used by high-level apps to invalidate their caches.
 bool hw_get_filesystem_dirty();
 void hw_set_filesystem_dirty(bool dirty);
+// Incremented by every hw_set_filesystem_dirty(true). Lets an observer notice
+// writes without clearing the flag the apps rely on.
+uint32_t hw_get_filesystem_generation();
 
 // Note writes: the encoded payload goes to internal FFat and is mirrored to
 // the SD card when it is mounted; the result reflects the internal write.

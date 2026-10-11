@@ -40,6 +40,14 @@ void Rpc::handle(const std::string &method, Handler h) { handlers_[method] = std
 void Rpc::on_event(EventFn fn) { on_event_ = std::move(fn); }
 void Rpc::on_bulk(BulkFn fn) { on_bulk_ = std::move(fn); }
 
+void Rpc::defer(std::function<void()> fn) {
+    if (in_handler_) {
+        deferred_.push_back(std::move(fn));
+    } else if (fn) {
+        fn();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outgoing
 // ---------------------------------------------------------------------------
@@ -197,7 +205,9 @@ void Rpc::handle_req(const Message &m) {
 
     JsonWriter result;
     RpcError err;
+    in_handler_ = true;
     const bool ok = it->second(params, result, err);
+    in_handler_ = false;
     if (ok) {
         send_res(m.id, result.str());
     } else {
@@ -205,6 +215,17 @@ void Rpc::handle_req(const Message &m) {
             err.code = "internal";
         }
         send_err(m.id, err.code.c_str(), err.msg);
+    }
+
+    /* The reply is out (or could not be sent): run any actions the handler
+     * queued via defer(), in registration order. Take a local copy first so a
+     * deferred action may itself defer again without disturbing this walk. */
+    std::vector<std::function<void()>> deferred;
+    deferred.swap(deferred_);
+    for (std::function<void()> &fn : deferred) {
+        if (fn) {
+            fn();
+        }
     }
 }
 

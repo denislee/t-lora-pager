@@ -174,6 +174,19 @@ def _render_header(project_dir):
     a("static const size_t kBadAckCount = sizeof(kBadAck) / sizeof(kBadAck[0]);")
     a("")
 
+    a("struct VecCrc32 {")
+    a("    const char *name;")
+    a("    const char *input_hex;")
+    a("    uint32_t crc32;")
+    a("};")
+    a("static const VecCrc32 kCrc32[] = {")
+    for c in bulk["crc32"]:
+        a("    {%s, %s, 0x%08xu}," % (
+            _cstr(c["name"]), _cstr(c["input_hex"]), c["crc32"]))
+    a("};")
+    a("static const size_t kCrc32Count = sizeof(kCrc32) / sizeof(kCrc32[0]);")
+    a("")
+
     return "\n".join(out)
 
 

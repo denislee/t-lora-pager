@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"io"
 	"net"
 	"os"
@@ -296,5 +297,100 @@ func TestClientCallTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 30*time.Millisecond {
 		t.Fatalf("Call returned after %v, want >= timeout", elapsed)
+	}
+}
+
+// bulk.json "crc32": hash/crc32.ChecksumIEEE must equal the recorded value for
+// every input, including the empty string and the 4 KiB / 10 KB patterns.
+func TestCRC32Vectors(t *testing.T) {
+	var v struct {
+		CRC32 []struct {
+			Name     string `json:"name"`
+			InputHex string `json:"input_hex"`
+			CRC32    uint32 `json:"crc32"`
+		} `json:"crc32"`
+	}
+	loadVectors(t, "bulk.json", &v)
+	if len(v.CRC32) == 0 {
+		t.Fatal("bulk.json missing crc32 cases")
+	}
+
+	for _, c := range v.CRC32 {
+		got := crc32.ChecksumIEEE(mustHex(t, c.InputHex))
+		if got != c.CRC32 {
+			t.Errorf("%s: ChecksumIEEE = %d, want %d", c.Name, got, c.CRC32)
+		}
+	}
+}
+
+// bulk.json "data"/"ack": every payload round-trips through the bulk-transfer
+// codec; every "bad_data"/"bad_ack" entry is rejected.
+func TestBulkDataAckVectors(t *testing.T) {
+	var v struct {
+		Data []struct {
+			Offset     uint32 `json:"offset"`
+			BytesHex   string `json:"bytes_hex"`
+			PayloadHex string `json:"payload_hex"`
+		} `json:"data"`
+		Ack []struct {
+			Next       uint32 `json:"next"`
+			Credits    uint16 `json:"credits"`
+			PayloadHex string `json:"payload_hex"`
+		} `json:"ack"`
+		BadData []struct {
+			Name       string `json:"name"`
+			PayloadHex string `json:"payload_hex"`
+		} `json:"bad_data"`
+		BadAck []struct {
+			Name       string `json:"name"`
+			PayloadHex string `json:"payload_hex"`
+		} `json:"bad_ack"`
+	}
+	loadVectors(t, "bulk.json", &v)
+	if len(v.Data) == 0 || len(v.Ack) == 0 || len(v.BadData) == 0 || len(v.BadAck) == 0 {
+		t.Fatal("bulk.json missing data/ack cases")
+	}
+
+	for i, c := range v.Data {
+		payload := EncodeData(c.Offset, mustHex(t, c.BytesHex))
+		if hex.EncodeToString(payload) != c.PayloadHex {
+			t.Errorf("data[%d]: EncodeData = %x, want %s", i, payload, c.PayloadHex)
+		}
+		off, bytes, ok := DecodeData(mustHex(t, c.PayloadHex))
+		if !ok {
+			t.Errorf("data[%d]: DecodeData rejected %s", i, c.PayloadHex)
+			continue
+		}
+		if off != c.Offset || hex.EncodeToString(bytes) != c.BytesHex {
+			t.Errorf("data[%d]: decoded offset=%d bytes=%x, want %d/%s",
+				i, off, bytes, c.Offset, c.BytesHex)
+		}
+	}
+
+	for i, c := range v.Ack {
+		payload := EncodeAck(c.Next, c.Credits)
+		if hex.EncodeToString(payload) != c.PayloadHex {
+			t.Errorf("ack[%d]: EncodeAck = %x, want %s", i, payload, c.PayloadHex)
+		}
+		next, credits, ok := DecodeAck(mustHex(t, c.PayloadHex))
+		if !ok {
+			t.Errorf("ack[%d]: DecodeAck rejected %s", i, c.PayloadHex)
+			continue
+		}
+		if next != c.Next || credits != c.Credits {
+			t.Errorf("ack[%d]: decoded next=%d credits=%d, want %d/%d",
+				i, next, credits, c.Next, c.Credits)
+		}
+	}
+
+	for _, c := range v.BadData {
+		if _, _, ok := DecodeData(mustHex(t, c.PayloadHex)); ok {
+			t.Errorf("bad_data %s: DecodeData accepted %s", c.Name, c.PayloadHex)
+		}
+	}
+	for _, c := range v.BadAck {
+		if _, _, ok := DecodeAck(mustHex(t, c.PayloadHex)); ok {
+			t.Errorf("bad_ack %s: DecodeAck accepted %s", c.Name, c.PayloadHex)
+		}
 	}
 }

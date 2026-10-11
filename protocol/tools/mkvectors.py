@@ -13,6 +13,7 @@ import json
 import os
 import struct
 import sys
+import zlib
 
 VER = 1
 HEADER = 6
@@ -211,7 +212,12 @@ def bulk_vectors():
     bad_data = [{"name": "short", "payload_hex": "010203"}]
     bad_ack = [{"name": "short", "payload_hex": "0000000010"},
                {"name": "long", "payload_hex": "00000000100000"}]
-    return {"data": data, "ack": ack, "bad_data": bad_data, "bad_ack": bad_ack}
+    crc32 = [{"name": name, "input_hex": buf.hex(), "crc32": zlib.crc32(buf) & 0xFFFFFFFF}
+             for name, buf in [("empty", b""), ("check", b"123456789"), ("one_byte", b"a"),
+                               ("pattern_4092", pattern(4092, 2)),
+                               ("pattern_10000", pattern(10000, 5))]]
+    return {"data": data, "ack": ack, "bad_data": bad_data, "bad_ack": bad_ack,
+            "crc32": crc32}
 
 
 def render():

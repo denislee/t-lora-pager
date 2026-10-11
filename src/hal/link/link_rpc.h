@@ -93,6 +93,13 @@ public:
     void on_bulk(BulkFn fn);
 
     /**
+     * Run `fn` once the reply to the REQ being handled has been sent. Meant for
+     * handlers that must send follow-up messages (e.g. fs.read's first DATA)
+     * only after their RES. Outside a handler, `fn` runs immediately.
+     */
+    void defer(std::function<void()> fn);
+
+    /**
      * Send a REQ. `params_json` is a JSON object text or empty (empty omits the
      * "p" member). Returns false — and never invokes `cb` — when MAX_PENDING
      * requests are already outstanding, when encoding fails, or when send()
@@ -147,6 +154,8 @@ private:
     EventFn on_event_;
     BulkFn on_bulk_;
     std::vector<Pending> pending_;
+    std::vector<std::function<void()>> deferred_;
+    bool in_handler_ = false;
     uint16_t next_id_;
     RpcStats stats_;
 };

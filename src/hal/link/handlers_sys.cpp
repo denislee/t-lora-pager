@@ -91,6 +91,7 @@ void register_sys_handlers(Rpc &rpc) {
             .key("caps")
             .begin_array()
             .str_val("sys")
+            .str_val("fs")
             .end_array()
             .key("mtu")
             .uint_val(static_cast<uint64_t>(service_packet_size() + 3))
