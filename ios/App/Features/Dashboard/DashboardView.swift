@@ -3,8 +3,8 @@ import PagerKit
 import SwiftUI
 
 /// Connection state, live `sys.info` (battery, storage, Wi-Fi) and the
-/// Phase-1 actions. The emulator TCP endpoint lives under a disclosure group so
-/// the BLE path can replace it later without changing the screen's shape.
+/// Phase-1 actions. Bluetooth is the primary connect path; the emulator TCP
+/// endpoint lives under a disclosure group.
 struct DashboardView: View {
     @EnvironmentObject private var session: PagerSession
 
@@ -72,6 +72,10 @@ struct DashboardView: View {
     @ViewBuilder
     private var actionsSection: some View {
         Section {
+            Button("Connect via Bluetooth") {
+                Task { await session.connectBLE() }
+            }
+            .disabled(isConnecting)
             DisclosureGroup("Emulator") {
                 TextField("Host", text: $host)
                     .textInputAutocapitalization(.never)
@@ -80,7 +84,7 @@ struct DashboardView: View {
                 TextField("Port", text: $port)
                     .keyboardType(.numberPad)
             }
-            Button("Connect") {
+            Button("Connect to emulator") {
                 Task { await session.connectTCP(host: host, port: parsedPort) }
             }
             .disabled(isConnecting)

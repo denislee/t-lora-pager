@@ -174,9 +174,15 @@ void handle(const Event &ev) {
     const uint16_t companion = g_companion.load();
     switch (ev.kind) {
     case Kind::Subscribe:
-        if (companion == NO_HANDLE && accepting()) {
+        // iOS keeps the connection up for the system keyboard after the app
+        // goes away, so a fresh subscribe on the companion's own handle is a
+        // new app session: restart the link (seq = 0) instead of ignoring it.
+        if (companion == ev.conn) {
+            companion_down("resubscribed");
             companion_up(ev.conn, std::string(reinterpret_cast<const char *>(ev.data), ev.len));
-        } else if (companion != ev.conn) {
+        } else if (companion == NO_HANDLE && accepting()) {
+            companion_up(ev.conn, std::string(reinterpret_cast<const char *>(ev.data), ev.len));
+        } else {
             LINK_LOG("[link] ignoring tx subscribe from handle %u", static_cast<unsigned>(ev.conn));
         }
         break;

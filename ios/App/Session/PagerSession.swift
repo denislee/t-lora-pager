@@ -4,10 +4,10 @@ import PagerKit
 /// The observable state the UI sees for one companion link
 /// (`IOS_COMPANION_PLAN.md` §6.2).
 ///
-/// Phase 1 ships the emulator/simulator path only: `connectTCP` opens the
-/// PagerLink TCP transport (`protocol/PROTOCOL.md` §5), runs `sys.hello`, sets
-/// the pager clock/zone, and refreshes `sys.info`. The CoreBluetooth transport
-/// is pending Spike S2; see the TODO below.
+/// `connectBLE` talks to the pager over the PagerLink GATT service
+/// (`protocol/PROTOCOL.md` §1); `connectTCP` talks to the emulator
+/// (§5). Either way the session runs `sys.hello`, sets the pager clock/zone,
+/// and refreshes `sys.info`. State restoration is not wired yet.
 @MainActor
 final class PagerSession: ObservableObject {
     /// Lifecycle of the single link.
@@ -27,64 +27,93 @@ final class PagerSession: ObservableObject {
 
     private var session: LinkSession?
     private var eventsTask: Task<Void, Never>?
-    #if canImport(Network)
-        private var transport: TCPTransport?
-    #endif
-
-    // TODO(Phase 1, after S2): BLETransport
-    // The CoreBluetooth central (PagerKit/Transport/BLETransport.swift), its
-    // actor, and state restoration (`CBCentralManagerOptionRestoreIdentifierKey`)
-    // land here once Spike S2 confirms iOS lets one peripheral serve both the
-    // system keyboard and the PagerLink service. Until then `connectTCP` is the
-    // only transport, matching the Simulator (no CoreBluetooth).
+    /// Tears the active transport down (TCP or BLE).
+    private var stopTransport: (() async -> Void)?
 
     /// Open the emulator TCP transport and bring the link up.
     func connectTCP(host: String = "127.0.0.1", port: UInt16 = 7600) async {
         #if canImport(Network)
-            if case .connecting = state { return }
-            await disconnect()
-            state = .connecting
-            appendLog("TCP connecting to \(host):\(port)…")
-
+            guard await beginConnect("TCP connecting to \(host):\(port)…") else { return }
             let transport = TCPTransport(host: host, port: port)
-            self.transport = transport
+            stopTransport = { await transport.stop() }
             do {
                 try await transport.start()
             } catch {
-                self.transport = nil
-                state = .failed(String(describing: error))
-                appendLog("connect failed: \(error)")
+                await connectFailed(error)
                 return
             }
-
-            let session = LinkSession(transport: transport)
-            self.session = session
-            await session.start()
-            watchEvents(of: session)
-
-            let sys = SysService(session: session)
-            do {
-                let hello = try await sys.hello(app: "0.1", caps: ["sys"])
-                state = .connected(hello: hello)
-                appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
-
-                // Auto time sync on connect (plan §4.5: sys.time.set).
-                try await sys.setTime(
-                    epoch: Int(Date().timeIntervalSince1970),
-                    tz: TimeZone.current.identifier
-                )
-                appendLog("time synced (\(TimeZone.current.identifier))")
-
-                await refresh()
-            } catch {
-                await disconnect()
-                state = .failed(String(describing: error))
-                appendLog("connect failed: \(error)")
-            }
+            await bringUp(transport)
         #else
             state = .failed("TCP transport needs Network (Apple platforms only)")
             appendLog("connect unavailable: Network framework missing")
         #endif
+    }
+
+    /// Find the pager over Bluetooth (sharing the system keyboard link when
+    /// iOS already holds it) and bring the link up.
+    func connectBLE() async {
+        #if canImport(CoreBluetooth)
+            guard await beginConnect("BLE: looking for the pager…") else { return }
+            let transport = BLETransport { [weak self] line in
+                Task { @MainActor in self?.appendLog("BLE: \(line)") }
+            }
+            stopTransport = { transport.stop() }
+            do {
+                try await transport.start()
+            } catch {
+                await connectFailed(error)
+                return
+            }
+            await bringUp(transport)
+        #else
+            state = .failed("Bluetooth transport needs CoreBluetooth")
+            appendLog("connect unavailable: CoreBluetooth missing")
+        #endif
+    }
+
+    /// Common pre-connect: drop any old link, enter `.connecting`.
+    private func beginConnect(_ line: String) async -> Bool {
+        if case .connecting = state { return false }
+        await disconnect()
+        state = .connecting
+        appendLog(line)
+        return true
+    }
+
+    private func connectFailed(_ error: Error) async {
+        await stopTransport?()
+        stopTransport = nil
+        state = .failed(String(describing: error))
+        appendLog("connect failed: \(error)")
+    }
+
+    /// Start the RPC session on an open transport: `sys.hello`, time sync,
+    /// `sys.info`.
+    private func bringUp(_ transport: PacketTransport) async {
+        let session = LinkSession(transport: transport)
+        self.session = session
+        await session.start()
+        watchEvents(of: session)
+
+        let sys = SysService(session: session)
+        do {
+            let hello = try await sys.hello(app: "0.1", caps: ["sys"])
+            state = .connected(hello: hello)
+            appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
+
+            // Auto time sync on connect (plan §4.5: sys.time.set).
+            try await sys.setTime(
+                epoch: Int(Date().timeIntervalSince1970),
+                tz: TimeZone.current.identifier
+            )
+            appendLog("time synced (\(TimeZone.current.identifier))")
+
+            await refresh()
+        } catch {
+            await disconnect()
+            state = .failed(String(describing: error))
+            appendLog("connect failed: \(error)")
+        }
     }
 
     /// `sys.info` — battery, storage and Wi-Fi status.
@@ -146,13 +175,9 @@ final class PagerSession: ObservableObject {
         if let session {
             await session.stop()
         }
-        #if canImport(Network)
-            let transport = self.transport
-            self.transport = nil
-            if let transport {
-                await transport.stop()
-            }
-        #endif
+        let stopTransport = self.stopTransport
+        self.stopTransport = nil
+        await stopTransport?()
         info = nil
         lastRTT = nil
         state = .disconnected
