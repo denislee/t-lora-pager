@@ -32,18 +32,23 @@ pio test -e native_test
 make protocol-test                   # vectors fresh + Unity + Go + PagerKit (Docker swift)
 # The emulator serves PagerLink on 127.0.0.1:7600 (PAGERLINK_PORT, 0 disables):
 (cd server && go run ./cmd/pagerlink smoke)
+
+# Screenshot sweep: every app, Settings subpage and shared modal in every
+# UI style x dark mode, as PPM under <dir>/<style>-<light|dark>/ (exit = failures).
+# UI_SHOTS_ONLY=hotel-dark,beos-light narrows it.
+UI_SHOTS_DIR=/tmp/shots xvfb-run -a .pio/build/emulator_lora_pager/program
 ```
 
 After structural changes always rebuild **both** the hardware target and its matching emulator before moving on; `REFACTOR_NOTES.md` codifies this discipline.
 
 ## Selecting the radio chip
 
-Exactly one `ARDUINO_LILYGO_LORA_*` must be defined in `[env_arduino].build_flags`:
-`SX1262` (default), `CC1101`, `SX1280`, `LR1121`, `SI4432`. The matching driver in `src/hal/radio/` activates via `#ifdef`.
+Exactly one `ARDUINO_LILYGO_LORA_*` must be defined in `[env_arduino].build_flags`. The matching driver in `src/hal/radio/` activates via `#ifdef`.
+Only `SX1262` (default) and `LR1121` build as-is. `CC1101` and `SX1280` have drivers but RadioLib support is compiled out: remove `-D RADIOLIB_EXCLUDE_CC1101` / `-D RADIOLIB_EXCLUDE_SX128X` from `[env_arduino].build_flags` first. `SI4432` has no driver in `src/hal/radio/` (and `RADIOLIB_EXCLUDE_SI443X` is set). The external nRF24 (`nrf2401.cpp`) is independent of this choice: pager-only, gated on `USING_EXTERN_NRF2401` (`hal/board_config.h`).
 
 ## Selecting an alternate source tree
 
-`src_dir = src` is the default. To build a LilyGoLib example instead, comment that line and uncomment one of the `src_dir = ${platformio.libdeps_dir}/.../examples/...` lines under `[platformio]`.
+`src_dir = src` is the default. To build a LilyGoLib example instead, comment that line and point `src_dir` at an example directory (browse `lib/LilyGoLib/examples/`); the commented `helloworld` line under `[platformio]` shows the `${platformio.libdeps_dir}/.../examples/...` form.
 
 ## Architecture
 
@@ -65,12 +70,12 @@ server/                            Go "lilyhub" LAN service (weather proxy, note
 protocol/                          PagerLink spec (PROTOCOL.md) + golden vectors shared by firmware, iOS and Go
 ios/                               iOS companion app: PagerKit Swift package + XcodeGen app (see ios/README.md)
 boards/, variants/                 PlatformIO board JSON + pins_arduino.h per device
-test/                              Native Unity tests (notes_path, hal_result, desktop, link_frame, link_json, link_rpc)
+test/                              Native Unity tests (notes_path, hal_result, str_encode, link_frame, link_json, link_rpc)
 ```
 
 ### Core skeleton (`src/core/`)
 
-- `core::App` — abstract base; every screen subclasses it. Lifecycle: `onStart` / `onStop` / `onUpdate`. Each `apps/ui_*.cpp` opens with a "State reset on onStop" comment block listing every cached `lv_obj_t*`, `lv_timer_t*`, and FreeRTOS task the exit path must release — keep that block current.
+- `core::App` — abstract base; every screen subclasses it. Lifecycle: `onStart` / `onStop`. Each `apps/ui_*.cpp` opens with a "State reset on onStop" comment block listing every cached `lv_obj_t*`, `lv_timer_t*`, and FreeRTOS task the exit path must release — keep that block current.
 - `core::AppManager` — singleton registry. `switchApp(name, parent)` / `queueSwitchApp` drive transitions.
 - `core::System` — owns the global LVGL skeleton (status bar, menu/app panels) and drives the main loop via `loop()` → `AppManager::update()`.
 - `core::ScopedInstanceLock` — RAII over the project's own top-level task-coordination mutex. Backed by `core/instance_lock.cpp` (emulator: no-op branch).
@@ -81,7 +86,7 @@ test/                              Native Unity tests (notes_path, hal_result, d
 
 Domain sub-headers replace the old monolithic interface: `types.h`, `system.h`, `display.h`, `power.h`, `storage.h`, `audio.h`, `wireless.h`, `radio.h`, `sensors.h`, `peripherals.h`, `board_config.h`, plus feature modules (`hub.h`, `notes_crypto.h`, `notes_path.h`, `nfc_reader.h`, `result.h`, …). `hal_interface.h` is retained as a back-compat umbrella but **does not** re-export `std::string`/`std::vector` anymore — files that need them must declare `using std::string;` locally.
 
-`hal/radio/{sx1262,sx1280,cc1101,lr1121,nrf2401}.cpp` each implement the `radio_chip::` API from `hal/radio_chip.h`, gated by `ARDUINO_LILYGO_LORA_<chip>`. Radio TX/RX is interrupt-driven through FreeRTOS EventGroups (`LORA_ISR_FLAG`).
+`hal/radio/{sx1262,sx1280,cc1101,lr1121}.cpp` each implement the `radio_chip::` API from `hal/radio_chip.h`, gated by `ARDUINO_LILYGO_LORA_<chip>` (`nrf2401.cpp` is the separate pager-only nRF24, see above). Radio TX/RX is interrupt-driven through FreeRTOS EventGroups (`LORA_ISR_FLAG`).
 
 `hal::HalError` + `HalResult<T>` (`hal/result.h`) is the preferred error type for new code. Migrate bool-with-out-param signatures incrementally; see `hub_upload_note` for the pattern.
 
@@ -120,7 +125,7 @@ Go HTTP service intended to run on a LAN box (Pi/ARM). Apps point at it first an
 | Library | Version | Purpose |
 |---|---|---|
 | LilyGoLib | latest (GitHub) | Vendor hardware abstraction |
-| LVGL | 9.4.0 (hw) / 9.2.2 (emu) | GUI framework |
+| LVGL | `^9.4.0` (hw; currently resolves to 9.5.0 for pager/S3, 9.6.0 for ultra) / 9.2.2 (emu) | GUI framework |
 | RadioLib | 7.4.0 | Radio chip abstraction |
 | XPowersLib | 0.3.1 | PMIC driver |
 | SensorLib | 0.3.3 | IMU/sensor drivers |

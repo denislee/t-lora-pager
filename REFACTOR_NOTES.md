@@ -24,7 +24,7 @@ before moving on. Any future split should do the same.
 
 | File | Purpose |
 |---|---|
-| `core/app.h` | `core::App` abstract base — `onStart` / `onStop` / `onUpdate`. |
+| `core/app.h` | `core::App` abstract base — `onStart` / `onStop`. |
 | `core/app_manager.{h,cpp}` | Singleton registry + `switchApp(name, parent)` / `queueSwitchApp`. |
 | `core/system.{h,cpp}` | Singleton owning the global UI skeleton, status bar, menu/app panels; drives the main loop via `loop()` → `AppManager::update()`. |
 | `core/scoped_lock.h` | `core::ScopedInstanceLock` — RAII wrapper around our own top-level task-coordination mutex. |
