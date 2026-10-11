@@ -195,6 +195,16 @@ At most two transfers run at once (`busy` beyond that). A transfer with no
 DATA/ACK for 30 s is dropped, and a link drop ends every transfer: an
 upload's `.part` is deleted, so an interrupted upload leaves nothing behind.
 
+## 6.2 Emulator test hook (not part of the protocol)
+
+Emulator builds answer `test.callback` (P→D) so `pagerlink smoke` can drive
+pager-initiated requests: `{"method","params"?,"timeout_ms"?}` makes the
+pager call `method` on the phone, and `{"sink","bytes"}` makes it call `sink`
+with `{"size","crc32"}` and stream `bytes` of a fixed pattern to the `xfer`
+the phone returns. The outcome arrives as `evt.test.result`. Hardware builds
+never register it (`src/hal/link/handlers_test.cpp`): it would let a phone
+make the pager call arbitrary methods.
+
 The rest of the catalog (weather.*, notify.*, …) is specified in
 `IOS_COMPANION_PLAN.md` §4.5 and moves here as each phase lands. A side
 that doesn't implement a method answers ERR `unsupported`; `caps` lists the

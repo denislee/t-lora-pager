@@ -60,11 +60,55 @@ void register_sys_handlers(Rpc &rpc);
  */
 /** Register the fs.* handlers on `rpc` and adopt it for bulk sends. */
 void register_fs_handlers(Rpc &rpc);
-/** Route one DATA/ACK message (Rpc::on_bulk) to its transfer. */
-void fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);
+/** Route one DATA/ACK message (Rpc::on_bulk) to its transfer; returns true when
+ * the xfer id belongs to an fs transfer, false when it is unknown. */
+bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);
 /** Periodic pump: drop transfers idle for longer than the stall timeout. */
 void fs_tick(uint32_t now_ms);
 /** The link dropped: abort every transfer and delete upload `.part` files. */
 void fs_reset();
+
+/* ------------------------------------------------------------------------- */
+/* Pager-initiated RPC and bulk sends (link_call.cpp, handlers_test.cpp).    */
+/* The public UI surface is hal/link.h; these are the service-core entry      */
+/* points the transport-agnostic hw_link_* wrappers call. Every entry point   */
+/* takes the service lock, like the handlers.                                 */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Send a REQ to the phone. Returns false — and never runs `cb` — when there is
+ * no phone or the Rpc refuses (MAX_PENDING). Otherwise `cb` runs later on the
+ * link task with the service lock held.
+ */
+bool service_call(const std::string &method, const std::string &params_json, uint32_t timeout_ms,
+                  Rpc::ResponseFn cb);
+
+/**
+ * Stream `len` bytes to the phone as DATA under the phone's credits for
+ * transfer `xfer` (the even id it allocated in the announcing RPC). `done`
+ * runs exactly once on the link task: true when every byte is ACKed, false on
+ * send failure, on a stall (no ACK progress for `stall_ms`, checked in
+ * service_tick) or on disconnect. Returns false — and never runs `done` —
+ * when there is no phone, or `xfer` is 0, odd or already an outbound transfer.
+ * `data` must stay valid until `done` runs.
+ */
+bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t stall_ms,
+                        std::function<void(bool ok)> done);
+
+/** Send an EVT from any task. Returns false when there is no phone. */
+bool service_emit(const std::string &event, const std::string &params_json);
+
+/**
+ * Register `fn` for incoming EVT `event`; it runs on the link task with the
+ * service lock held and receives the event's params as JSON object text.
+ * Returns a token (> 0). Subscriptions survive reconnects.
+ */
+int service_subscribe(const std::string &event, std::function<void(const std::string &params_json)> fn);
+
+/** Remove a subscription; unknown tokens are ignored. Safe from any task. */
+void service_unsubscribe(int token);
+
+/** Register the test.callback handler (handlers_test.cpp; emulator builds only). */
+void register_test_handlers(Rpc &rpc);
 
 }  // namespace pagerlink

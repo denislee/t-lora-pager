@@ -133,6 +133,8 @@ public:
     bool is_null(const char *key) const;
     /** Parse an object member into `out` (recursive). */
     bool get_object(const char *key, JsonObject &out) const;
+    /** The exact text of the object last parsed ("" before any parse). */
+    const std::string &text() const { return text_; }
 
 private:
     struct Member {

@@ -556,11 +556,10 @@ bool handle_rename(const JsonObject &params, JsonWriter &result, RpcError &err) 
 
 }  // namespace
 
-void fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
+bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
     Transfer *t = find(xfer);
     if (!t) {
-        LINK_LOG("bulk for unknown xfer id=%u", static_cast<unsigned>(xfer));
-        return;
+        return false; /* not an fs transfer; the caller decides where it goes */
     }
     boost();
     t->last_ms = now_ms();
@@ -575,6 +574,7 @@ void fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len)
             drop(xfer); /* a Done transfer stays until commit() */
         }
     }
+    return true;
 }
 
 void fs_tick(uint32_t now) {
