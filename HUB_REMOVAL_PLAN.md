@@ -1,14 +1,15 @@
 # Lilyhub Removal — Plan
 <!-- plan-doc: v2 -->
 **Progress:** 34% — 9/26
-**Status:** 🟡 H0, H1, H3 and H5.1 landed (local commits 8fe85df…7e68e64). H2 waits on iOS-plan Track C 7/9; H4 on BLE hardware (D-H1)
-**Last updated:** 2026-10-11 — /next: H0.1–H0.3, H1.1–H1.3, H3.1–H3.2, H5.1 done; H2/H4/H5.2+/H6 parked
+**Status:** 🟡 H0, H1, H3, H5.1 landed; iOS Track C item 7 (file service) landed as cadd656. Next: H2.1 hw_link_call. H2.3 waits on Track C item 9; H4 on BLE hardware
+**Last updated:** 2026-10-11 — /next: ran iOS-plan Track C item 7 (cadd656) to unblock H2.1/H2.2
 **Beads:** git-ne9bg
 
 ## Handoff
-Next action: W7 — blocked on IOS_COMPANION_PLAN.md Track C item 7 (`handlers_fs.cpp`, Phase 2 file service); run that plan's item 7, then item 9, then return here
-In play: /home/dns/tmp/t-lora-pager, branch master, 8 local commits not pushed (8fe85df…7e68e64); baseline shots in /tmp/shots-before
-Not in this doc: `make protocol-test` leaves `.pio/build/emulator_lora_pager/program` missing; rebuild the emulator before a smoke run or screenshot sweep
+
+Next action: W7 — H2.1 `hw_link_call(method, params, timeout_ms, cb)` + the DATA transfer-out helper in src/hal/link.h, on top of link_xfer (cadd656)
+In play: /home/dns/tmp/t-lora-pager, branch master, 11 local commits not pushed (8fe85df…c0526f3); baseline shots in /tmp/shots-before
+Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9 (hal/weather_cache + handlers_weather); `make protocol-test` leaves the emulator binary missing, so rebuild before a smoke run
 
 ## Work
 - [x] **W1** H0.1 Land the uncommitted hub work — ev: 8fe85df (server) · 7038cb7 (libhelix) · fd95e6e (firmware DC pass) · 0f018bb (docs); gate pager/emu/native/go all exit 0 · was: H0.1 · src: L270 · bd: git-ne9bg.1
@@ -20,11 +21,11 @@ Not in this doc: `make protocol-test` leaves `.pio/build/emulator_lora_pager/pro
 - [x] **W13** H3.1 Protocol: drop hub codes + sys.info hub, add LinkOffline — ev: 557a188; make protocol-test exit 0; pagerlink smoke all steps passed · was: H3.1 · src: L377 · bd: git-ne9bg.7
 - [x] **W14** H3.2 Update IOS_COMPANION_PLAN.md — ev: d0e8e64 · was: H3.2 · src: L383 · bd: git-ne9bg.8
 - [x] **W21** H5.1 Relocate Go PagerLink tooling to tools/pagerlink — ev: 7e68e64; go test -race -cover internal/pagerlink 78.7 % (= baseline); smoke passed · was: H5.1 · src: L422 · bd: git-ne9bg.9
-- [!] **W7** H2.1 Pager-initiated RPC API (`hw_link_call`) — blocked: iOS plan Track C item 7 (fs.* + bulk DATA) not landed; no src/hal/link/handlers_fs.cpp · was: H2.1 · src: L305 · bd: git-ne9bg.10
-- [!] **W8** H2.2 `pagerlink serve` mock phone — blocked: needs W7 + Track C item 7 (`fs.read`) · after: W7 · was: H2.2 · src: L311 · bd: git-ne9bg.11
+- [ ] **W7** H2.1 Pager-initiated RPC API (`hw_link_call`) — left: Track C item 7 landed (cadd656: link_xfer engine, Rpc::defer, fs.* on emulator); build hw_link_call on top · was: H2.1 · src: L305 · bd: git-ne9bg.10
+- [ ] **W8** H2.2 `pagerlink serve` mock phone — left: fs.read client side exists in tools/pagerlink (ReadFile); add the responder role · after: W7 · was: H2.2 · src: L311 · bd: git-ne9bg.11
 - [!] **W9** H2.3 Weather via phone — blocked: iOS plan Track C item 9 (hal/weather_cache, handlers_weather) not landed · after: W8 · was: H2.3 · src: L315 · bd: git-ne9bg.12
 - [!] **W10** H2.4 Chat via phone — blocked: needs W7/W8 (DATA upload + mock phone) · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
-- [!] **W11** H2.5 Notes sync via phone — blocked: needs Track C item 7 (`fs.read`) + W8 · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
+- [!] **W11** H2.5 Notes sync via phone — blocked: needs W7 + W8 (fs.read is in, cadd656) · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
 - [!] **W12** H2.6 Telegram via phone — blocked: needs W7/W8 (and bulk DATA for >4096 B replies) · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
 - [!] **W15** H4.1 Hardware acceptance, pager + iPhone, Wi-Fi off — blocked: D-H1 gate, BLE transport (iOS plan Track A step 5) not on hardware · after: W9, W10, W11, W12 · was: H4.1 · src: L390 · bd: git-ne9bg.16
 - [ ] **W16** H4.2 Delete the firmware hub — after: W15 · was: H4.2 · src: L398 · bd: git-ne9bg.17
@@ -56,6 +57,11 @@ Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a
 - server/ still holds lilyhub; the PagerLink Go tooling lives in tools/pagerlink.
 
 ## Log
+
+### 2026-10-11 — /next — outside item: IOS_COMPANION_PLAN.md Track C item 7
+- User chose to unblock H2 by running the iOS plan's Track C item 7. Landed as cadd656 (+ c0526f3 log in the iOS plan): fs.* handlers, link_xfer credit-window engine + CRC-32, fs_volume (real dirs on the emulator), sandbox_path, Rpc::defer, evt.fs.changed, Go ReadFile/WriteFile + CLI.
+- Evidence: pagerlink smoke 24/24 against the emulator (1 MiB round trip, dropped upload leaves no file or .part, `..` rejected, bad CRC rejected); native 113/113; Go 80.7 %; all six envs build; shots unchanged below the status bar. Negative controls: `..` allowed → test_sandbox_rejects FAILS; .part kept on drop → 2 smoke steps FAIL.
+- Effect here: W7/W8 reopened (their DATA dependency exists now); W9 still waits on Track C item 9.
 
 ### 2026-10-11 — /next — W1–W6, W13, W14, W21
 - Env: local only (/home/dns/tmp/t-lora-pager, master). No device, no remote; nothing pushed. Every item LOW (source edits + local commits), no rollback beyond `git revert <sha>`.
