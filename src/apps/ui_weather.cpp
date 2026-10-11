@@ -40,7 +40,6 @@
 #include "../ui_define.h"
 #include "../hal/wireless.h"
 #include "../hal/system.h"
-#include "../hal/hub.h"
 #include "../hal/str_encode.h"
 #include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
@@ -87,16 +86,6 @@ enum IconKind {
 static const char *GEO_URL =
     "http://ip-api.com/json/?fields=status,lat,lon,city,regionName,country";
 #endif
-
-// When the local hub is enabled (Settings » Local Hub, backed by hal::hub_*),
-// every weather fetch tries the hub first and only falls back to the public
-// upstream if the hub call fails. The hub (see /server in this repo) returns
-// byte-identical JSON to the upstreams it proxies, so the parsers below are
-// unchanged. Hub paths are kept here so the contract lives next to the URLs
-// they replace.
-#define HUB_PATH_GEO_IP        "/api/weather/geo/ip"
-#define HUB_PATH_GEO_SEARCH    "/api/weather/geo/search"
-#define HUB_PATH_FORECAST      "/api/weather/forecast"
 
 #define WEATHER_PREFS_NS       "weather"
 #define WEATHER_CACHE_VER      1
@@ -522,30 +511,10 @@ static void save_cached_geo(const std::string &key, const GeoData &in)
     p.end();
 }
 
-// Try the hub first (if enabled+configured), then fall back to `direct_url`.
-// The hub's JSON is identical to upstream, so the same parser handles both
-// responses. `err` is populated only with the *direct* call's error, since
-// the hub being down is expected and not interesting to surface. Hub config
-// (toggle + URL) is owned by hal/hub.{h,cpp}.
-static bool fetch_with_hub_fallback(const std::string &hub_path,
-                                    const char *direct_url,
-                                    std::string &body,
-                                    std::string &err)
-{
-    std::string hub = hal::hub_get_url();
-    if (!hub.empty()) {
-        std::string url = hub + hub_path;
-        std::string e;
-        if (hw_http_get_string(url.c_str(), body, &e)) return true;
-        body.clear();
-    }
-    return hw_http_get_string(direct_url, body, &err);
-}
-
 static bool fetch_geo_ip(GeoData &out, std::string &err)
 {
     std::string body;
-    if (!fetch_with_hub_fallback(HUB_PATH_GEO_IP, GEO_URL, body, err)) return false;
+    if (!hw_http_get_string(GEO_URL, body, &err)) return false;
     return parse_geo(body, out, err);
 }
 
@@ -557,11 +526,8 @@ static bool fetch_geo_city(const std::string &city, GeoData &out, std::string &e
     snprintf(direct_url, sizeof(direct_url),
         "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&format=json",
         enc.c_str());
-    std::string hub_path = std::string(HUB_PATH_GEO_SEARCH) +
-                           "?name=" + enc + "&count=1";
-
     std::string body;
-    if (!fetch_with_hub_fallback(hub_path, direct_url, body, err)) return false;
+    if (!hw_http_get_string(direct_url, body, &err)) return false;
 
     cJSON *j = cJSON_Parse(body.c_str());
     if (!j) { err = "geo parse"; return false; }
@@ -765,10 +731,8 @@ static bool fetch_weather(double lat, double lon, ForecastCache &out,
     char direct_url[512];
     snprintf(direct_url, sizeof(direct_url),
              "https://api.open-meteo.com/v1/forecast?%s", qs);
-    std::string hub_path = std::string(HUB_PATH_FORECAST) + "?" + qs;
-
     std::string body;
-    if (!fetch_with_hub_fallback(hub_path, direct_url, body, err)) return false;
+    if (!hw_http_get_string(direct_url, body, &err)) return false;
 
     cJSON *j = cJSON_Parse(body.c_str());
     if (!j) { err = "forecast parse"; return false; }

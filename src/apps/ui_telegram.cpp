@@ -40,7 +40,6 @@
 #include "../hal/system.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/secrets.h"
-#include "../hal/hub.h"
 #include "../hal/nvs.h"
 #include "../hal/str_encode.h"
 #include "../core/app.h"
@@ -491,54 +490,6 @@ static bool tg_http_request(const std::string &url, const char *method,
                             const char *content_type, const char *auth_header,
                             std::string &out_body, int *out_code, std::string *err)
 {
-#ifdef ARDUINO
-    // hub_last_reachable() is a non-blocking read of the status-bar probe's
-    // cached verdict (it already checks hub_is_enabled()); the old
-    // hub_is_reachable() here did a 1.5 s blocking connect() on the LVGL thread
-    // on every poll/send/mark-read. A stale/unknown verdict falls through to the
-    // direct Telegram path below.
-    if (hal::hub_last_reachable()) {
-        std::string proxy_url = hal::hub_get_url() + "/api/telegram/proxy";
-        
-        cJSON *req = cJSON_CreateObject();
-        cJSON_AddStringToObject(req, "url", url.c_str());
-        cJSON_AddStringToObject(req, "method", method);
-        if (auth_header && strlen(auth_header) > 7) {
-            cJSON_AddStringToObject(req, "token", auth_header + 7);
-        }
-        if (body && body_len > 0) {
-            std::string bs(body, body_len);
-            cJSON_AddStringToObject(req, "body", bs.c_str());
-        }
-        char *req_str = cJSON_PrintUnformatted(req);
-        std::string req_body;
-        if (req_str) {
-            req_body = req_str;
-            free(req_str);
-        }
-        cJSON_Delete(req);
-        
-        if (!req_body.empty()) {
-            int pcode = 0;
-            if (hw_http_request(proxy_url.c_str(), "POST",
-                                req_body.c_str(), req_body.size(),
-                                "application/json", nullptr,
-                                out_body, &pcode, err)) {
-                if (out_code) *out_code = pcode;
-                return true;
-            }
-            // P6.28: the hub proxy answers 4xx for a URL it won't forward (its
-            // allowlist predates the bridge API), and a transport failure means
-            // the hub went away — retry both directly. A 5xx is returned as-is:
-            // the hub may already have forwarded a POST (send / mark-read).
-            if (pcode >= 500) {
-                if (out_code) *out_code = pcode;
-                return false;
-            }
-            out_body.clear();
-        }
-    }
-#endif
     return hw_http_request(url.c_str(), method, body, body_len,
                            content_type, auth_header, out_body, out_code, err);
 }
@@ -689,8 +640,8 @@ static bool load_bridge_auth(std::string &url, std::string &auth, std::string *e
     return true;
 }
 
-// GET <base_url>/v1/chats through tg_http_request (hub proxy first, direct
-// fallback) and parse it into `out`. Worker-safe: no LVGL, no shared state.
+// GET <base_url>/v1/chats through tg_http_request and parse it into `out`.
+// Worker-safe: no LVGL, no shared state.
 // *unread_total (optional) gets the sum of the positive per-chat unread counts.
 static bool fetch_chats(std::string base_url, const std::string &auth,
                         std::vector<Chat> &out, int *unread_total,

@@ -8,7 +8,7 @@
 #include "notes_crypto.h"
 #include "notes_path.h"
 #include "fs_util.h"
-#include "hub.h"
+#include "evict.h"
 #include "../core/spi_lock.h"
 
 #include <cstring>
@@ -663,12 +663,6 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
 
     size_t total_to_move = std::min<size_t>(kEvictBatch, infos.size());
 
-    // Best-effort mirror to the hub on top of the SD copy. Either landing
-    // is enough to safely drop the FFat copy, so SD and hub are evaluated
-    // independently. Hub failure (offline, hub disabled, network blip)
-    // does not block eviction — the SD copy still preserves the note.
-    bool hub_on = hal::hub_is_enabled();
-
     for (size_t i = 0; i < total_to_move; ++i) {
         // list_files returns leaf names; resolve back to absolute paths under
         // /notes for both the read (FFat) and write (SD) sides.
@@ -677,34 +671,20 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
 
         if (cb) cb((int)i, (int)total_to_move, ("Moving to SD: " + path).c_str());
 
-        std::vector<uint8_t> buf;
-        if (!hal::fs_read_all(FFat, path.c_str(), buf)) continue;
-        size_t sz = buf.size();
+        hal::EvictResult r = hal::evict_one(
+            [&](std::vector<uint8_t> &buf) {
+                return hal::fs_read_all(FFat, path.c_str(), buf);
+            },
+            [&](const std::vector<uint8_t> &buf) {
+                core::ScopedSpiLock lock;
+                return hal::fs_write_all(SD, path.c_str(), buf.data(), buf.size());
+            },
+            [&]() { FFat.remove(path); });
 
-        bool copied = false;
-        {
-            core::ScopedSpiLock lock;
-            copied = hal::fs_write_all(SD, path.c_str(), buf.data(), sz);
-        }
-
-        bool hub_ok = false;
-        if (hub_on) {
-            // Strip leading slash so the hub stores under just the name.
-            const char *leaf = path.c_str();
-            while (*leaf == '/') leaf++;
-            HalError herr = hal::hub_upload_note(leaf, buf.data(), sz);
-            hub_ok = (herr == HalError::Ok);
-            if (!hub_ok) {
-                log_e("Eviction hub upload failed (%s): %s", leaf, hal_error_string(herr));
-            }
-        }
-
-        if (copied || hub_ok) {
-            log_d("Eviction move: %s (sd=%d hub=%d)",
-                   path.c_str(), (int)copied, (int)hub_ok);
-            FFat.remove(path);
-        } else {
+        if (r == hal::EvictResult::CopyFailed) {
             log_e("Eviction copy failed, keeping: %s", path.c_str());
+        } else if (r == hal::EvictResult::Moved) {
+            log_d("Eviction move: %s", path.c_str());
         }
     }
 
@@ -714,9 +694,9 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
 }
 
 #ifdef ARDUINO
-/* An eviction sweep moves up to kEvictBatch notes to SD and may POST each to
- * the hub — seconds of blocking flash + network I/O. Running it inline on the
- * save that triggered it meant a note "save on exit" could stall the UI for
+/* An eviction sweep moves up to kEvictBatch notes to SD — seconds of blocking
+ * flash + SD I/O. Running it inline on the save that triggered it meant a
+ * note "save on exit" could stall the UI for
  * that whole burst. Detach it onto a one-shot task so the save (and the exit
  * that drove it) returns immediately. The flag serialises sweeps: at most one
  * runs at a time, and a save arriving mid-sweep just defers re-triggering to a
@@ -727,7 +707,7 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
  * with FF_FS_REENTRANT=1, so every FFat call is already serialised on a
  * per-volume mutex. A remove racing a scan is at worst a benign logical race
  * (a note being evicted may blink out of a listing mid-move) — never FATFS
- * corruption — and the note is preserved on SD/hub either way. */
+ * corruption — and the note is preserved on SD either way. */
 static volatile bool s_prune_task_running = false;
 
 static void prune_task(void *arg)
@@ -753,8 +733,8 @@ static void prune_internal_storage()
     if (s_prune_task_running) return;
 
     s_prune_task_running = true;
-    // 8 KB matches the other background workers (notes-sync/weather); the hub is
-    // plaintext LAN HTTP so there's no TLS stack to accommodate.
+    // 8 KB matches the other background workers (notes-sync/weather); there's
+    // no TLS stack to accommodate.
     if (xTaskCreate(prune_task, "notes_prune", 8192, nullptr, 2, nullptr) != pdPASS) {
         // Spawn failed (severe memory pressure) — fall back to a synchronous
         // sweep so eviction still happens.
