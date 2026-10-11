@@ -28,6 +28,17 @@ import (
 	"github.com/lilygo/pagerlink/internal/pagerlink"
 )
 
+// audioXfer is one chat.audio.begin upload; done closes once the bytes arrived
+// (n) or failed (err).
+type audioXfer struct {
+	done chan struct{}
+	n    int
+	err  error
+}
+
+// audioWait is how long chat.ask waits for a still-arriving voice upload.
+const audioWait = 30 * time.Second
+
 // mockPhone answers the pager's D→P requests on a connected Client. It is the
 // emulator stand-in for the iOS companion: canned results for loc/weather/chat,
 // a receiver for uploaded voice bytes, and an fs.read-driven notes sync.
@@ -37,7 +48,7 @@ type mockPhone struct {
 
 	mu      sync.Mutex
 	job     int
-	audio   map[uint16]int // chat.audio.begin xfer -> bytes received
+	audio   map[uint16]*audioXfer // chat.audio.begin xfer -> in-flight upload
 	replies map[string]json.RawMessage
 }
 
@@ -58,7 +69,7 @@ func cmdServe(c *pagerlink.Client, addr string, timeout time.Duration, args []st
 		return 2
 	}
 
-	srv := &mockPhone{c: c, notesOut: *notesOut, audio: make(map[uint16]int)}
+	srv := &mockPhone{c: c, notesOut: *notesOut, audio: make(map[uint16]*audioXfer)}
 	if *responses != "" {
 		if err := srv.loadResponses(*responses); err != nil {
 			fmt.Fprintf(os.Stderr, "pagerlink serve: %v\n", err)
@@ -125,8 +136,9 @@ func (s *mockPhone) handle(method string, h pagerlink.Handler) {
 	})
 }
 
-// chatAsk answers chat.ask. With audio_xfer naming a received voice transfer it
-// replies with the byte count and a transcript; otherwise it echoes params.text.
+// chatAsk answers chat.ask. With audio_xfer naming a voice transfer it waits up
+// to audioWait for the upload to finish, then replies with the byte count and a
+// transcript (or an error if it failed); otherwise it echoes params.text.
 func (s *mockPhone) chatAsk(params json.RawMessage) (any, *pagerlink.RPCError) {
 	var p struct {
 		Text      string `json:"text"`
@@ -137,21 +149,34 @@ func (s *mockPhone) chatAsk(params json.RawMessage) (any, *pagerlink.RPCError) {
 	}
 	if p.AudioXfer != 0 {
 		s.mu.Lock()
-		n, ok := s.audio[p.AudioXfer]
+		x, ok := s.audio[p.AudioXfer]
 		s.mu.Unlock()
-		if ok {
-			return map[string]any{
-				"reply":      fmt.Sprintf("(mock) audio %d bytes", n),
-				"transcript": "(mock) transcript",
-			}, nil
+		if !ok {
+			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "unknown audio_xfer"}
 		}
+		select {
+		case <-x.done:
+		case <-time.After(audioWait):
+			return nil, &pagerlink.RPCError{Code: "busy", Msg: "audio upload not finished"}
+		}
+		s.mu.Lock()
+		delete(s.audio, p.AudioXfer)
+		s.mu.Unlock()
+		if x.err != nil {
+			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "audio upload failed: " + x.err.Error()}
+		}
+		return map[string]any{
+			"reply":      fmt.Sprintf("(mock) audio %d bytes", x.n),
+			"transcript": "(mock) transcript",
+		}, nil
 	}
 	return map[string]any{"reply": "(mock) " + p.Text}, nil
 }
 
-// chatAudioBegin accepts a voice upload: it installs the byte sink before
-// answering {xfer}, then a goroutine waits for the DATA, checks its CRC, logs
-// the outcome, and records the byte count for a later chat.ask audio_xfer.
+// chatAudioBegin accepts a voice upload: it installs the byte sink and records
+// the in-flight xfer before answering {xfer}, then a goroutine waits for the
+// DATA, checks its CRC, logs the outcome, and closes done so a later chat.ask
+// audio_xfer can read the byte count or the failure.
 func (s *mockPhone) chatAudioBegin(params json.RawMessage) (any, *pagerlink.RPCError) {
 	var p struct {
 		Size  uint32 `json:"size"`
@@ -162,17 +187,20 @@ func (s *mockPhone) chatAudioBegin(params json.RawMessage) (any, *pagerlink.RPCE
 		return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "bad chat.audio.begin params"}
 	}
 	id, wait := s.c.AcceptBytes(p.Size, p.CRC32)
+	x := &audioXfer{done: make(chan struct{})}
+	s.mu.Lock()
+	s.audio[id] = x
+	s.mu.Unlock()
 	go func() {
 		data, err := wait(60 * time.Second)
+		x.n, x.err = len(data), err
 		if err != nil {
 			fmt.Printf("serve: chat.audio.begin xfer=%d fmt=%q: %v\n", id, p.Fmt, err)
-			return
+		} else {
+			fmt.Printf("serve: chat.audio.begin xfer=%d fmt=%q: %d bytes, crc32 0x%08x ok\n",
+				id, p.Fmt, len(data), crc32.ChecksumIEEE(data))
 		}
-		s.mu.Lock()
-		s.audio[id] = len(data)
-		s.mu.Unlock()
-		fmt.Printf("serve: chat.audio.begin xfer=%d fmt=%q: %d bytes, crc32 0x%08x ok\n",
-			id, p.Fmt, len(data), crc32.ChecksumIEEE(data))
+		close(x.done)
 	}()
 	return map[string]any{"xfer": id}, nil
 }

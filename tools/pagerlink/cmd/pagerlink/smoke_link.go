@@ -14,16 +14,19 @@ import (
 	"github.com/lilygo/pagerlink/internal/pagerlink"
 )
 
-// testResult is the evt.test.result payload. The call steps fill step/ok/code/
-// msg/json; the sink step fills step/ok/code/bytes/crc32.
+// testResult is the evt.test.result payload. The chat steps fill step/ok/code/
+// msg/reply/transcript/bytes; the call steps fill step/ok/code/msg/json; the sink
+// step fills step/ok/code/bytes/crc32.
 type testResult struct {
-	Step  string          `json:"step"`
-	OK    bool            `json:"ok"`
-	Code  string          `json:"code"`
-	Msg   string          `json:"msg"`
-	JSON  json.RawMessage `json:"json"`
-	Bytes int             `json:"bytes"`
-	CRC32 uint32          `json:"crc32"`
+	Step       string          `json:"step"`
+	OK         bool            `json:"ok"`
+	Code       string          `json:"code"`
+	Msg        string          `json:"msg"`
+	JSON       json.RawMessage `json:"json"`
+	Bytes      int             `json:"bytes"`
+	CRC32      uint32          `json:"crc32"`
+	Reply      string          `json:"reply"`
+	Transcript string          `json:"transcript"`
 }
 
 // sinkResult is what the test.sink.begin receiver goroutine reports: how many
@@ -33,7 +36,7 @@ type sinkResult struct {
 	err error
 }
 
-// smokeLink drives the four pager-initiated steps and reports each. c is the
+// smokeLink drives the six pager-initiated steps and reports each. c is the
 // live client returned by smokeFS.
 func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 	pass := true
@@ -62,6 +65,11 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 		}()
 		return map[string]any{"xfer": id}, nil
 	})
+
+	// The phone-side chat handlers (same code the `serve` command uses).
+	phone := &mockPhone{c: c, audio: make(map[uint16]*audioXfer)}
+	c.Handle("chat.audio.begin", phone.chatAudioBegin)
+	c.Handle("chat.ask", phone.chatAsk)
 
 	// a. A pager-initiated RPC end to end.
 	r, ok := linkStep(c, timeout, map[string]any{
@@ -120,6 +128,29 @@ func smokeLink(c *pagerlink.Client, timeout time.Duration) bool {
 		fmt.Printf("       evt.test.result %+v\n", r)
 	}
 	pass = report(ok, "pager->phone 200 KB DATA (hw_link_send_bytes)") && pass
+
+	// e. The pager asks chat.ask with text; the mock phone echoes it.
+	r, ok = linkStep(c, timeout, map[string]any{"chat": "text", "text": "hello pager"})
+	if ok && (r.Step != "chat" || !r.OK || r.Reply != "(mock) hello pager") {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone chat.ask text (chat_link_ask)") && pass
+
+	// f. The pager streams a 64 KB voice note into chat.audio.begin then asks
+	//    chat.ask with the returned xfer; the mock phone must have all the bytes.
+	const voicePCM = 65536
+	r, ok = linkStep(c, timeout, map[string]any{"chat": "voice", "bytes": voicePCM})
+	if ok && (r.Step != "chat" || !r.OK || r.Bytes != voicePCM+44 ||
+		r.Reply != fmt.Sprintf("(mock) audio %d bytes", voicePCM+44) || r.Transcript == "") {
+		ok = false
+	}
+	if !ok {
+		fmt.Printf("       evt.test.result %+v\n", r)
+	}
+	pass = report(ok, "pager->phone chat voice 64 KB (chat.audio.begin + DATA + chat.ask)") && pass
 
 	return pass
 }

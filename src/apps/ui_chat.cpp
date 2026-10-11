@@ -1,30 +1,38 @@
 /**
  * @file      ui_chat.cpp
- * @brief     LLM chat client backed by lilyhub /api/chat (Groq STT + LLM).
+ * @brief     LLM chat client: the phone first (PagerLink chat.ask), the
+ *            lilyhub /api/chat as a hardware-only fallback.
  *
- * The app gives the user two ways to ask a question — type it, or hold
- * the mic — and renders the model's reply as a wrapped text line in a
- * scrolling log. The on-device firmware does not talk to Groq directly:
- * everything goes through the LAN hub, which holds the API key and runs
- * Whisper + chat completion on a real CPU.
+ * The app gives the user two ways to ask a question — type it, or tap the
+ * mic — and renders the model's reply as a wrapped text line in a
+ * scrolling log. The on-device firmware does not talk to Groq directly.
  *
- * No fallback path: unlike notes-sync, there is no useful direct route
- * (we'd have to embed a Groq key on the device, defeating the point of
- * the hub). When the hub is disabled or unreachable the app surfaces a
- * clean error and does nothing else.
+ * Route, picked per request in kick_off_send (HUB_REMOVAL_PLAN.md H2.4):
+ *   1. Phone connected over PagerLink → chat_link_ask() (hal/chat_link.h):
+ *      voice goes up as chat.audio.begin + DATA, then chat.ask. The phone
+ *      holds the Groq key and the per-pager history. Works in the emulator.
+ *   2. Hardware only, no phone → the LAN hub (POST <hub>/api/chat), unchanged
+ *      until the hub is deleted (H4.2, gated on BLE hardware: D-H1).
+ *   3. Neither → a clean "Connect your phone" error.
+ * Voice memos are capped at CHAT_AUDIO_MAX_MS (15 s): the poll timer stops
+ * the recording at the cap and sends it.
  *
  * State reset on onStop (exit_cb):
  *   widgets: s_log_scroll, s_log_label, s_input_ta, s_mic_btn,
  *            s_status_lbl                  — nulled (deleted with parent)
- *   timers:  s_poll_timer                  — lv_timer_del + null
- *   tasks:   send_task (no handle kept)    — abandoned via s_ctx handoff
+ *   timers:  s_poll_timer (also drives the
+ *            15 s recording cap)           — lv_timer_del + null
+ *   tasks:   send_task (FreeRTOS task on hardware, detached std::thread on
+ *            the emulator; no handle kept) — abandoned via s_ctx handoff
  *   hw:      mic recording                 — stopped via hw_rec_stop()
  *   ctx:     s_ctx (SendCtx*)              — abandoned + freed if worker done
  * If you add new cached state, list it here AND extend exit_cb() — a
  * leaked timer pointer will fire into a destroyed LVGL tree on next entry.
  */
 #include "../ui_define.h"
+#include "../hal/chat_link.h"
 #include "../hal/hub.h"
+#include "../hal/link.h"
 #include "../hal/wireless.h"
 #include "../hal/storage.h"
 #include "../hal/audio.h"
@@ -52,6 +60,8 @@
 extern "C" {
 #include "cJSON.h"
 }
+#else
+#include <thread>
 #endif
 
 namespace {
@@ -76,7 +86,8 @@ static bool        s_busy      = false;
 
 // --- async send context ---------------------------------------------------
 //
-// The send task runs off the LVGL thread because chat_post is blocking.
+// The send task runs off the LVGL thread because chat_link_ask / chat_post
+// block.
 // We coordinate with atomics rather than the global instance lock — the
 // LVGL task already holds that lock around lv_timer_handler(), and the
 // instance mutex is non-recursive, so a poll-timer callback that tried
@@ -91,11 +102,13 @@ static bool        s_busy      = false;
 // abandon-after-done) wins the `claimed` CAS owns deletion; the other
 // leaves the buffer alone.
 struct SendCtx {
+    bool        phone = false;  // true: chat_link_ask; false: hub chat_post
+    std::string text;           // phone path: the typed question
     std::string url;
     std::string body;
-    // When non-empty, the worker streams this WAV in as base64 (appended to
-    // `body`, which the UI thread left open after `..."audio_b64":"`). Keeps
-    // the raw bytes + a full base64 copy off the heap at the same time.
+    // Voice memo. Hub path: the worker streams this WAV in as base64
+    // (appended to `body`, which the UI thread left open after
+    // `..."audio_b64":"`). Phone path: chat_link_ask uploads it as DATA.
     std::string audio_path;
     std::string transcript;
     std::string reply;
@@ -109,13 +122,25 @@ struct SendCtx {
 static SendCtx *s_ctx = nullptr;
 
 // Watchdog: if the worker task hasn't flipped done within this window, give
-// up on it. chat_post's raw WiFiClient already bounds itself (5 s connect +
-// 15 s read budget), so this is a UI-side backstop just past that budget:
-// it surfaces a visible error and abandons the task so the UI doesn't sit
-// on "thinking..." forever if the worker overruns.
+// up on it. It is a UI-side backstop just past the worker's own budget: it
+// surfaces a visible error and abandons the task so the UI doesn't sit on
+// "thinking..." forever if the worker overruns.
+//  - hub: chat_post's raw WiFiClient bounds itself (5 s connect + 15 s read).
+//  - phone: chat.ask waits CHAT_ASK_TIMEOUT_MS (60 s) after the voice upload,
+//    so the budget covers that plus the upload of a capped memo.
 #ifdef ARDUINO
 static const uint32_t SEND_WATCHDOG_MS = 20000;
 #endif
+static const uint32_t PHONE_WATCHDOG_MS = 75000;
+
+static uint32_t chat_now_ms()
+{
+#ifdef ARDUINO
+    return millis();
+#else
+    return lv_tick_get();
+#endif
+}
 
 static void log_append(const char *prefix, const std::string &text)
 {
@@ -392,6 +417,7 @@ static bool chat_b64_sink(void *user, const uint8_t *data, size_t len)
     ctx->body += enc;
     return true;
 }
+#endif
 
 // Single worker exit: publish the result (release pairs with
 // poll_timer_cb's acquire), free ctx if the UI already abandoned it, and
@@ -402,12 +428,30 @@ static void send_task_exit(SendCtx *ctx)
     if (ctx->abandoned.load() && !ctx->claimed.exchange(true)) {
         delete ctx;
     }
+#ifdef ARDUINO
     vTaskDelete(NULL);
+#endif
 }
 
-static void send_task(void *arg)
+// Phone path: one chat_link_ask() turn (voice upload + chat.ask). No
+// device_id: the phone keeps the history per pager.
+static void send_phone(SendCtx *ctx)
 {
-    SendCtx *ctx = (SendCtx *)arg;
+    std::string err;
+    HalResult<ChatReply> r = chat_link_ask(ctx->text, ctx->audio_path, err);
+    ctx->audio_path.clear();
+    if (r) {
+        ctx->transcript = r.value().transcript;
+        ctx->reply      = r.value().reply;
+        ctx->ok         = true;
+    } else {
+        ctx->error = err.empty() ? hal_error_string(r.error()) : err;
+    }
+}
+
+#ifdef ARDUINO
+static void send_hub(SendCtx *ctx)
+{
 
     // Voice memo: stream the WAV off the SD card as base64 directly into the
     // body here (the UI thread left it open after `..."audio_b64":"`). Doing
@@ -424,7 +468,6 @@ static void send_task(void *arg)
             ctx->error = "audio read failed";
             ctx->body.clear();
             ctx->body.shrink_to_fit();
-            send_task_exit(ctx);
             return;
         }
         // Restart the watchdog clock now that the (potentially multi-second)
@@ -483,14 +526,39 @@ static void send_task(void *arg)
         }
     }
 
+}
+#endif
+
+static void send_task(void *arg)
+{
+    SendCtx *ctx = (SendCtx *)arg;
+#ifdef ARDUINO
+    if (ctx->phone) send_phone(ctx);
+    else            send_hub(ctx);
+#else
+    send_phone(ctx);
+#endif
     // All result fields are set; send_task_exit publishes them via `done`
     // so the UI sees a consistent ctx (reply/transcript/ok all populated).
     send_task_exit(ctx);
 }
+
+#ifdef ARDUINO
+static void finish_recording();
 #endif
 
 static void poll_timer_cb(lv_timer_t *)
 {
+#ifdef ARDUINO
+    // Voice memo cap: stop at CHAT_AUDIO_MAX_MS and send what we have, so the
+    // upload to the phone stays bounded (chat_link_ask also refuses larger
+    // files as a backstop).
+    if (s_recording && hw_rec_running() &&
+        hw_rec_elapsed_ms() >= CHAT_AUDIO_MAX_MS) {
+        log_append("info: ", "15 s limit, sending");
+        finish_recording();
+    }
+#endif
     if (!s_ctx) return;
     // Acquire pairs with the worker's release-store of `done` — once we
     // see done=true, every other field of *s_ctx is safe to read here.
@@ -499,18 +567,28 @@ static void poll_timer_cb(lv_timer_t *)
     // instance mutex from lvgl_task_fn, and re-taking it here deadlocks
     // the entire UI task.
     bool done = s_ctx->done.load(std::memory_order_acquire);
-#ifdef ARDUINO
     if (!done) {
         if (s_ctx->start_ms != 0) {
-            uint32_t elapsed = millis() - s_ctx->start_ms;
-            // Watchdog — surface stuck HTTP calls instead of leaving the
-            // UI on "thinking..." indefinitely. The worker task keeps
-            // running but its result will be discarded.
-            if (elapsed > SEND_WATCHDOG_MS) {
-                Serial.println("[chat] watchdog: send_task stuck >20s, abandoning");
+            uint32_t elapsed = chat_now_ms() - s_ctx->start_ms;
+#ifdef ARDUINO
+            uint32_t budget = s_ctx->phone ? PHONE_WATCHDOG_MS : SEND_WATCHDOG_MS;
+#else
+            uint32_t budget = PHONE_WATCHDOG_MS;
+#endif
+            // Watchdog — surface stuck calls instead of leaving the UI on
+            // "thinking..." indefinitely. The worker keeps running but its
+            // result will be discarded.
+            if (elapsed > budget) {
+                char msg[64];
+                snprintf(msg, sizeof(msg), "request timeout (no response in %us)",
+                         (unsigned)(budget / 1000));
+#ifdef ARDUINO
+                Serial.printf("[chat] watchdog: send_task stuck >%us, abandoning\n",
+                              (unsigned)(budget / 1000));
+#endif
                 cancel_inflight();
                 set_busy(false);
-                log_append("err: ", "request timeout (no response in 20s)");
+                log_append("err: ", msg);
                 set_status("");
                 return;
             }
@@ -526,9 +604,6 @@ static void poll_timer_cb(lv_timer_t *)
         }
         return;
     }
-#else
-    if (!done) return;
-#endif
 
     SendCtx *ctx = s_ctx;
     s_ctx = nullptr;
@@ -555,13 +630,54 @@ static void poll_timer_cb(lv_timer_t *)
     delete ctx;
 }
 
+// Spawn send_task for ctx (already in s_ctx). Returns false on spawn failure.
+static bool spawn_send_task(SendCtx *ctx)
+{
+#ifdef ARDUINO
+    // Pin to core 0 — LVGL runs on core 1, so the blocking I/O and the UI
+    // redraws never compete for the same scheduler slot. Priority 1 keeps it
+    // well below the LVGL task (priority 8).
+    return xTaskCreatePinnedToCore(send_task, "chat_send", 8192, ctx, 1,
+                                   nullptr, 0) == pdPASS;
+#else
+    // Emulator: no FreeRTOS; a detached thread plays the worker task (the
+    // link test hook does the same).
+    try {
+        std::thread(send_task, ctx).detach();
+        return true;
+    } catch (...) {
+        return false;
+    }
+#endif
+}
+
 static void kick_off_send(const std::string &user_text,
                           const std::string &audio_path)
 {
+    // 1. Phone first.
+    if (hw_link_connected()) {
+        SendCtx *ctx = new SendCtx();
+        ctx->phone      = true;
+        ctx->text       = user_text;
+        ctx->audio_path = audio_path;
+        s_ctx = ctx;
+        ctx->start_ms = chat_now_ms();
+        set_status(audio_path.empty() ? "thinking... (tap to cancel)"
+                                      : "uploading... (tap to cancel)");
+        if (!spawn_send_task(ctx)) {
+            s_ctx = nullptr;
+            delete ctx;
+            log_append("err: ", "task spawn failed");
+            set_busy(false);
+        }
+        return;
+    }
+
 #ifdef ARDUINO
+    // 2. Hub fallback (hardware only) — unchanged until H4.2.
     std::string hub = hal::hub_get_url();
     if (hub.empty()) {
-        log_append("err: ", "hub not configured (Settings " "\xC2\xBB" " Local Hub)");
+        log_append("err: ", "Connect your phone (or set Settings " "\xC2\xBB" " Local Hub)");
         set_busy(false);
         return;
     }
@@ -599,20 +715,16 @@ static void kick_off_send(const std::string &user_text,
     s_ctx = ctx;
     ctx->start_ms = millis();
     set_status("thinking... (tap to cancel)");
-    // Pin to core 0 — LVGL runs on core 1, so the HTTP read loop and
-    // the UI redraws never compete for the same scheduler slot. Priority
-    // 1 keeps it well below the LVGL task (priority 8); even on a single
-    // core that would be fine, but cross-core is safer.
-    if (xTaskCreatePinnedToCore(send_task, "chat_send", 8192, ctx, 1,
-                                nullptr, 0) != pdPASS) {
+    if (!spawn_send_task(ctx)) {
         s_ctx = nullptr;
         delete ctx;
         log_append("err: ", "task spawn failed");
         set_busy(false);
     }
 #else
+    // 3. Emulator with no phone: there is no hub path here.
     (void)user_text; (void)audio_path;
-    log_append("err: ", "chat requires hardware build");
+    log_append("err: ", "Connect your phone");
     set_busy(false);
 #endif
 }
@@ -680,7 +792,7 @@ static void mic_btn_cb(lv_event_t *)
             return;
         }
         s_recording = true;
-        set_status("recording... tap mic to stop");
+        set_status("recording (max 15 s)... tap mic to stop");
         if (s_mic_btn) {
             lv_obj_set_style_bg_color(s_mic_btn,
                 lv_palette_main(LV_PALETTE_RED), 0);
@@ -688,8 +800,18 @@ static void mic_btn_cb(lv_event_t *)
         return;
     }
 
-    // Stop and hand the WAV path to the worker, which streams it off the SD
-    // card as base64 (see send_task) — no whole-file read on the UI thread.
+    finish_recording();
+#else
+    log_append("err: ", "mic only on hardware");
+#endif
+}
+
+#ifdef ARDUINO
+// Stop the recording and hand the WAV path to the worker (tap on the mic, or
+// the 15 s cap in poll_timer_cb). The worker reads the file itself — no
+// whole-file read on the UI thread.
+static void finish_recording()
+{
     if (hw_rec_running()) hw_rec_stop();
     s_recording = false;
     if (s_mic_btn) {
@@ -706,10 +828,8 @@ static void mic_btn_cb(lv_event_t *)
         return;
     }
     kick_off_send(std::string(), s_pending_audio_path);
-#else
-    log_append("err: ", "mic only on hardware");
-#endif
 }
+#endif
 
 static void back_btn_cb(lv_event_t *) { menu_show(); }
 

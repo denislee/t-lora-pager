@@ -167,6 +167,8 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | `sys.ping` | both | `{"t":<n>}` → `{"t":<n>}` (echo) |
 | `sys.time.set` | P→D | `{"epoch":<unix s>,"tz":"<IANA>"}` → `{}` |
 | `evt.battery` | D→P | `{"pct","charging"}` on change ≥ 5 % or charge-state flip |
+| `chat.audio.begin` | D→P | `{"size","crc32","fmt":"wav"}` → `{"xfer"}`. Announces a voice memo (16 kHz/16-bit mono WAV, at most 15 s); the phone receives, so it allocates `xfer` (§4), then the pager streams the bytes as DATA. A CRC mismatch surfaces on the following `chat.ask` as `invalid_argument` |
+| `chat.ask` | D→P | `{"text"?,"audio_xfer"?,"reset"?}` → `{"transcript"?,"reply"}`. `audio_xfer` names a finished `chat.audio.begin` upload; `transcript` is set for voice. The phone keeps per-pager history (`reset` clears it). Timeout 60 s |
 
 ## 6.1 Methods — Phase 2 (file service, `caps` `"fs"`)
 
