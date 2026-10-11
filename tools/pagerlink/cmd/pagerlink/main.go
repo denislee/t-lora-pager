@@ -35,7 +35,7 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "hello", "info", "ping", "time", "call", "smoke",
+	case "hello", "info", "ping", "time", "call", "smoke", "serve",
 		"ls", "stat", "get", "put", "rm", "mkdir", "mv":
 	default:
 		fmt.Fprintf(os.Stderr, "pagerlink: unknown command %q\n", cmd)
@@ -64,6 +64,7 @@ Commands:
   time [-tz ZONE]                sys.time.set with the current epoch
   call <method> [json-params]    arbitrary RPC
   smoke                          check every Phase-1 method and error path
+  serve [-responses f.json] [-notes-out dir]  mock phone for emulator work
   ls <vol> <path>                list a directory (fs.list, paged)
   stat <vol> <path>              show file metadata (fs.stat)
   get <vol> <path> <local-file>  download a file (fs.read)
@@ -89,6 +90,8 @@ func run(c *pagerlink.Client, addr string, timeout time.Duration, cmd string, ar
 		return cmdCall(c, timeout, args)
 	case "smoke":
 		return cmdSmoke(c, addr, timeout)
+	case "serve":
+		return cmdServe(c, addr, timeout, args)
 	case "ls":
 		return cmdLS(c, timeout, args)
 	case "stat":
@@ -194,10 +197,12 @@ func cmdSmoke(c *pagerlink.Client, addr string, timeout time.Duration) int {
 	pass = report(pingOK(c, timeout), "sys.ping after reset") && pass
 
 	// File service: directories, bulk transfer, sandboxing, CRC integrity,
-	// events, and crash recovery. The dropped-upload step reconnects, so close
-	// the replacement client here if smokeFS had to dial a new one.
+	// events, and crash recovery. The dropped-upload step reconnects, so the
+	// pager-initiated steps below and the final close both use the replacement
+	// client smokeFS hands back.
 	next, fsOK := smokeFS(c, addr, timeout)
 	pass = fsOK && pass
+	pass = smokeLink(next, timeout) && pass
 	if next != c {
 		next.Close()
 	}

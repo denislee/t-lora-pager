@@ -74,6 +74,11 @@ type Client struct {
 	nextID  uint16
 	pending map[uint16]chan result
 
+	// hmu guards handlers, the methods this side answers when the pager
+	// sends a REQ. See responder.go.
+	hmu      sync.Mutex
+	handlers map[string]Handler
+
 	// Bulk-transfer sinks. xferMu guards xfers and nextXfer; each channel is
 	// written only by the reader goroutine (non-blocking) and read by whoever
 	// owns that transfer.
@@ -106,6 +111,7 @@ func newClient(conn net.Conn) *Client {
 		conn:     conn,
 		nextID:   2, // the phone side uses even ids, starting at 2
 		pending:  make(map[uint16]chan result),
+		handlers: make(map[string]Handler),
 		xfers:    make(map[uint16]chan Message),
 		nextXfer: 2, // transfer ids share the phone's even parity
 		events:   make(chan Notification, 32),
@@ -340,6 +346,10 @@ func (c *Client) dispatch(raw []byte) {
 		return
 	}
 	switch msg.Type {
+	case Req:
+		// REQ comes from the pager: run the registered handler and answer
+		// on the same id (responder.go).
+		c.handleReq(msg)
 	case Res:
 		c.deliver(msg.ID, result{payload: json.RawMessage(msg.Payload)})
 	case Err:
@@ -380,7 +390,6 @@ func (c *Client) dispatch(raw []byte) {
 		default:
 		}
 	}
-	// REQ is for the pager side; a client ignores it.
 }
 
 // deliver resolves the Call waiting on id, if any. A late or duplicate id has
