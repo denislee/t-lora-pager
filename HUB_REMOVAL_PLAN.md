@@ -1,15 +1,15 @@
 # Lilyhub Removal — Plan
 <!-- plan-doc: v2 -->
-**Progress:** 42% — 11/26
-**Status:** 🟡 H0, H1, H3, H5.1, H2.1, H2.2 landed (+ iOS Track C 7). Next: H2.4/H2.5/H2.6 (emulator). H2.3 waits on Track C 9; H4 on BLE hardware
-**Last updated:** 2026-10-11 — /next: H2.1 hw_link_call (101a65f) + H2.2 pagerlink serve (31aba6f)
+**Progress:** 51% — 14/27
+**Status:** 🟡 H0, H1, H2.1/H2.2/H2.4–H2.6 (firmware + mock), H3, H5.1 landed. Remaining: W9 (iOS Track C 9), W27 iOS services (Track B), W15 BLE hardware gate → H4–H6
+**Last updated:** 2026-10-11 — /next: W10 chat (5cbbd8b), W11 notes (a443b12), W12 Telegram (8af40f4) via phone; W27 parked
 **Beads:** git-ne9bg
 
 ## Handoff
 
-Next action: W10 — H2.4 chat via phone: rewrite ui_chat kick_off_send/send_task onto chat.audio.begin + hw_link_send_bytes + chat.ask (hw_link_call), drop chat_post; test with `pagerlink serve`
-In play: /home/dns/tmp/t-lora-pager, branch master, 15 local commits not pushed (8fe85df…31aba6f); baseline shots in /tmp/shots-before
-Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9; the emulator TCP link serves one client at a time, so `pagerlink serve` and `smoke` can't run together; `make protocol-test` removes the emulator binary
+Next action: no runnable item in this doc — W9 needs IOS_COMPANION_PLAN.md Track C item 9 (run `/next IOS_COMPANION_PLAN.md`); W27 needs a PagerKit DATA/ACK + fs.read port and a Mac; W15 needs BLE on hardware
+In play: /home/dns/tmp/t-lora-pager, branch master, 18 local commits not pushed (8fe85df…8af40f4); baseline shots in /tmp/shots-before
+Not in this doc: hub fallbacks (chat_post, try_hub_sync, hw_copy_all_notes_to_hub) stay until W16 per D-H1; emulator TCP link serves one client at a time; `make protocol-test` removes the emulator binary; kill the emulator by PID/SID, never by name
 
 ## Work
 - [x] **W1** H0.1 Land the uncommitted hub work — ev: 8fe85df (server) · 7038cb7 (libhelix) · fd95e6e (firmware DC pass) · 0f018bb (docs); gate pager/emu/native/go all exit 0 · was: H0.1 · src: L270 · bd: git-ne9bg.1
@@ -24,11 +24,11 @@ Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9; the emulator T
 - [x] **W7** H2.1 Pager-initiated RPC API (`hw_link_call`) — ev: 101a65f; smoke 28/28 incl. D→P call/unsupported/timeout/200 KB DATA; neg control (ACKs not routed) fails the 200 KB step · was: H2.1 · src: L305 · bd: git-ne9bg.10
 - [x] **W8** H2.2 `pagerlink serve` mock phone — ev: 31aba6f; pagerlink serve (weather.get/loc.get/chat.audio.begin/chat.ask/notes.sync); Go 82.1 % · after: W7 · was: H2.2 · src: L311 · bd: git-ne9bg.11
 - [!] **W9** H2.3 Weather via phone — blocked: iOS plan Track C item 9 (hal/weather_cache, handlers_weather) not landed · after: W8 · was: H2.3 · src: L315 · bd: git-ne9bg.12
-- [ ] **W10** H2.4 Chat via phone — left: unblocked by W7/W8; firmware rewrite of ui_chat + iOS ChatService · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
-- [ ] **W11** H2.5 Notes sync via phone — left: unblocked by W7/W8 + fs.read (cadd656) · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
-- [ ] **W12** H2.6 Telegram via phone — left: unblocked by W7/W8; needs DATA-delivered bodies for >4096 B replies (hw_link_send_bytes is pager→phone; phone→pager uses fs-style receiver) · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
-- [!] **W15** H4.1 Hardware acceptance, pager + iPhone, Wi-Fi off — blocked: D-H1 gate, BLE transport (iOS plan Track A step 5) not on hardware · after: W9, W10, W11, W12 · was: H4.1 · src: L390 · bd: git-ne9bg.16
-- [ ] **W16** H4.2 Delete the firmware hub — after: W15 · was: H4.2 · src: L398 · bd: git-ne9bg.17
+- [x] **W10** H2.4 Chat via phone — ev: 5cbbd8b; firmware + mock only (link first, hub fallback per D-H1); smoke 30/30; neg control (CRC^1) fails the voice step · risk LOW · after: W8 · was: H2.4 · src: L320 · bd: git-ne9bg.13
+- [x] **W11** H2.5 Notes sync via phone — ev: a443b12; firmware + mock (link first, hub fallback); smoke 32/32 incl. Salted__ byte-for-byte; native 117/117; neg controls (1-batch, plaintext CRC) fail · risk LOW · after: W8 · was: H2.5 · src: L334 · bd: git-ne9bg.14
+- [x] **W12** H2.6 Telegram via phone — ev: 8af40f4; firmware + mock; smoke 41/41 (bulk >4096 B tg.messages, notifier once/silent/Offline); native 121/121; Go 82.9 %; neg controls (dedup, recv CRC) fail · risk LOW · after: W8 · was: H2.6 · src: L353 · bd: git-ne9bg.15
+- [!] **W15** H4.1 Hardware acceptance, pager + iPhone, Wi-Fi off — after: W9, W10, W11, W12, W27 · blocked: D-H1 gate, BLE transport (iOS plan Track A step 5) not on hardware · was: H4.1 · src: L390 · bd: git-ne9bg.16
+- [ ] **W16** H4.2 Delete the firmware hub — left: also delete the hub fallbacks kept by D-H1 — chat_post (ui_chat), try_hub_sync + hub-upload loop (ui_notes_sync), hw_copy_all_notes_to_hub · after: W15 · was: H4.2 · src: L398 · bd: git-ne9bg.17
 - [ ] **W17** H4.3 Status bar: link indicator replaces hub_probe — after: W15 · was: H4.3 · src: L403 · bd: git-ne9bg.18
 - [ ] **W18** H4.4 One-shot NVS cleanup (hub ns, weather/hub_url, PAT) — after: W15 · was: H4.4 · src: L408 · bd: git-ne9bg.19
 - [ ] **W19** H4.5 Screenshot sweep vs /tmp/shots-before — after: W16, W17, W18 · was: H4.5 · src: L412 · bd: git-ne9bg.20
@@ -38,18 +38,29 @@ Not in this doc: H2.3 needs IOS_COMPANION_PLAN.md Track C item 9; the emulator T
 - [ ] **W24** H6.1 CLAUDE.md lilyhub sweep — after: W22 · was: H6.1 · src: L440 · bd: git-ne9bg.24
 - [ ] **W25** H6.2 REFACTOR_NOTES.md entry + README pointer — after: W22 · was: H6.2 · src: L445 · bd: git-ne9bg.25
 - [ ] **W26** H6.3 Zero-reference grep (negative control already run 2026-10-11: live hits found) — after: W24, W25 · was: H6.3 · src: L447 · bd: git-ne9bg.26
+- [!] **W27** iOS services for H2.4–H2.6: ChatService, NotesSyncService, TelegramService in PagerKit — blocked: PagerKit has no DATA/ACK engine or fs.read client (LinkSession drops .data/.ack); app target needs a Mac (iOS plan Track B). Must follow 8af40f4's tg reply shape {body}|{xfer,size,crc32} and http_error status-in-msg · after: W10, W11, W12 · bd: git-ne9bg.27
 
 ## Blocked / needs a human
 
 ### W7 — H2.1 Pager-initiated RPC API
 Blocker lives in another plan: IOS_COMPANION_PLAN.md › Track C item 7 (Phase 2 file service). Run it, then item 9, then resume here.
 ```
+# ✅ DONE 2026-10-11 — do not re-run (Track C 7 landed as cadd656; W7 = 101a65f)
+/next IOS_COMPANION_PLAN.md
+```
+
+### W9 — H2.3 Weather via phone
+Blocker lives in another plan: IOS_COMPANION_PLAN.md › Track C item 9 (hal/weather_cache + handlers_weather). Run it, then resume here.
+```
 # OPEN
 /next IOS_COMPANION_PLAN.md
 ```
 
+### W27 — iOS services for H2.4–H2.6
+PagerKit `LinkSession` drops DATA/ACK and has no fs.read client; the app target only compiles on a Mac (iOS plan Track B). Port the credit-window xfer engine to Swift, then ChatService / NotesSyncService / TelegramService against `pagerlink`'s mock contracts (5cbbd8b, a443b12, 8af40f4). Not runnable to completion from this Linux box.
+
 ### W15 — H4.1 Hardware acceptance
-Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a real pager + iPhone, then W9–W12. Not runnable from here.
+Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a real pager + iPhone, then W9–W12 and W27. Not runnable from here.
 
 ## Current state
 - Decisions D-H1…D-H8 (§3) accepted as recommended on 2026-10-11: gate H4 on BLE; PAT on the phone; Groq Whisper from the phone; tools/pagerlink module; one-shot NVS cleanup; direct-first for weather and Telegram; bridge creds sent per tg.* call.
@@ -57,6 +68,15 @@ Gate D-H1: needs `link_transport_ble.cpp` (iOS plan Track A step 5) passing on a
 - server/ still holds lilyhub; the PagerLink Go tooling lives in tools/pagerlink.
 
 ## Log
+
+### 2026-10-11 — /next — W10, W11, W12
+- Env: local emulator (TCP 127.0.0.1:7600), no hardware, nothing pushed. All LOW (source + local commits); rollback = `git revert <sha>`.
+- User decisions this run: (1) **link first, hub fallback** — D-H1 outranks the H2.4/H2.5 "delete chat_post / try_hub_sync" wording, so those deletions move to W16; (2) iOS halves parked as W27 (PagerKit has no DATA/ACK engine: LinkSession `case .data, .ack: break`).
+- W10 H2.4 ✅ 5cbbd8b: `hal/chat_link` (chat.audio.begin + DATA + chat.ask, 60 s), ui_chat routes phone → hub (hw) → "Connect your phone"; text chat now works on the emulator (std::thread worker). hw_rec = 16 kHz/16-bit mono WAV; voice capped at 15 s (auto-stop + 480,044 B refuse). Mock race fixed. Gate: pager 0, emu 0, native 113/113, Go 82.1 %, protocol-test 0, smoke 30/30. Neg control CRC^1 → `[FAIL] pager->phone chat voice 64 KB` (invalid_argument: crc mismatch); restored → pass.
+- W11 H2.5 ✅ a443b12: `hal/notes_link` + pure `hal/notes_manifest` (batches ≤ 3500 B), manifest from the fs.read volume layer (vol int|sd, raw-byte CRC); ui_notes_sync phone → hub → error; Settings "Copy Notes -> Phone" (internal wins duplicates). Gate: native 117/117, smoke 32/32 incl. Salted__ byte-for-byte. Neg controls: one-batch batcher → `Expected 33332 to be less than or equal to 3500 [FAILED]`; header-stripped (plaintext) CRC → both notes smoke steps FAIL with manifest mismatch.
+- W12 H2.6 ✅ 8af40f4: phone→pager bulk receiver `hw_link_accept_open/wait/close` (reuses XferReceiver; odd ids from 32769), `hal/tg_link`, `tg_uplink` Direct/Phone/None, "via phone"/"Offline" status, phone path on the emulator, Go `Client.SendBytes`, mock tg-bridge (tgbridge.go). Gate: pager/emu/twatchs3/twatch_ultra 0, native 121/121, Go 82.9 %, protocol-test 0, smoke 41/41. Neg controls: notifier dedup removed → `[FAIL] notifier: no new message -> silent (dedup)`; recv CRC+1 → `[FAIL] ... tg.messages bulk >4096 B`.
+- Deviations vs §2.1 (W27 must follow them): tg.* replies are `{"body":<bridge JSON>}` or `{xfer,size,crc32}`+DATA, not `{chats}`/`{msgs}`; ERR http_error carries the HTTP status in `msg`. ui_telegram parsing moved from cJSON to link_json on both builds.
+- Follow-ups (not in this doc's items): "Copy Notes -> Phone" and the Telegram favourites picker block the LVGL thread during a link call (up to 120 s / 15 s), same pattern as the old hub copy.
 
 ### 2026-10-11 — /next — W7, W8
 - Env: local emulator (TCP 127.0.0.1:7600), no hardware. LOW (source + local commits).
