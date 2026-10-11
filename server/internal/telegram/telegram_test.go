@@ -55,10 +55,12 @@ func TestProxyRejectsSSRFURL(t *testing.T) {
 	}
 }
 
+// The POST-only rule lives in the Go 1.22 route pattern, so go through the mux.
 func TestProxyRejectsNonPost(t *testing.T) {
-	h := New()
+	mux := http.NewServeMux()
+	New().Register(mux)
 	rec := httptest.NewRecorder()
-	h.proxy(rec, httptest.NewRequest(http.MethodGet, "/api/telegram/proxy", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/telegram/proxy", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("code = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
 	}

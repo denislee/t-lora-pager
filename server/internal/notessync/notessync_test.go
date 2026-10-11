@@ -1,7 +1,6 @@
 package notessync
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -57,7 +58,7 @@ func TestValidRepo(t *testing.T) {
 func TestSafeNameRejectsTraversal(t *testing.T) {
 	ok := []string{"20250101_120000.txt", "note.md", "a-b_c.txt"}
 	for _, n := range ok {
-		if _, valid := safeName(n); !valid {
+		if !safeName(n) {
 			t.Errorf("safeName(%q) rejected, want accepted", n)
 		}
 	}
@@ -70,180 +71,13 @@ func TestSafeNameRejectsTraversal(t *testing.T) {
 		".",
 		".hidden",
 		"x\x00y",
+		"a\\b",
+		strings.Repeat("a", 201),
 	}
 	for _, n := range bad {
-		if _, valid := safeName(n); valid {
+		if safeName(n) {
 			t.Errorf("safeName(%q) accepted, want rejected", n)
 		}
-	}
-}
-
-func newTestHandler() *Handler {
-	return &Handler{client: &http.Client{Timeout: 5 * time.Second}}
-}
-
-// fastBackoff shrinks the retry delay so retry tests don't sleep for real.
-func fastBackoff(t *testing.T) {
-	t.Helper()
-	old := baseBackoff
-	baseBackoff = time.Millisecond
-	t.Cleanup(func() { baseBackoff = old })
-}
-
-func getReq(t *testing.T, url string) *http.Request {
-	t.Helper()
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("NewRequestWithContext: %v", err)
-	}
-	return req
-}
-
-func TestDoWithRetryRetriesOn429ThenSucceeds(t *testing.T) {
-	fastBackoff(t)
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&attempts, 1) < 3 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer srv.Close()
-	h := newTestHandler()
-
-	body, status, err := h.doWithRetry(getReq(t, srv.URL), 3)
-	if err != nil {
-		t.Fatalf("doWithRetry: %v", err)
-	}
-	if status != http.StatusOK {
-		t.Fatalf("status=%d, want 200", status)
-	}
-	if string(body) != "ok" {
-		t.Fatalf("body=%q, want %q", body, "ok")
-	}
-	if n := atomic.LoadInt32(&attempts); n != 3 {
-		t.Fatalf("attempts=%d, want 3 (two 429s then success)", n)
-	}
-}
-
-// doWithRetry itself never turns a persistently-bad HTTP status into an
-// error — it hands the final status back so callers can apply their own
-// rules (listRemote treats 404 as success; putFile treats any non-2xx as
-// failure). Retries stop once maxAttempts is spent either way.
-func TestDoWithRetryExhaustsRetriesOnPersistent5xx(t *testing.T) {
-	fastBackoff(t)
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-	h := newTestHandler()
-
-	_, status, err := h.doWithRetry(getReq(t, srv.URL), 3)
-	if err != nil {
-		t.Fatalf("doWithRetry: %v, want nil error (status handling is the caller's job)", err)
-	}
-	if status != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d, want 503", status)
-	}
-	if n := atomic.LoadInt32(&attempts); n != 3 {
-		t.Fatalf("attempts=%d, want 3 (maxAttempts)", n)
-	}
-}
-
-func TestDoWithRetryDoesNotRetryNonRetryableStatus(t *testing.T) {
-	fastBackoff(t)
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.WriteHeader(http.StatusUnprocessableEntity) // 422, not retryable
-	}))
-	defer srv.Close()
-	h := newTestHandler()
-
-	_, status, err := h.doWithRetry(getReq(t, srv.URL), 3)
-	if err != nil {
-		t.Fatalf("doWithRetry: %v, want nil error", err)
-	}
-	if status != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d, want 422", status)
-	}
-	if n := atomic.LoadInt32(&attempts); n != 1 {
-		t.Fatalf("attempts=%d, want 1 (422 is not retryable)", n)
-	}
-}
-
-// listRemote calls doWithRetry with maxAttempts=2 — "one retry" per D7.
-func TestDoWithRetryRespectsOneRetryLimit(t *testing.T) {
-	fastBackoff(t)
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-	h := newTestHandler()
-
-	if _, _, err := h.doWithRetry(getReq(t, srv.URL), 2); err != nil {
-		t.Fatalf("doWithRetry: %v, want nil error", err)
-	}
-	if n := atomic.LoadInt32(&attempts); n != 2 {
-		t.Fatalf("attempts=%d, want 2 (maxAttempts=2, one retry)", n)
-	}
-}
-
-// putFile's request body must be replayable across retries — GetBody is what
-// makes that possible for the bytes.Reader http.NewRequestWithContext builds.
-func TestDoWithRetryReplaysBodyAcrossRetries(t *testing.T) {
-	fastBackoff(t)
-	want := []byte(`{"message":"sync: add note.txt"}`)
-	var attempts int32
-	var lastBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		lastBody = b
-		if atomic.AddInt32(&attempts, 1) < 2 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-	h := newTestHandler()
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPut, srv.URL, bytes.NewReader(want))
-	if err != nil {
-		t.Fatalf("NewRequestWithContext: %v", err)
-	}
-	_, status, err := h.doWithRetry(req, 3)
-	if err != nil {
-		t.Fatalf("doWithRetry: %v", err)
-	}
-	if status != http.StatusOK {
-		t.Fatalf("status=%d, want 200", status)
-	}
-	if n := atomic.LoadInt32(&attempts); n != 2 {
-		t.Fatalf("attempts=%d, want 2", n)
-	}
-	if !bytes.Equal(lastBody, want) {
-		t.Fatalf("last request body=%q, want %q (GetBody must replay it on retry)", lastBody, want)
-	}
-}
-
-// A GitHub blip can also be the server being entirely unreachable, not just
-// a bad status — that must still surface as an error after retries.
-func TestDoWithRetryReturnsErrorOnPersistentTransportFailure(t *testing.T) {
-	fastBackoff(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := srv.URL
-	srv.Close() // now connections to this URL fail
-	h := newTestHandler()
-
-	if _, _, err := h.doWithRetry(getReq(t, url), 2); err == nil {
-		t.Fatal("want error when the server is unreachable on every attempt")
 	}
 }
 
@@ -452,17 +286,23 @@ func githubTestClient(t *testing.T, srv *httptest.Server) *http.Client {
 	return &http.Client{Transport: rewriteHostTransport{target: target}, Timeout: 5 * time.Second}
 }
 
+// newMockHandler starts a mock GitHub server over st and returns a Handler
+// whose client is pointed at it. The server is closed on test cleanup.
+func newMockHandler(t *testing.T, st *mockGitHubState) *Handler {
+	t.Helper()
+	srv := newMockGitHubServer(t, st)
+	t.Cleanup(srv.Close)
+	return &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+}
+
 func testSyncRequest(files ...SyncFile) *SyncRequest {
 	return &SyncRequest{Repo: "octocat/vault", Branch: "main", Token: "tok", Files: files}
 }
 
 func TestRunSyncCommitsNewFilesInOneCommit(t *testing.T) {
-	fastBackoff(t)
 	st := newMockGitHubState()
 	st.notesFiles["already.txt"] = true
-	srv := newMockGitHubServer(t, st)
-	defer srv.Close()
-	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	h := newMockHandler(t, st)
 
 	req := testSyncRequest(
 		SyncFile{Name: "already.txt", ContentB64: "ZXhpc3Rpbmc="},
@@ -502,12 +342,9 @@ func TestRunSyncCommitsNewFilesInOneCommit(t *testing.T) {
 }
 
 func TestRunSyncPartialBlobFailureExcludesFileFromCommit(t *testing.T) {
-	fastBackoff(t)
 	st := newMockGitHubState()
 	st.blobFailContent["YmFk"] = true // "bad" fails to blob
-	srv := newMockGitHubServer(t, st)
-	defer srv.Close()
-	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	h := newMockHandler(t, st)
 
 	req := testSyncRequest(
 		SyncFile{Name: "good.txt", ContentB64: "Z29vZA=="},
@@ -533,12 +370,9 @@ func TestRunSyncPartialBlobFailureExcludesFileFromCommit(t *testing.T) {
 }
 
 func TestRunSyncAllBlobFailuresSkipCommit(t *testing.T) {
-	fastBackoff(t)
 	st := newMockGitHubState()
 	st.blobFailContent["YmFk"] = true
-	srv := newMockGitHubServer(t, st)
-	defer srv.Close()
-	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	h := newMockHandler(t, st)
 
 	req := testSyncRequest(SyncFile{Name: "bad.txt", ContentB64: "YmFk"})
 	resp, err := h.runSync(context.Background(), req)
@@ -558,12 +392,9 @@ func TestRunSyncAllBlobFailuresSkipCommit(t *testing.T) {
 }
 
 func TestRunSyncNoNewFilesSkipsGitDataAPICalls(t *testing.T) {
-	fastBackoff(t)
 	st := newMockGitHubState()
 	st.notesFiles["a.txt"] = true
-	srv := newMockGitHubServer(t, st)
-	defer srv.Close()
-	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	h := newMockHandler(t, st)
 
 	req := testSyncRequest(SyncFile{Name: "a.txt", ContentB64: "YQ=="})
 	resp, err := h.runSync(context.Background(), req)
@@ -587,12 +418,9 @@ func TestRunSyncNoNewFilesSkipsGitDataAPICalls(t *testing.T) {
 // tree/commit/ref-update (reusing the already-created blobs) rather than
 // failing the whole batch.
 func TestRunSyncRefConflictRetriesAgainstFreshHead(t *testing.T) {
-	fastBackoff(t)
 	st := newMockGitHubState()
 	st.refConflictsLeft = 1
-	srv := newMockGitHubServer(t, st)
-	defer srv.Close()
-	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	h := newMockHandler(t, st)
 
 	req := testSyncRequest(SyncFile{Name: "a.txt", ContentB64: "YQ=="})
 	resp, err := h.runSync(context.Background(), req)
@@ -617,12 +445,9 @@ func TestRunSyncRefConflictRetriesAgainstFreshHead(t *testing.T) {
 }
 
 func TestRunSyncRefConflictExhaustsRetriesReportsErrors(t *testing.T) {
-	fastBackoff(t)
 	st := newMockGitHubState()
 	st.refConflictsLeft = 999 // always conflicts
-	srv := newMockGitHubServer(t, st)
-	defer srv.Close()
-	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	h := newMockHandler(t, st)
 
 	req := testSyncRequest(SyncFile{Name: "a.txt", ContentB64: "YQ=="})
 	resp, err := h.runSync(context.Background(), req)
@@ -643,5 +468,120 @@ func TestRunSyncRefConflictExhaustsRetriesReportsErrors(t *testing.T) {
 	}
 	if st.blobCalls != 1 {
 		t.Errorf("blobCalls = %d, want 1 (not recreated across ref-update retries)", st.blobCalls)
+	}
+}
+
+// serve routes req through a mux with the handler registered, so the Go 1.22
+// method patterns (POST-only) are exercised as in production.
+func serve(h *Handler, req *http.Request) *httptest.ResponseRecorder {
+	mux := http.NewServeMux()
+	h.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestRoutesRejectWrongMethod(t *testing.T) {
+	h := &Handler{notesDir: t.TempDir()}
+	for _, path := range []string{"/api/notes/sync", "/api/notes/upload"} {
+		rec := serve(h, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s: code=%d, want 405", path, rec.Code)
+		}
+	}
+}
+
+// The upload reply is what the device's HTTPClient reads, so it must carry
+// Content-Length and Connection: close (P6.41) and keep the 200 status.
+func TestUploadStoresFileAndRepliesWithLength(t *testing.T) {
+	dir := t.TempDir()
+	h := &Handler{notesDir: filepath.Join(dir, "notes")} // MkdirAll creates it
+	body := `{"name":"a.txt","content_b64":"aGVsbG8="}`
+	rec := serve(h, httptest.NewRequest(http.MethodPost, "/api/notes/upload", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%q, want 200", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(rec.Body.Len()) {
+		t.Errorf("Content-Length=%q, want %d", got, rec.Body.Len())
+	}
+	if got := rec.Header().Get("Connection"); got != "close" {
+		t.Errorf("Connection=%q, want close", got)
+	}
+	var resp UploadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("reply not JSON: %v", err)
+	}
+	if !resp.Stored || resp.Bytes != 5 || resp.Path != "a.txt" {
+		t.Errorf("resp=%+v, want stored 5 bytes at a.txt", resp)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "notes", "a.txt"))
+	if err != nil || string(got) != "hello" {
+		t.Fatalf("stored file = %q, %v; want hello", got, err)
+	}
+}
+
+func TestUploadRejectsBadInput(t *testing.T) {
+	h := &Handler{notesDir: t.TempDir()}
+	cases := map[string]string{
+		"bad json":      `{"name":`,
+		"unknown field": `{"name":"a.txt","content_b64":"","extra":1}`,
+		"bad name":      `{"name":"../x","content_b64":"aGk="}`,
+		"bad base64":    `{"name":"a.txt","content_b64":"!!!"}`,
+	}
+	for name, body := range cases {
+		rec := serve(h, httptest.NewRequest(http.MethodPost, "/api/notes/upload", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: code=%d, want 400", name, rec.Code)
+		}
+	}
+}
+
+func TestSyncHandlerValidatesAndRepliesWithLength(t *testing.T) {
+	st := newMockGitHubState()
+	h := newMockHandler(t, st)
+
+	for name, body := range map[string]string{
+		"bad json": `{`,
+		"bad repo": `{"repo":"../x","token":"t"}`,
+		"no token": `{"repo":"o/r"}`,
+	} {
+		rec := serve(h, httptest.NewRequest(http.MethodPost, "/api/notes/sync", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: code=%d, want 400", name, rec.Code)
+		}
+	}
+
+	body := `{"repo":"octocat/vault","token":"tok","files":[{"name":"a.txt","content_b64":"YQ=="}]}`
+	rec := serve(h, httptest.NewRequest(http.MethodPost, "/api/notes/sync", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%q, want 200", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Length"); got != strconv.Itoa(rec.Body.Len()) {
+		t.Errorf("Content-Length=%q, want %d", got, rec.Body.Len())
+	}
+	if got := rec.Header().Get("Connection"); got != "close" {
+		t.Errorf("Connection=%q, want close", got)
+	}
+	var resp SyncResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("reply not JSON: %v", err)
+	}
+	if resp.Uploaded != 1 {
+		t.Errorf("resp=%+v, want Uploaded=1 (branch defaults to main)", resp)
+	}
+}
+
+// A listing failure (non-404 error status) aborts the sync with a 502.
+func TestSyncHandlerListFailureIs502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	t.Cleanup(srv.Close)
+	h := &Handler{client: githubTestClient(t, srv), maxParallel: 4}
+	body := `{"repo":"o/r","token":"t","files":[{"name":"a.txt","content_b64":"YQ=="}]}`
+	rec := serve(h, httptest.NewRequest(http.MethodPost, "/api/notes/sync", strings.NewReader(body)))
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "github 401") {
+		t.Fatalf("code=%d body=%q, want 502 naming github 401", rec.Code, rec.Body.String())
 	}
 }

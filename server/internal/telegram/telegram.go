@@ -1,12 +1,13 @@
 package telegram
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/lilygo/lilyhub/internal/httpx"
 )
 
 type ProxyRequest struct {
@@ -29,7 +30,7 @@ func New() *Handler {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/telegram/proxy", h.proxy)
+	mux.HandleFunc("POST /api/telegram/proxy", h.proxy)
 }
 
 // allowedTelegramURL reports whether raw is a URL this proxy may fetch. Only
@@ -45,15 +46,8 @@ func allowedTelegramURL(raw string) bool {
 }
 
 func (h *Handler) proxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
 	var req ProxyRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+	if httpx.DecodeJSON(w, r, 1<<20, &req) != nil {
 		return
 	}
 	// SSRF guard: this proxy attaches the caller-supplied bearer token to the

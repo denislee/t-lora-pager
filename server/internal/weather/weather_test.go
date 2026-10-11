@@ -2,8 +2,12 @@ package weather
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/lilygo/lilyhub/internal/cache"
 )
 
 func TestIPAPIStatusOK(t *testing.T) {
@@ -92,5 +96,28 @@ func TestTrimGeoSearchEmptyResults(t *testing.T) {
 func TestTrimGeoSearchInvalidJSON(t *testing.T) {
 	if _, err := trimGeoSearch([]byte(`not json`)); err == nil {
 		t.Fatal("want error for invalid upstream JSON, got nil")
+	}
+}
+
+// Routes are GET-only Go 1.22 patterns; before, weather accepted any method.
+// Validation failures are answered locally, without reaching upstream.
+func TestRoutesMethodAndValidation(t *testing.T) {
+	mux := http.NewServeMux()
+	New(cache.New()).Register(mux)
+	cases := []struct {
+		method, target string
+		want           int
+	}{
+		{http.MethodPost, "/api/weather/geo/ip", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/api/weather/forecast?latitude=1&longitude=2", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/weather/geo/search", http.StatusBadRequest},
+		{http.MethodGet, "/api/weather/forecast?latitude=1", http.StatusBadRequest},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(c.method, c.target, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s %s: code=%d, want %d", c.method, c.target, rec.Code, c.want)
+		}
 	}
 }

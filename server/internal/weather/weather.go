@@ -11,6 +11,7 @@ package weather
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -31,7 +32,7 @@ func ipAPIStatusOK(body []byte) error {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(body, &s); err != nil {
-		return fmt.Errorf("unparseable ip-api body")
+		return errors.New("unparseable ip-api body")
 	}
 	if s.Status != "success" {
 		return fmt.Errorf("ip-api status %q", s.Status)
@@ -54,9 +55,9 @@ func New(c *cache.Cache) *Handler {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/weather/geo/ip", h.geoIP)
-	mux.HandleFunc("/api/weather/geo/search", h.geoSearch)
-	mux.HandleFunc("/api/weather/forecast", h.forecast)
+	mux.HandleFunc("GET /api/weather/geo/ip", h.geoIP)
+	mux.HandleFunc("GET /api/weather/geo/search", h.geoSearch)
+	mux.HandleFunc("GET /api/weather/forecast", h.forecast)
 }
 
 // geoIP — pass-through of ip-api.com. Same response shape as the device's

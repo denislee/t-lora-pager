@@ -3,8 +3,10 @@
 // falls back to the public internet directly.
 //
 // Add new apps as new packages exposing a `Register(mux)` method, then wire
-// them in main(). The shared TTL cache and HTTP client live here; handlers
-// only need to know their own URLs and TTLs.
+// them in main(). main owns the shared TTL cache (handed to weather) and the
+// mux; each handler builds its own http.Client with a timeout suited to its
+// upstream. Routes use Go 1.22 method patterns, so the mux answers a wrong
+// method with 405.
 package main
 
 import (
@@ -39,7 +41,7 @@ func main() {
 	// does a raw TCP connect() with a short timeout (hal/hub.h's
 	// hub_is_reachable). This endpoint exists for humans/curl to sanity-check
 	// the process is up. Keep it cheap and side-effect free.
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 

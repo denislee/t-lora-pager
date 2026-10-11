@@ -23,9 +23,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,72 +33,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lilygo/lilyhub/internal/httpx"
 )
 
-// maxRespBytes caps how much of a GitHub API response body we ever read.
-const maxRespBytes = 1 << 20
-
-// baseBackoff, retryableStatus, backoff, and doWithRetry mirror
-// internal/chat's retry pattern for GitHub's 429/transient 5xx: sync is
-// additive/idempotent, so retrying is safe, and one flaky call shouldn't
-// abort the whole (serial) device sync.
-var baseBackoff = 200 * time.Millisecond
-
-func retryableStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code >= 500
-}
-
-func backoff(attempt int) time.Duration {
-	shift := max(attempt-2, 0)
-	return min(baseBackoff<<shift, 2*time.Second)
-}
-
-// doWithRetry runs req, retrying on 429/5xx up to maxAttempts times with
-// chat.go's 200ms-doubling backoff. Unlike chat.go's do(), the final HTTP
-// status is returned rather than turned into an error — callers here have
-// status-specific handling (listRemote treats 404 as "no notes yet", not a
-// failure).
-func (h *Handler) doWithRetry(req *http.Request, maxAttempts int) ([]byte, int, error) {
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if attempt > 1 {
-			d := backoff(attempt)
-			log.Printf("notessync: %s %s retry %d/%d after %s (%v)",
-				req.Method, req.URL.Path, attempt, maxAttempts, d, lastErr)
-			timer := time.NewTimer(d)
-			select {
-			case <-timer.C:
-			case <-req.Context().Done():
-				timer.Stop()
-				return nil, 0, req.Context().Err()
-			}
-			if req.GetBody != nil {
-				b, err := req.GetBody()
-				if err != nil {
-					return nil, 0, err
-				}
-				req.Body = b
-			}
-		}
-		resp, err := h.client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if retryableStatus(resp.StatusCode) && attempt < maxAttempts {
-			lastErr = fmt.Errorf("github %d: %s", resp.StatusCode, truncate(string(body), 200))
-			continue
-		}
-		return body, resp.StatusCode, nil
-	}
-	return nil, 0, lastErr
-}
+// maxRequestBytes caps a device request body (notes travel base64 inline).
+const maxRequestBytes = 8 << 20
 
 // SyncRequest is the body of POST /api/notes/sync. The token is a GitHub PAT
 // with `contents:write` scope; we never log it or persist it. Files carry the
@@ -145,8 +85,10 @@ type Handler struct {
 	// $HOME/.lilyhub/notes.
 	notesDir string
 	// Serializes upload writes — the device may fan out multiple uploads in
-	// parallel, but the same name landing twice would race fsync of the temp
-	// file vs. rename. Cheap given typical traffic.
+	// parallel, and the same name landing twice would race on the shared
+	// "<name>.tmp" file (one request's write vs. the other's rename). No
+	// fsync is done; the temp+rename only keeps readers from seeing a
+	// half-written file. Cheap given typical traffic.
 	storeMu sync.Mutex
 }
 
@@ -169,20 +111,13 @@ func New() *Handler {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/notes/sync", h.sync)
-	mux.HandleFunc("/api/notes/upload", h.upload)
+	mux.HandleFunc("POST /api/notes/sync", h.sync)
+	mux.HandleFunc("POST /api/notes/upload", h.upload)
 }
 
 func (h *Handler) sync(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
 	var req SyncRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+	if httpx.DecodeJSON(w, r, maxRequestBytes, &req) != nil {
 		return
 	}
 	if !validRepo(req.Repo) {
@@ -202,8 +137,7 @@ func (h *Handler) sync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	httpx.WriteJSON(w, resp)
 }
 
 func (h *Handler) runSync(ctx context.Context, req *SyncRequest) (*SyncResponse, error) {
@@ -230,7 +164,7 @@ func (h *Handler) runSync(ctx context.Context, req *SyncRequest) (*SyncResponse,
 		// safeName mirrors the /upload guard (no slash, NUL, or leading dot).
 		// Without it a name like "../secrets.txt" writes outside notes/ and
 		// bypasses the additive-only guard, which only enumerates notes/.
-		if _, ok := safeName(f.Name); !ok {
+		if !safeName(f.Name) {
 			out.Errors = append(out.Errors, SyncError{Name: f.Name, Err: "invalid name"})
 			continue
 		}
@@ -285,7 +219,12 @@ func (h *Handler) commitFiles(ctx context.Context, req *SyncRequest, toUpload []
 			// byte and we skip two full-size allocations per file. GitHub
 			// validates the base64 itself, so a malformed payload surfaces as
 			// the blob-create error below rather than a local decode failure.
-			sha, err := h.createBlob(ctx, req, f.ContentB64)
+			// Blob creation has no parent-ref dependency — content-addressed,
+			// so concurrent creates never race.
+			sha, err := h.postForSHA(ctx, req, "blobs", "blob", struct {
+				Content  string `json:"content"`
+				Encoding string `json:"encoding"`
+			}{Content: f.ContentB64, Encoding: "base64"})
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -320,12 +259,21 @@ func (h *Handler) commitFiles(ctx context.Context, req *SyncRequest, toUpload []
 		for i, b := range blobs {
 			entries[i] = treeEntry{Path: "notes/" + b.file.Name, Mode: "100644", Type: "blob", SHA: b.sha}
 		}
-		newTree, err := h.createTree(ctx, req, baseTree, entries)
+		// base_tree means we only describe the changed paths (the new note
+		// files); GitHub fills in everything else from the base.
+		newTree, err := h.postForSHA(ctx, req, "trees", "tree", struct {
+			BaseTree string      `json:"base_tree"`
+			Tree     []treeEntry `json:"tree"`
+		}{BaseTree: baseTree, Tree: entries})
 		if err != nil {
 			lastErr = err
 			break
 		}
-		newCommit, err := h.createCommit(ctx, req, message, newTree, baseCommit)
+		newCommit, err := h.postForSHA(ctx, req, "commits", "commit", struct {
+			Message string   `json:"message"`
+			Tree    string   `json:"tree"`
+			Parents []string `json:"parents"`
+		}{Message: message, Tree: newTree, Parents: []string{baseCommit}})
 		if err != nil {
 			lastErr = err
 			break
@@ -370,15 +318,12 @@ func (h *Handler) listRemote(ctx context.Context, req *SyncRequest) ([]string, e
 	// controlled and unvalidated, so escape it before it lands in the query.
 	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/contents/notes?ref=%s",
 		req.Repo, url.QueryEscape(req.Branch))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	httpReq, err := h.newGitHubRequest(ctx, http.MethodGet, endpoint, req.Token, nil)
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+req.Token)
-	httpReq.Header.Set("Accept", "application/vnd.github+json")
-	httpReq.Header.Set("User-Agent", "lilyhub/1.0")
 
-	body, status, err := h.doWithRetry(httpReq, 2) // one retry
+	body, status, err := httpx.DoWithRetry(h.client, httpReq, 2, "notessync") // one retry
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +331,7 @@ func (h *Handler) listRemote(ctx context.Context, req *SyncRequest) ([]string, e
 		return nil, nil
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("github %d: %s", status, truncate(string(body), 200))
+		return nil, githubError(status, body)
 	}
 
 	var entries []struct {
@@ -458,12 +403,12 @@ func (h *Handler) branchHead(ctx context.Context, req *SyncRequest) (commitSHA, 
 	if err != nil {
 		return "", "", err
 	}
-	body, status, err := h.doWithRetry(httpReq, 3)
+	body, status, err := httpx.DoWithRetry(h.client, httpReq, 3, "notessync")
 	if err != nil {
 		return "", "", err
 	}
 	if status != http.StatusOK {
-		return "", "", fmt.Errorf("github %d: %s", status, truncate(string(body), 200))
+		return "", "", githubError(status, body)
 	}
 
 	var parsed struct {
@@ -480,110 +425,39 @@ func (h *Handler) branchHead(ctx context.Context, req *SyncRequest) (commitSHA, 
 		return "", "", fmt.Errorf("parse branch head: %w", err)
 	}
 	if parsed.Commit.SHA == "" || parsed.Commit.Commit.Tree.SHA == "" {
-		return "", "", fmt.Errorf("branch head response missing commit/tree sha")
+		return "", "", errors.New("branch head response missing commit/tree sha")
 	}
 	return parsed.Commit.SHA, parsed.Commit.Commit.Tree.SHA, nil
 }
 
-// createBlob uploads one file's content as a Git blob object and returns its
-// SHA. Blob creation has no parent-ref dependency — content-addressed, so
-// concurrent creates never race — which is what lets commitFiles run these
-// in parallel where the old per-file Contents API PUTs couldn't.
-func (h *Handler) createBlob(ctx context.Context, req *SyncRequest, contentB64 string) (string, error) {
-	body := struct {
-		Content  string `json:"content"`
-		Encoding string `json:"encoding"`
-	}{Content: contentB64, Encoding: "base64"}
-	buf, _ := json.Marshal(body)
-
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/git/blobs", req.Repo)
+// postForSHA POSTs payload as JSON to the repo's Git Data API endpoint
+// /git/<path> (blobs, trees, commits) and returns the "sha" of the object it
+// created. what names the object in error messages.
+func (h *Handler) postForSHA(ctx context.Context, req *SyncRequest, path, what string, payload any) (string, error) {
+	buf, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/git/%s", req.Repo, path)
 	httpReq, err := h.newGitHubRequest(ctx, http.MethodPost, endpoint, req.Token, buf)
 	if err != nil {
 		return "", err
 	}
-	respBody, status, err := h.doWithRetry(httpReq, 3) // chat.go's full retry pattern
+	respBody, status, err := httpx.DoWithRetry(h.client, httpReq, 3, "notessync")
 	if err != nil {
 		return "", err
 	}
 	if status/100 != 2 {
-		return "", fmt.Errorf("github %d: %s", status, truncate(string(respBody), 200))
+		return "", githubError(status, respBody)
 	}
 	var parsed struct {
 		SHA string `json:"sha"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("parse blob response: %w", err)
+		return "", fmt.Errorf("parse %s response: %w", what, err)
 	}
 	if parsed.SHA == "" {
-		return "", fmt.Errorf("blob response missing sha")
-	}
-	return parsed.SHA, nil
-}
-
-// createTree layers entries on top of baseTree and returns the new tree's
-// SHA. base_tree means we only have to describe the changed paths (the new
-// note files); GitHub fills in everything else from the base.
-func (h *Handler) createTree(ctx context.Context, req *SyncRequest, baseTree string, entries []treeEntry) (string, error) {
-	body := struct {
-		BaseTree string      `json:"base_tree"`
-		Tree     []treeEntry `json:"tree"`
-	}{BaseTree: baseTree, Tree: entries}
-	buf, _ := json.Marshal(body)
-
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/git/trees", req.Repo)
-	httpReq, err := h.newGitHubRequest(ctx, http.MethodPost, endpoint, req.Token, buf)
-	if err != nil {
-		return "", err
-	}
-	respBody, status, err := h.doWithRetry(httpReq, 3)
-	if err != nil {
-		return "", err
-	}
-	if status/100 != 2 {
-		return "", fmt.Errorf("github %d: %s", status, truncate(string(respBody), 200))
-	}
-	var parsed struct {
-		SHA string `json:"sha"`
-	}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("parse tree response: %w", err)
-	}
-	if parsed.SHA == "" {
-		return "", fmt.Errorf("tree response missing sha")
-	}
-	return parsed.SHA, nil
-}
-
-// createCommit points a new commit at treeSHA with parentSHA as its sole
-// parent and returns the new commit's SHA.
-func (h *Handler) createCommit(ctx context.Context, req *SyncRequest, message, treeSHA, parentSHA string) (string, error) {
-	body := struct {
-		Message string   `json:"message"`
-		Tree    string   `json:"tree"`
-		Parents []string `json:"parents"`
-	}{Message: message, Tree: treeSHA, Parents: []string{parentSHA}}
-	buf, _ := json.Marshal(body)
-
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/git/commits", req.Repo)
-	httpReq, err := h.newGitHubRequest(ctx, http.MethodPost, endpoint, req.Token, buf)
-	if err != nil {
-		return "", err
-	}
-	respBody, status, err := h.doWithRetry(httpReq, 3)
-	if err != nil {
-		return "", err
-	}
-	if status/100 != 2 {
-		return "", fmt.Errorf("github %d: %s", status, truncate(string(respBody), 200))
-	}
-	var parsed struct {
-		SHA string `json:"sha"`
-	}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("parse commit response: %w", err)
-	}
-	if parsed.SHA == "" {
-		return "", fmt.Errorf("commit response missing sha")
+		return "", fmt.Errorf("%s response missing sha", what)
 	}
 	return parsed.SHA, nil
 }
@@ -605,44 +479,44 @@ func (h *Handler) updateRef(ctx context.Context, req *SyncRequest, newCommit str
 	if err != nil {
 		return false, err
 	}
-	respBody, status, err := h.doWithRetry(httpReq, 3)
+	respBody, status, err := httpx.DoWithRetry(h.client, httpReq, 3, "notessync")
 	if err != nil {
 		return false, err
 	}
 	if status/100 != 2 {
-		return status == http.StatusUnprocessableEntity, fmt.Errorf("github %d: %s", status, truncate(string(respBody), 200))
+		return status == http.StatusUnprocessableEntity, githubError(status, respBody)
 	}
 	return false, nil
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+// githubError formats a non-success GitHub reply with a short prefix of its
+// body, so the API's own message reaches the device's error list.
+func githubError(status int, body []byte) error {
+	return fmt.Errorf("github %d: %s", status, httpx.Truncate(string(body), 200))
 }
 
 // UploadRequest is the body of POST /api/notes/upload. The hub stores the
 // raw decoded bytes under notesDir/<name>. Idempotent: a second upload with
 // the same name and same bytes is a no-op; different bytes overwrite. The
 // device uses this to mirror its internal-flash note store to the hub when
-// flash gets tight, and as the source of truth for the new sync flow that
-// no longer reads from the SD card.
+// flash gets tight. Making this store the source of truth for /sync (instead
+// of the device sending its files) is only a proposal (P6.33); /sync does
+// not read it today.
 type UploadRequest struct {
 	Name       string `json:"name"`
 	ContentB64 string `json:"content_b64"`
 }
 
+// UploadResponse is the 200 reply to /api/notes/upload. The device only
+// checks the status code (hub_upload_note); the body is for curl debugging.
+// It stays a 200 rather than a 204 because older device firmware may check
+// for exactly 200.
 type UploadResponse struct {
 	Stored bool   `json:"stored"`
 	Bytes  int    `json:"bytes"`
 	Path   string `json:"path,omitempty"`
 }
 
-// safeName guards against directory traversal and oddball names landing in
-// the notes dir. Notes filenames are app-generated (YYYYMMDD_HHMMSS.txt or
-// similar), so the rules can be strict — anything containing a slash, NUL,
-// or starting with a dot is rejected.
 // validRepo enforces exactly "owner/name" with GitHub-legal characters and
 // rejects any "." or ".." segment, so req.Repo is safe to interpolate into the
 // api.github.com URL path. Without it, a repo like "../../x" — or a segment
@@ -673,40 +547,24 @@ func validRepoSegment(s string) bool {
 	return true
 }
 
-func safeName(name string) (string, bool) {
-	if name == "" {
-		return "", false
-	}
-	if strings.ContainsAny(name, "/\\\x00") {
-		return "", false
-	}
-	if name == "." || name == ".." || strings.HasPrefix(name, ".") {
-		return "", false
-	}
-	if len(name) > 200 {
-		return "", false
-	}
-	return name, true
-}
-
-func (h *Handler) ensureNotesDir() error {
-	return os.MkdirAll(h.notesDir, 0o755)
+// safeName guards against directory traversal and oddball names landing in
+// the notes dir. Notes filenames are app-generated (YYYYMMDD_HHMMSS.txt or
+// similar), so the rules can be strict — anything empty, over 200 bytes,
+// containing a slash, backslash or NUL, or starting with a dot (which also
+// covers "." and "..") is rejected.
+func safeName(name string) bool {
+	return name != "" && len(name) <= 200 &&
+		!strings.HasPrefix(name, ".") &&
+		!strings.ContainsAny(name, "/\\\x00")
 }
 
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
 	var req UploadRequest
-	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+	if httpx.DecodeJSON(w, r, maxRequestBytes, &req) != nil {
 		return
 	}
-	name, ok := safeName(req.Name)
-	if !ok {
+	name := req.Name
+	if !safeName(name) {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
@@ -720,7 +578,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	h.storeMu.Lock()
 	defer h.storeMu.Unlock()
 
-	if err := h.ensureNotesDir(); err != nil {
+	if err := os.MkdirAll(h.notesDir, 0o755); err != nil {
 		http.Error(w, "mkdir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -736,6 +594,5 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(UploadResponse{Stored: true, Bytes: len(bs), Path: name})
+	httpx.WriteJSON(w, UploadResponse{Stored: true, Bytes: len(bs), Path: name})
 }

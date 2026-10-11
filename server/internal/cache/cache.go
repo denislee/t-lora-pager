@@ -1,6 +1,8 @@
 // Package cache is a small in-memory TTL cache shared by upstream-proxying
-// handlers. It is goroutine-safe and intentionally minimal — we only need
-// Get/Set/Sweep, not eviction policies.
+// handlers. It is goroutine-safe and intentionally minimal: Get/Set/Sweep,
+// plus a size cap (maxEntries) enforced on Set by dropping expired entries
+// first, then the entry nearest expiry. No LRU tracking, so Get stays a
+// read lock.
 package cache
 
 import (

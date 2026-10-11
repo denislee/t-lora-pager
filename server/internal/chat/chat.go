@@ -24,10 +24,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lilygo/lilyhub/internal/httpx"
 )
 
 const (
@@ -40,7 +41,6 @@ const (
 	maxHistory       = 20        // messages, dropping oldest pairs
 	maxContent       = 4 * 1024  // per-message cap before we trim
 	maxRequestBytes  = 8 << 20   // 8 MiB JSON envelope
-	maxRespBytes     = 1 << 20   // 1 MiB upstream response cap
 	sessionIdleLimit = time.Hour // sessions idle this long are reaped
 	maxSessions      = 256       // hard cap on live sessions (LRU-evicted)
 	clientTimeout    = 60 * time.Second
@@ -133,22 +133,14 @@ func redactKey(k string) string {
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/chat", h.chat)
+	mux.HandleFunc("POST /api/chat", h.chat)
 }
 
 func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	if r.Method != http.MethodPost {
-		log.Printf("chat: %s rejected (method=%s)", r.RemoteAddr, r.Method)
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
 	var req Request
-	dec := json.NewDecoder(io.LimitReader(r.Body, maxRequestBytes))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	if err := httpx.DecodeJSON(w, r, maxRequestBytes, &req); err != nil {
 		log.Printf("chat: %s bad json: %v", r.RemoteAddr, err)
-		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if req.DeviceID == "" {
@@ -165,7 +157,7 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		delete(h.sessions, req.DeviceID)
 		h.mu.Unlock()
 		log.Printf("chat: device=%s session reset", req.DeviceID)
-		writeJSON(w, &Response{Reply: ""})
+		httpx.WriteJSON(w, &Response{Reply: ""})
 		return
 	}
 
@@ -202,7 +194,7 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("chat: device=%s stt ok in %s (%d chars): %q",
 			req.DeviceID, time.Since(sttStart).Round(time.Millisecond),
-			len(t), truncate(t, 80))
+			len(t), httpx.Truncate(t, 80))
 		resp.Transcript = t
 		prompt = strings.TrimSpace(t)
 	}
@@ -215,7 +207,7 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("chat: device=%s llm start (prompt_chars=%d): %q",
-		req.DeviceID, len(prompt), truncate(prompt, 80))
+		req.DeviceID, len(prompt), httpx.Truncate(prompt, 80))
 	llmStart := time.Now()
 	reply, err := h.complete(r.Context(), req.DeviceID, prompt)
 	if err != nil {
@@ -226,9 +218,9 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("chat: device=%s llm ok in %s (%d chars): %q",
 		req.DeviceID, time.Since(llmStart).Round(time.Millisecond),
-		len(reply), truncate(reply, 80))
+		len(reply), httpx.Truncate(reply, 80))
 	resp.Reply = reply
-	writeJSON(w, resp)
+	httpx.WriteJSON(w, resp)
 	log.Printf("chat: device=%s done total=%s",
 		req.DeviceID, time.Since(start).Round(time.Millisecond))
 }
@@ -338,7 +330,7 @@ func (h *Handler) complete(ctx context.Context, deviceID, prompt string) (string
 		// stamp above guarantees this session is never the victim.
 		h.evictSessionsLocked(maxSessions)
 	}
-	s.msgs = append(s.msgs, message{Role: "user", Content: clip(prompt, maxContent)})
+	s.msgs = append(s.msgs, message{Role: "user", Content: httpx.Truncate(prompt, maxContent)})
 	if len(s.msgs) > maxHistory {
 		s.msgs = s.msgs[len(s.msgs)-maxHistory:]
 	}
@@ -384,13 +376,13 @@ func (h *Handler) complete(ctx context.Context, deviceID, prompt string) (string
 		return "", fmt.Errorf("groq: %s", out.Error.Message)
 	}
 	if len(out.Choices) == 0 {
-		return "", fmt.Errorf("no choices in response")
+		return "", errors.New("no choices in response")
 	}
 	reply := strings.TrimSpace(out.Choices[0].Message.Content)
 
 	h.mu.Lock()
 	if s, ok := h.sessions[deviceID]; ok {
-		s.msgs = append(s.msgs, message{Role: "assistant", Content: clip(reply, maxContent)})
+		s.msgs = append(s.msgs, message{Role: "assistant", Content: httpx.Truncate(reply, maxContent)})
 		s.updated = time.Now()
 	}
 	h.mu.Unlock()
@@ -398,91 +390,28 @@ func (h *Handler) complete(ctx context.Context, deviceID, prompt string) (string
 	return reply, nil
 }
 
-// baseBackoff is the first retry delay; it doubles each attempt (capped). A
-// package var rather than a const so tests can shrink it.
-var baseBackoff = 200 * time.Millisecond
-
-// retryableStatus reports whether an upstream status is worth retrying. 429
-// (rate limit) and 5xx (transient upstream) are; other 4xx (auth, bad model,
-// validation) are permanent for this request, so retrying just burns time.
-func retryableStatus(code int) bool {
-	return code == http.StatusTooManyRequests || code >= 500
-}
-
-func backoff(attempt int) time.Duration {
-	shift := max(attempt-2, 0) // first retry (attempt 2) waits baseBackoff
-	return min(baseBackoff<<shift, 2*time.Second)
-}
-
-// do executes the request with a few backed-off retries on transient upstream
-// failures (429/5xx and transport errors), then returns the body. Non-2xx
-// responses are surfaced as errors so the caller doesn't peek at status codes;
-// the error string carries a short prefix of the upstream body so Groq's auth /
-// rate-limit messages stay legible in the device log. One hub-side retry is far
-// cheaper than bouncing the device to its own slow public-internet fallback.
-// Bodies are replayed via req.GetBody, which http.NewRequest populates for the
-// bytes.Reader/Buffer bodies used here.
+// do executes the request through httpx.DoWithRetry (3 attempts, retrying
+// 429/5xx and transport errors) and returns the body. Non-2xx responses are
+// surfaced as errors so the caller doesn't peek at status codes; the error
+// string carries a short prefix of the upstream body so Groq's auth /
+// rate-limit messages stay legible in the device log. One hub-side retry is
+// far cheaper than bouncing the device to its own slow public-internet
+// fallback.
 func (h *Handler) do(req *http.Request) ([]byte, error) {
-	const maxAttempts = 3
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if attempt > 1 {
-			d := backoff(attempt)
-			log.Printf("chat: upstream %s %s retry %d/%d after %s (%v)",
-				req.Method, req.URL.Path, attempt, maxAttempts, d, lastErr)
-			timer := time.NewTimer(d)
-			select {
-			case <-timer.C:
-			case <-req.Context().Done():
-				timer.Stop()
-				return nil, req.Context().Err()
-			}
-			if req.GetBody != nil {
-				b, err := req.GetBody()
-				if err != nil {
-					return nil, err
-				}
-				req.Body = b
-			}
-		}
-		body, status, err := h.doOnce(req)
-		if err != nil {
-			lastErr = err // transport/read error — transient, retry
-			continue
-		}
-		if retryableStatus(status) && attempt < maxAttempts {
-			lastErr = fmt.Errorf("upstream %d: %s", status, truncate(string(body), 200))
-			continue
-		}
-		if status/100 != 2 {
-			return body, fmt.Errorf("upstream %d: %s", status, truncate(string(body), 200))
-		}
-		return body, nil
-	}
-	return nil, lastErr
-}
-
-// doOnce performs a single request attempt and returns (body, status, err).
-func (h *Handler) doOnce(req *http.Request) ([]byte, int, error) {
 	start := time.Now()
-	resp, err := h.client.Do(req)
+	body, status, err := httpx.DoWithRetry(h.client, req, 3, "chat")
 	if err != nil {
-		log.Printf("chat: upstream %s %s transport error after %s: %v",
-			req.Method, req.URL.Path,
-			time.Since(start).Round(time.Millisecond), err)
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
-	if err != nil {
-		log.Printf("chat: upstream %s %s read error: %v",
-			req.Method, req.URL.Path, err)
-		return nil, resp.StatusCode, err
+		log.Printf("chat: upstream %s %s failed after %s: %v",
+			req.Method, req.URL.Path, time.Since(start).Round(time.Millisecond), err)
+		return nil, err
 	}
 	log.Printf("chat: upstream %s %s -> %d in %s (%d bytes)",
-		req.Method, req.URL.Path, resp.StatusCode,
+		req.Method, req.URL.Path, status,
 		time.Since(start).Round(time.Millisecond), len(body))
-	return body, resp.StatusCode, nil
+	if status/100 != 2 {
+		return body, fmt.Errorf("upstream %d: %s", status, httpx.Truncate(string(body), 200))
+	}
+	return body, nil
 }
 
 // reapLocked drops sessions that have been idle for sessionIdleLimit.
@@ -517,39 +446,4 @@ func (h *Handler) evictSessionsLocked(limit int) {
 		}
 		delete(h.sessions, oldestKey)
 	}
-}
-
-// writeJSON marshals up-front so we can set Content-Length explicitly,
-// and forces Connection: close. The Arduino HTTPClient on ESP32 has been
-// observed to hang in getString() when relying solely on chunked-EOF or
-// implicit content-length signaling — giving it both a length and a
-// close-after-response makes the read deterministic.
-func writeJSON(w http.ResponseWriter, v any) {
-	body, err := json.Marshal(v)
-	if err != nil {
-		log.Printf("chat: writeJSON marshal error: %v", err)
-		http.Error(w, "internal", http.StatusInternalServerError)
-		return
-	}
-	body = append(body, '\n')
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.Header().Set("Connection", "close")
-	if _, err := w.Write(body); err != nil {
-		log.Printf("chat: writeJSON write error: %v", err)
-	}
-}
-
-func clip(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

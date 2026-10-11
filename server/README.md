@@ -5,9 +5,11 @@ the same LAN as the device (e.g. a Raspberry Pi or any always-on ARM box).
 On-device apps point at it first; on any failure they fall back to the public
 internet so the device keeps working when the hub is offline.
 
-The first app served is **Weather** — it proxies and caches `ip-api.com` and
-`open-meteo.com`. Adding more apps is a matter of dropping a new package next
-to `internal/weather/` and wiring its `Register(mux)` in `cmd/lilyhub/main.go`.
+Apps served: **Weather** (proxies and caches `ip-api.com` and `open-meteo.com`),
+**Notes** (GitHub sync proxy + on-hub note store), **Chat** (Groq LLM + Whisper
+STT), and a Telegram Bot API proxy. Adding more apps is a matter of dropping a
+new package next to `internal/weather/` and wiring its `Register(mux)` in
+`cmd/lilyhub/main.go`.
 
 ## Layout
 
@@ -15,8 +17,11 @@ to `internal/weather/` and wiring its `Register(mux)` in `cmd/lilyhub/main.go`.
 server/
 ├── cmd/lilyhub/        entry point — wires the cache, mux and apps
 ├── internal/cache/     in-memory TTL cache shared across apps
-├── internal/httpx/     proxy helper + request-logger middleware
+├── internal/httpx/     proxy, retry/backoff, JSON decode/write helpers + request logger
 ├── internal/weather/   /api/weather/* endpoints (first app)
+├── internal/chat/      /api/chat — Groq chat completion + Whisper STT, per-device history
+├── internal/notessync/ /api/notes/sync (GitHub Git Data API push) + /api/notes/upload (on-hub store)
+├── internal/telegram/  /api/telegram/proxy — SSRF-guarded relay to api.telegram.org
 ├── deploy/             systemd unit
 └── Makefile            build + cross-compile targets
 ```
@@ -31,6 +36,11 @@ server/
 | GET    | `/api/weather/forecast?latitude=…&longitude=…&…` | 10 min | `https://api.open-meteo.com/v1/forecast` |
 | POST   | `/api/notes/sync`                 | —         | `https://api.github.com` |
 | POST   | `/api/chat`                       | —         | `https://api.groq.com/openai/v1` |
+| POST   | `/api/notes/upload`               | —         | local disk (`$LILYHUB_NOTES_DIR`) |
+| POST   | `/api/telegram/proxy`             | —         | `https://api.telegram.org` |
+
+Routes are registered with Go 1.22 method patterns, so a wrong method gets 405
+from the mux.
 
 `POST /api/chat` accepts `{device_id, text?, audio_b64?, reset?}` and returns
 `{transcript?, reply}`. When `audio_b64` is set the hub runs Whisper STT
@@ -40,6 +50,35 @@ in-process keyed by `device_id` (last 20 messages, idle sessions reaped at
 environment — without it the endpoint returns 503. Free key at
 [console.groq.com](https://console.groq.com); set it via `/etc/lilyhub/env`
 (see "Configure secrets" below).
+
+`/api/notes/sync` accepts `{repo, branch?, token, files:[{name, content_b64}]}`
+and returns `{uploaded, already, errors?}`. Additive only: names already in
+`notes/` on the branch are skipped, nothing is overwritten or deleted, so it is
+safe to retry. New files land as one commit (parallel blob creates, then tree,
+commit, ref update). The token is a GitHub PAT with `contents:write`; it is
+never logged or stored.
+
+`/api/notes/upload` accepts `{name, content_b64}` and stores the decoded bytes
+at `$LILYHUB_NOTES_DIR/<name>` (atomic temp-file + rename). Replies `200 {stored, bytes, path}`;
+the device only checks the status, the body is for curl debugging.
+
+`/api/telegram/proxy` accepts `{url, method (GET|POST), token, body?}`; `url`
+must be `https://api.telegram.org/...`; Telegram's status and JSON body are
+relayed verbatim.
+
+JSON replies the device reads carry `Content-Length` and `Connection: close`
+(the ESP32 HTTPClient can hang on chunked responses).
+
+## Environment variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GROQ_API_KEY` | (unset) | enables `/api/chat`; without it the endpoint returns 503 |
+| `STT_LANG` | `pt` | ISO-639-1 language hint sent to Whisper |
+| `STT_LANG_AUTO` | (unset) | set to any value (with `STT_LANG` empty) to let Whisper auto-detect |
+| `STT_PROMPT` | a short pt-BR vocabulary hint | Whisper biasing prompt; set to empty string to send none |
+| `LILYHUB_NOTES_DIR` | `$HOME/.lilyhub/notes` (falls back to `$TMPDIR/lilyhub-notes`) | where `/api/notes/upload` stores files |
+| `LILYHUB_ADDR` | `:8080` | listen address (the `-addr` flag overrides it) |
 
 ## Configure secrets
 
@@ -69,10 +108,11 @@ shows a clear error.
 `make install`, `make upgrade`, and `make uninstall` never delete this
 file unless you explicitly `rm -rf /etc/lilyhub`.
 
-Each weather response is byte-identical to the upstream (we don't reshape
-JSON), so the device parsers stay unchanged. The forecast endpoint forwards
-the full query string, so adding/removing `hourly=`/`daily=` fields on the
-device needs no server change.
+The `geo/ip` and `forecast` responses are passed through unchanged, so the device
+parsers stay unchanged; `geo/search` is the exception — it is trimmed to the
+fields the device reads (`name`, `latitude`, `longitude`, `country`, `admin1`;
+see `trimGeoSearch`). The forecast endpoint forwards the full query string, so
+adding/removing `hourly=`/`daily=` fields on the device needs no server change.
 
 `X-Cache: HIT|MISS` is set on responses for debugging.
 

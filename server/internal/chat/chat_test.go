@@ -23,14 +23,6 @@ func testHandler(url string) *Handler {
 	}
 }
 
-// fastBackoff shrinks the retry delay so retry tests don't sleep for real.
-func fastBackoff(t *testing.T) {
-	t.Helper()
-	old := baseBackoff
-	baseBackoff = time.Millisecond
-	t.Cleanup(func() { baseBackoff = old })
-}
-
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -87,52 +79,6 @@ func TestSessionSurvivesReapDuringInflightCall(t *testing.T) {
 	}
 	if len(s.msgs) != 2 {
 		t.Fatalf("want user+assistant (2 msgs), got %d", len(s.msgs))
-	}
-}
-
-func TestCompleteRetriesOn429ThenSucceeds(t *testing.T) {
-	fastBackoff(t)
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&attempts, 1) < 3 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"message":"slow down"}}`))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
-	}))
-	defer srv.Close()
-	h := testHandler(srv.URL)
-
-	reply, err := h.complete(context.Background(), "dev", "hi")
-	if err != nil {
-		t.Fatalf("want success after retries, got %v", err)
-	}
-	if reply != "ok" {
-		t.Fatalf("reply=%q, want %q", reply, "ok")
-	}
-	if n := atomic.LoadInt32(&attempts); n != 3 {
-		t.Fatalf("attempts=%d, want 3 (two 429s then success)", n)
-	}
-}
-
-func TestCompleteGivesUpAfterRetryStorm(t *testing.T) {
-	fastBackoff(t)
-	var attempts int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&attempts, 1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":{"message":"down"}}`))
-	}))
-	defer srv.Close()
-	h := testHandler(srv.URL)
-
-	if _, err := h.complete(context.Background(), "dev", "hi"); err == nil {
-		t.Fatal("want error after exhausting retries")
-	}
-	if n := atomic.LoadInt32(&attempts); n != 3 {
-		t.Fatalf("attempts=%d, want 3 (maxAttempts)", n)
 	}
 }
 
@@ -224,8 +170,9 @@ func TestChatBadAudioBase64Returns400(t *testing.T) {
 	}
 }
 
-func TestCompleteDoesNotRetry4xx(t *testing.T) {
-	fastBackoff(t)
+// Retry/backoff behaviour itself is covered in internal/httpx; this checks
+// chat's own contract on top of it — a non-2xx upstream becomes an error.
+func TestCompleteSurfacesNon2xxAsError(t *testing.T) {
 	var attempts int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&attempts, 1)

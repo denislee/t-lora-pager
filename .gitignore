@@ -12,6 +12,9 @@ lib/LilyGoLib/firmware/*.bin
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
 
+# lilyhub build output (make build / make linux-*); never committed.
+/server/bin/
+
 # PagerLink golden-vector header, generated from protocol/vectors/ at test build.
 test/test_link_frame/link_vectors_gen.h
 
