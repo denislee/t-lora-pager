@@ -1,7 +1,7 @@
 // Package pagerlink implements the Go side of the PagerLink v1 protocol
 // described in protocol/PROTOCOL.md: the §2 packet framing and reassembly, the
 // §3 message header, and the §5 TCP record transport used to talk to a pager
-// (or its emulator). It is stdlib-only on purpose — the hub ships as a single
+// (or its emulator). It is stdlib-only on purpose — the CLI builds as a single
 // static binary and the codec is small enough that a dependency would cost
 // more than it saves.
 //

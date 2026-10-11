@@ -17,7 +17,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/lilygo/lilyhub/internal/pagerlink"
+	"github.com/lilygo/pagerlink/internal/pagerlink"
 )
 
 func main() {

@@ -113,12 +113,12 @@ over TCP. The emulator speaks the same PagerLink packets, length-prefixed
 3. In the app's **Dashboard** tab, open the **Emulator** disclosure group,
    confirm host `127.0.0.1` / port `7600`, and tap **Connect**. The state goes
    to *Connected*, `sys.hello` fills firmware/board, the clock is synced, and
-   `sys.info` fills battery, storage, Wi‑Fi and hub.
+   `sys.info` fills battery, storage and Wi‑Fi.
 
-The CLI check against the same listener (from `server/`):
+The CLI check against the same listener (from `tools/pagerlink/`):
 
 ```sh
-cd server
+cd tools/pagerlink
 go run ./cmd/pagerlink smoke
 ```
 

@@ -31,7 +31,7 @@ pio test -e native_test
 # protocol/tools/mkvectors.py (the oracle); every codec is tested against them.
 make protocol-test                   # vectors fresh + Unity + Go + PagerKit (Docker swift)
 # The emulator serves PagerLink on 127.0.0.1:7600 (PAGERLINK_PORT, 0 disables):
-(cd server && go run ./cmd/pagerlink smoke)
+(cd tools/pagerlink && go run ./cmd/pagerlink smoke)
 
 # Screenshot sweep: every app, Settings subpage and shared modal in every
 # UI style x dark mode, as PPM under <dir>/<style>-<light|dark>/ (exit = failures).

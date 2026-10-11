@@ -19,7 +19,7 @@ import (
 // which is the test's working directory.
 func loadVectors(t *testing.T, name string, dst any) {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "protocol", "vectors", name)
+	path := filepath.Join("..", "..", "..", "..", "protocol", "vectors", name)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)

@@ -161,7 +161,7 @@ Why one repo:
   Unity tests (`test/`) and the XCTest suite (`ios/PagerKit/Tests`), so it
   has to live in one tree.
 - **Shared tooling.** The emulator (`pio run -e emulator_lora_pager`), the
-  Go integration CLI (`server/cmd/pagerlink`) and the iOS Simulator app all
+  Go integration CLI (`tools/pagerlink/cmd/pagerlink`) and the iOS Simulator app all
   run from one checkout. The graft/graphify indexes cover firmware and app
   together, so "who sends `weather.get`" resolves across both.
 - **One versioning story.** `sys.hello` reports the firmware git hash, and
@@ -174,7 +174,7 @@ Top-level layout after the change (new entries marked `+`):
 t-lora-pager/
 ├── src/                 firmware (PlatformIO, Arduino + LVGL)
 ├── test/                native Unity tests (+ test_link_frame, test_link_rpc)
-├── server/              lilyhub Go service (+ cmd/pagerlink integration CLI)
+├── tools/pagerlink/     Go PagerLink codec + integration CLI (own module)
 ├── + protocol/          PagerLink spec + golden vectors — shared by firmware and iOS
 ├── + ios/               native iOS companion app (Swift / SwiftUI)
 ├── boards/ variants/ lib/ support/ tools/
@@ -651,7 +651,7 @@ leaves the pager in plaintext.
 |---|---|
 | Frame / SAR codec | Unity `test/test_link_frame` + XCTest on the **same** `protocol/vectors/*.json` (header encode/decode, segmentation at MTU 23/185/247, seq gap → reset, oversized length → reject) |
 | RPC | Unity `test/test_link_rpc`: id parity, timeout, late response dropped, duplicate response, unknown method → `unsupported` |
-| Handlers | Emulator integration via a small Go CLI (`server/cmd/pagerlink`, reuses the lilyhub Go module) that speaks the TCP transport: list/read/write/delete, CRC, `.part` cleanup, path traversal negative controls |
+| Handlers | Emulator integration via a small Go CLI (`tools/pagerlink/cmd/pagerlink`, its own Go module) that speaks the TCP transport: list/read/write/delete, CRC, `.part` cleanup, path traversal negative controls |
 | iOS UI | XCTest + SwiftUI previews against a `MockTransport`; UI tests against the emulator over TCP from the Simulator |
 | Hardware bench | Matrix below, results appended to this doc |
 | Screenshots | `UI_SHOTS_DIR=… xvfb-run -a .pio/build/emulator_lora_pager/program` covers `ui_companion` states |
