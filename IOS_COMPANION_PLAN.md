@@ -1,7 +1,7 @@
 # iOS Companion App — Plan
 
 > **Status:** in progress, 2026-10-10. §12 steps 1, 2, 5 and the
-> hardware-independent half of Phase 1 have landed (uncommitted); Phase 0
+> hardware-independent half of Phase 1 have landed (`165067a`); Phase 0
 > spikes S1–S5 are open and need a pager + iPhone. See §13 for the log.
 > **Scope:** a native iOS app ("Pager Companion") that pairs with the
 > T-LoRa-Pager over Bluetooth Low Energy, moves data both ways, and lets
@@ -714,7 +714,7 @@ Bench matrix (pager + real iPhone):
 
 ## 13. Progress log
 
-### 2026-10-10 — protocol foundation + emulator path (uncommitted, on `master` working tree)
+### 2026-10-10 — protocol foundation + emulator path (`165067a`, pushed to `master`)
 
 Done:
 
@@ -769,14 +769,63 @@ Not verified here (no macOS): the app target and `TCPTransport`
 First action on a Mac: `make ios-gen && make ios-sim`, then connect the
 Simulator to the emulator.
 
-Open, in order:
+### Next steps (as of 2026-10-11)
 
-1. **S1** (blocker for the BLE transport): `ble_stack` + HID on
-   `NimBLEHIDDevice`; on hardware `hw_link_enable(true)` returns false until
-   then (`link_transport_tcp.cpp` `#else` branch).
-2. **S2/S3** with the real iPhone; record MTU/throughput in §4.4.
-3. **S4, S5**.
-4. Rest of Phase 1: `link_transport_ble.cpp` (StreamBuffer + `link_task`
-   feeding `link_service`), `ble_stack`/`ble_hid`, `ui_companion` + its
-   `UI_SHOTS` states, connectivity toggle, trusted phones, iOS
-   `BLETransport` + onboarding + state restoration, B1 bench row.
+The critical path is S1 → S2/S3 → BLE transport, and it needs a pager plus
+an iPhone. Tracks B and C need neither and can run in parallel; they are
+built and tested against the emulator over TCP with `pagerlink`.
+
+**Track A — hardware (critical path; blocks every BLE item)**
+
+1. **S1** — `src/hal/ble_stack.{h,cpp}` owns `NimBLEDevice` (init once,
+   shared server, per-connection fan-out); keyboard + media keys ported to
+   `NimBLEHIDDevice` in `src/hal/ble_hid.cpp`; `hw_get_ble_kb_connected()` =
+   "peer subscribed to HID input". Code can be written and compiled on a
+   branch without hardware. **Exit:** typing + media keys work on the
+   iPhone; record decision D1 in §11.
+2. **S2** — throwaway Swift app finds the pager via
+   `retrieveConnectedPeripherals(withServices: [PagerLink])`, subscribes to
+   `tx`, round-trips `sys.ping` while typing still works. Decides R2.
+3. **S3** — granted MTU, DLE, notify / write-without-response KB/s at 15 ms
+   with Wi-Fi off and on. Record in §4.4; go/no-go for L2CAP in v1.
+4. **S4** (30 min soak with HID + link + Wi-Fi + TLS, heap low-water) and
+   **S5** (`DISPLAY_ONLY` passkey with an already-bonded iPhone).
+5. Rest of Phase 1 BLE: `link_transport_ble.cpp` (NimBLE callbacks →
+   StreamBuffer → `link_task` → `link_service`), replace the ARDUINO stubs in
+   `link_transport_tcp.cpp`, advertising/scan-response, passkey, trusted
+   phones (NVS `companion`), conn-param policy (§5.1.7), iOS `BLETransport`
+   + onboarding + state restoration, bench row B1.
+
+**Track B — Mac (quick, unblocks the app)**
+
+6. `make ios-gen && make ios-sim`; fix whatever the first compile of the app
+   target and `TCPTransport` turns up (both written on Linux, never
+   compiled). Then run the emulator and connect from the Simulator
+   (Dashboard → Emulator) — Phase 1's "emulator + iOS Simulator path works
+   end to end" criterion.
+
+**Track C — no hardware (emulator over TCP)**
+
+7. **Phase 2 file service (recommended next):** `handlers_fs.cpp`
+   (`fs.list/stat/read/write.begin/commit/abort/delete/mkdir/rename`,
+   `evt.fs.changed`), credit-window bulk transfer (§4 of `PROTOCOL.md`),
+   chunked write to `<path>.part` + rename on CRC-matching commit,
+   `hw_rename_path` / `hw_mkdir_path` in `hal/storage`, path sandbox via the
+   `notes_path` rules, `protected:true` + ciphertext for encrypted notes,
+   busy vote during transfers. Move the `fs.*` rows into `PROTOCOL.md` §6,
+   add bulk vectors, extend `pagerlink smoke`. **Exit (emulator):** 1 MB
+   file round-trips with matching CRC32; a connection dropped mid-upload
+   leaves no partial file; `..` / outside-root paths rejected (unit test +
+   negative control). iOS Files screen follows once Track B is done.
+8. **`ui_companion` screen** (`core::App` "Phone": pairing code, peer,
+   transfer progress, trusted list, "find my phone"), Companion toggle in
+   `settings_connectivity.cpp`, `UI_SHOTS` states (pairing / connected /
+   transfer) in every style × dark mode. Binds to `hal/link.h` only; the
+   BLE-specific parts light up after Track A.
+9. **Phase 3 groundwork:** extract `ForecastCache`/`GeoData` load/save into
+   `hal/weather_cache.{h,cpp}` as a behaviour-neutral commit first, then
+   `handlers_weather.cpp` (`weather.push`, and the pager-initiated
+   `weather.get` step in the fetch chain) tested from `pagerlink`.
+
+Recommended order: 1 (start the code now) and 6 whenever a Mac is at hand;
+otherwise 7 → 8 → 9 while hardware is unavailable.
