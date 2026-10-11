@@ -1,5 +1,4 @@
 import Foundation
-import Observation
 import PagerKit
 
 /// The observable state the UI sees for one companion link
@@ -9,9 +8,8 @@ import PagerKit
 /// PagerLink TCP transport (`protocol/PROTOCOL.md` §5), runs `sys.hello`, sets
 /// the pager clock/zone, and refreshes `sys.info`. The CoreBluetooth transport
 /// is pending Spike S2; see the TODO below.
-@Observable
 @MainActor
-final class PagerSession {
+final class PagerSession: ObservableObject {
     /// Lifecycle of the single link.
     enum State {
         case disconnected
@@ -20,17 +18,17 @@ final class PagerSession {
         case failed(String)
     }
 
-    private(set) var state: State = .disconnected
-    private(set) var info: JSONValue?
-    private(set) var lastRTT: Duration?
+    @Published private(set) var state: State = .disconnected
+    @Published private(set) var info: JSONValue?
+    @Published private(set) var lastRTT: Duration?
 
     /// Rolling session log, newest last, capped at 200 lines.
-    private(set) var log: [String] = []
+    @Published private(set) var log: [String] = []
 
-    @ObservationIgnored private var session: LinkSession?
-    @ObservationIgnored private var eventsTask: Task<Void, Never>?
+    private var session: LinkSession?
+    private var eventsTask: Task<Void, Never>?
     #if canImport(Network)
-        @ObservationIgnored private var transport: TCPTransport?
+        private var transport: TCPTransport?
     #endif
 
     // TODO(Phase 1, after S2): BLETransport

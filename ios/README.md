@@ -14,7 +14,8 @@ UIKit/SwiftUI imports and builds (and tests) without Xcode.
 - **Xcode 16 or newer** (Swift 6 toolchain) — for the app target.
 - **XcodeGen** (`brew install xcodegen`) — `project.yml` is the source of
   truth; the `.xcodeproj` is generated and not committed.
-- **iOS 17+** for the app (Observation, modern concurrency). The Simulator is
+- **iOS 16+** for the app (kept at 16 so an iPhone 8 can run it; the session
+  is an `ObservableObject`, not `@Observable`). The Simulator is
   enough for the emulator path; a device needs a signing team.
 - **Docker** (optional) — to run the `PagerKit` tests on Linux.
 - **Swift 6 toolchain** on Linux/CI for `make test-linux`.

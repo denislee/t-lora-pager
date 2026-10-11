@@ -7,12 +7,12 @@ import SwiftUI
 /// screens land in later phases; see `IOS_COMPANION_PLAN.md`.
 @main
 struct PagerCompanionApp: App {
-    @State private var session = PagerSession()
+    @StateObject private var session = PagerSession()
 
     var body: some Scene {
         WindowGroup {
             RootView()
-                .environment(session)
+                .environmentObject(session)
         }
     }
 }

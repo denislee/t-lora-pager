@@ -18,5 +18,5 @@ struct RootView: View {
 
 #Preview {
     RootView()
-        .environment(PagerSession())
+        .environmentObject(PagerSession())
 }

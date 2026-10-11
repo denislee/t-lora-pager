@@ -6,7 +6,7 @@ import SwiftUI
 /// Phase-1 actions. The emulator TCP endpoint lives under a disclosure group so
 /// the BLE path can replace it later without changing the screen's shape.
 struct DashboardView: View {
-    @Environment(PagerSession.self) private var session
+    @EnvironmentObject private var session: PagerSession
 
     @State private var host = "127.0.0.1"
     @State private var port = "7600"
@@ -169,5 +169,5 @@ struct DashboardView: View {
 
 #Preview {
     DashboardView()
-        .environment(PagerSession())
+        .environmentObject(PagerSession())
 }

@@ -9,7 +9,7 @@ UPLOAD_FLAGS += --upload-port $(PORT)
 MONITOR_FLAGS += --port $(PORT)
 endif
 
-.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim protocol-test
+.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim ios-device protocol-test
 
 all: build
 
@@ -42,6 +42,9 @@ ios-test:
 ios-sim:
 	$(MAKE) -C ios sim
 
+ios-device:
+	$(MAKE) -C ios device
+
 protocol-test:
 	python3 protocol/tools/mkvectors.py --check
 	$(PIO) test -e native_test -f test_link_frame -f test_link_rpc -f test_link_json
@@ -60,6 +63,7 @@ help:
 	@echo "  make ios-gen        - generate ios/PagerCompanion.xcodeproj (XcodeGen)"
 	@echo "  make ios-test       - run ios/PagerKit tests on this host (macOS)"
 	@echo "  make ios-sim        - build the iOS app for the Simulator"
+	@echo "  make ios-device     - build and install the iOS app on the connected iPhone"
 	@echo "  make protocol-test  - check vectors, Unity + Go + PagerKit tests"
 	@echo ""
 	@echo "Variables:"

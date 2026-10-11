@@ -7,7 +7,7 @@ name: PagerCompanion
 
 options:
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "16.0"
   # Seeds PRODUCT_BUNDLE_IDENTIFIER. The real prefix comes from the
   # BUNDLE_ID_PREFIX build setting defined in Config/Base.xcconfig.
   bundleIdPrefix: $(BUNDLE_ID_PREFIX)

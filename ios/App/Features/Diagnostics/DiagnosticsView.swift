@@ -2,7 +2,7 @@ import SwiftUI
 
 /// `sys.ping` round-trip and the live session log.
 struct DiagnosticsView: View {
-    @Environment(PagerSession.self) private var session
+    @EnvironmentObject private var session: PagerSession
 
     var body: some View {
         NavigationStack {
@@ -44,5 +44,5 @@ struct DiagnosticsView: View {
 
 #Preview {
     DiagnosticsView()
-        .environment(PagerSession())
+        .environmentObject(PagerSession())
 }
