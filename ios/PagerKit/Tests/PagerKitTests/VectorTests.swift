@@ -81,10 +81,16 @@ final class VectorTests: XCTestCase {
             let name: String
             let payload_hex: String
         }
+        struct CRC: Decodable {
+            let name: String
+            let input_hex: String
+            let crc32: UInt32
+        }
         let data: [Data]
         let ack: [Ack]
         let bad_data: [Bad]
         let bad_ack: [Bad]
+        let crc32: [CRC]
     }
 
     // MARK: - Hex helpers
@@ -223,6 +229,13 @@ final class VectorTests: XCTestCase {
         }
         for vector in vectors.bad_ack {
             XCTAssertNil(Bulk.decodeAck(hexToBytes(vector.payload_hex)), vector.name)
+        }
+    }
+
+    func testBulkCRC32Vectors() throws {
+        let vectors = try load(BulkVectors.self, "bulk")
+        for vector in vectors.crc32 {
+            XCTAssertEqual(CRC32.checksum(hexToBytes(vector.input_hex)), vector.crc32, vector.name)
         }
     }
 }
