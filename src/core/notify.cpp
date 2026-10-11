@@ -110,14 +110,14 @@ static void default_renderer(const Notification &n)
         if (n.icon) { s += n.icon; s += "  "; }
         s += n.title;
         lv_label_set_text(t, s.c_str());
-        lv_obj_set_style_text_color(t, UI_COLOR_FG, 0);
+        lv_obj_set_style_text_color(t, UI_COLOR_ON_ACCENT, 0);
         lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
         lv_obj_set_width(t, LV_PCT(100));
     }
     if (!n.body.empty()) {
         lv_obj_t *b = lv_label_create(banner);
         lv_label_set_text(b, n.body.c_str());
-        lv_obj_set_style_text_color(b, UI_COLOR_FG, 0);
+        lv_obj_set_style_text_color(b, UI_COLOR_ON_ACCENT, 0);
         lv_label_set_long_mode(b, LV_LABEL_LONG_DOT);
         lv_obj_set_width(b, LV_PCT(100));
     }

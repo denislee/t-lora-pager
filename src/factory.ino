@@ -20,12 +20,12 @@
 // Vendor entry point: sets a volatile flag consumed by the rotary task to run
 // perform_fake_sleep_toggle() — the same path as a long-press. Declared here
 // rather than in a header because it is only used from this translation unit.
+// Only the Pager's vendor driver implements it; the watches have no auto
+// fake-sleep path.
+#if defined(ARDUINO_T_LORA_PAGER)
 extern "C" void lilygo_request_fake_sleep_toggle();
+#endif
 
-#include <string>
-
-std::string timezone_get_user_tz();
-bool timezone_fetch_offset(const char *tz, int &raw_offset_sec, int &dst_offset_sec, std::string &err);
 const char *timezone_get_user_posix();
 
 
@@ -33,11 +33,6 @@ const char *timezone_get_user_posix();
 /* Defined in ui_lock.cpp — shows the unlock modal if crypto is enabled and
  * the session is locked. No-op otherwise. */
 void ui_device_lock_enforce();
-
-static const char *ntpServer1 = "pool.ntp.org";
-static const char *ntpServer2 = "time.nist.gov";
-static const uint64_t  gmtOffset_sec = GMT_OFFSET_SECOND;
-static const int   daylightOffset_sec = 0;
 
 // Callback function (gets called when time adjusts via NTP)
 static void time_available(struct timeval *t)
@@ -122,7 +117,7 @@ void setup()
     // mktime() + settimeofday(); mktime() interprets its argument as local
     // time under the active TZ, so an unset TZ here would silently shift
     // the system clock by the user's UTC offset (the symptom: localtime()
-    // returns UTC+8 from the GMT_OFFSET_SECOND fallback until NTP runs).
+    // is off by that offset until NTP runs).
     setenv("TZ", timezone_get_user_posix(), 1);
     tzset();
 
@@ -154,14 +149,19 @@ void setup()
     Serial.println("Start done. run main loop");
 }
 
+#if defined(ARDUINO_T_LORA_PAGER)
 // P4.9: VBUS/charging probe for the auto-sleep guard. Kept out of the hot path
 // — only called on the tick where every other sleep precondition already holds.
-static bool is_on_external_power()
+// Not `static`: PlatformIO's .ino converter hoists a prototype for every
+// function above this #if, and a static prototype with no definition on the
+// watch builds trips -Wunused-function.
+bool is_on_external_power()
 {
     monitor_params_t p;
     hw_get_monitor_params(p);
     return p.is_charging;
 }
+#endif
 
 void loop()
 {
@@ -172,55 +172,36 @@ void loop()
     // DHCP lease just arrived, etc.) and we want to force a fresh cycle
     // until the time_available() callback fires.
     //
-    // P4.19: exponential backoff (30s → 1min → 5min → 15min cap) and a hard
+    // P4.19: stepped backoff (30s → 1min → 5min → 15min cap) and a hard
     // per-association attempt ceiling so a persistent NTP failure doesn't
     // burn the radio and CPU indefinitely. Both reset on each GOT_IP event.
-    // Timezone offset is cached — it changes twice a year, not twice a minute.
-    static uint32_t last_ntp_attempt_ms   = 0;
-    static uint32_t ntp_backoff_ms        = 30000;   // starts at 30 s
-    static int      ntp_attempts          = 0;        // per WiFi association
-    static bool     tz_offset_valid       = false;
-    static int      cached_tz_offset_sec  = 0;
+    // hw_start_time_sync_ntp() applies the user's POSIX TZ rule itself.
+    static constexpr uint32_t kNtpBackoffMs[] = {
+        30UL * 1000, 60UL * 1000, 5UL * 60 * 1000, 15UL * 60 * 1000,
+    };
+    static constexpr int kNtpBackoffSteps = sizeof(kNtpBackoffMs) / sizeof(kNtpBackoffMs[0]);
     static constexpr int kNtpMaxAttempts  = 10;       // ~30s+1m+5m+15m*7 ≈ 2h cap
-    static constexpr uint32_t kNtpBackoffCap = 15UL * 60 * 1000;  // 15 min
+    static uint32_t last_ntp_attempt_ms   = 0;
+    static int      ntp_attempts          = 0;        // per WiFi association
 
     if (s_ntp_new_assoc) {
         // New DHCP lease — reset backoff and attempt count for this association.
-        s_ntp_new_assoc    = false;
+        s_ntp_new_assoc     = false;
         last_ntp_attempt_ms = 0;
-        ntp_backoff_ms      = 30000;
         ntp_attempts        = 0;
-        // Keep tz_offset_valid: the timezone hasn't changed between associations.
     }
 
     if (hw_get_time_sync_status() == 0 && hw_get_wifi_connected()
             && ntp_attempts < kNtpMaxAttempts) {
         uint32_t now = millis();
-        if (last_ntp_attempt_ms == 0 || now - last_ntp_attempt_ms >= ntp_backoff_ms) {
-            log_i("Triggering NTP sync (attempt %d, backoff %lu ms)",
-                  ntp_attempts + 1, (unsigned long)ntp_backoff_ms);
-            if (!tz_offset_valid) {
-                std::string tz = timezone_get_user_tz();
-                if (!tz.empty()) {
-                    int raw = 0, dst = 0;
-                    std::string err;
-                    if (timezone_fetch_offset(tz.c_str(), raw, dst, err)) {
-                        cached_tz_offset_sec = raw + dst;
-                        tz_offset_valid      = true;
-                    }
-                }
-            }
-            if (tz_offset_valid && cached_tz_offset_sec != 0) {
-                hw_start_time_sync_ntp(cached_tz_offset_sec);
-            } else {
-                hw_start_time_sync_ntp();
-            }
-
+        // Wait after attempt N is step min(N-1, last) of the table.
+        int step = ntp_attempts > 0 ? ntp_attempts - 1 : 0;
+        uint32_t backoff_ms = kNtpBackoffMs[step < kNtpBackoffSteps ? step : kNtpBackoffSteps - 1];
+        if (last_ntp_attempt_ms == 0 || now - last_ntp_attempt_ms >= backoff_ms) {
+            log_i("Triggering NTP sync (attempt %d)", ntp_attempts + 1);
+            hw_start_time_sync_ntp();
             last_ntp_attempt_ms = now;
             ntp_attempts++;
-            // Advance backoff: 30s → 60s → 300s → 900s (cap at kNtpBackoffCap).
-            ntp_backoff_ms = min(ntp_backoff_ms * 2, (uint32_t)kNtpBackoffCap);
-            if (ntp_backoff_ms < 60000 && ntp_attempts >= 2) ntp_backoff_ms = 60000;
         }
     }
 
@@ -334,6 +315,7 @@ void loop()
         // activity is in progress. The async latch prevents loop() from
         // re-requesting the toggle on every subsequent 50 ms tick before the
         // rotary task has time to process it and set ui_is_fake_sleep().
+#if defined(ARDUINO_T_LORA_PAGER)
         if (!auto_sleep_pending
                 && cached_disp_timeout_sec > 0
                 && inactive_time >= (uint32_t)cached_disp_timeout_sec * 1000
@@ -357,6 +339,7 @@ void loop()
             lilygo_request_fake_sleep_toggle();
             auto_sleep_pending = true;
         }
+#endif
 
         // P4.3: restore full brightness when waking (s_dimmed may have been
         // set just before the sleep threshold fired). The restore-on-wake path

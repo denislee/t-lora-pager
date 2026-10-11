@@ -43,9 +43,15 @@ public:
     void queueSwitchApp(const std::string& name, lv_obj_t* parent);
 
     /**
-     * @brief Periodically call to update the active app.
+     * @brief Run any switch queued by queueSwitchApp(). Called once per
+     *        main-loop tick.
      */
     void update();
+
+    /**
+     * @brief Every registered app, in registration order.
+     */
+    const std::vector<std::shared_ptr<App>>& apps() const { return _apps; }
 
 private:
     AppManager() = default;

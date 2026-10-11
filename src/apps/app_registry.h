@@ -99,11 +99,6 @@ std::string nsync_cfg_get_token_display();
 bool        nsync_cfg_set_token(const char *tok, std::string *err = nullptr);
 bool        nsync_cfg_token_is_encrypted();
 
-// One-shot boot housekeeping: drop any legacy plaintext PAT that a prior
-// build may have persisted. Safe to call even when the slot never
-// existed. `register_all()` runs it for you.
-void        nsync_purge_legacy_token_slot();
-
 void register_all();
 
 } // namespace apps

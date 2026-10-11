@@ -121,10 +121,12 @@ bool hw_set_otg(bool enable)
 
 bool hw_has_otg_function()
 {
-#if defined(USING_PPM_MANAGE)
+    // Only the Pager's BQ25896 PPM can source OTG power. The pager emulator
+    // never sees the variant's USING_PPM_MANAGE, so it mirrors the hardware.
+#if defined(USING_PPM_MANAGE) || (!defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER))
     return true;
 #else
-    return true;
+    return false;
 #endif
 }
 
@@ -173,36 +175,32 @@ void hw_set_charger_current(uint16_t milliampere)
 #endif
 }
 
+// Charge-current steps (mA), indexed by the Settings charger-current level,
+// for the PMU-managed boards and the emulator. PPM-managed boards (the pager)
+// use multiples of dev_conts_var.charge_steps instead.
+#if !defined(ARDUINO) || !defined(USING_PPM_MANAGE)
+static constexpr uint16_t kChargeCurrentTable[] = {
+    100, 125, 150, 175,
+    200, 300, 400, 500,
+    600, 700, 800, 900,
+    1000
+};
+static constexpr uint8_t kChargeCurrentLevels =
+    sizeof(kChargeCurrentTable) / sizeof(kChargeCurrentTable[0]);
+#endif
+
 uint8_t hw_get_charger_current_level()
 {
 #if defined(USING_PPM_MANAGE)
     return user_setting.charger_current / dev_conts_var.charge_steps;
-#elif defined(USING_PMU_MANAGE)
-    const uint16_t table[] = {
-        100, 125, 150, 175,
-        200, 300, 400, 500,
-        600, 700, 800, 900,
-        1000
-    };
-    uint16_t cur =  instance.getChargeCurrent();
-    for (int i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
-        if (cur == table[i]) {
-            return i;
-        }
-    }
-    return 0;
 #else
-    const uint16_t table[] = {
-        100, 125, 150, 175,
-        200, 300, 400, 500,
-        600, 700, 800, 900,
-        1000
-    };
-    uint16_t cur =  user_setting.charger_current;
-    for (int i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
-        if (cur == table[i]) {
-            return i;
-        }
+#if defined(USING_PMU_MANAGE)
+    uint16_t cur = instance.getChargeCurrent();
+#else
+    uint16_t cur = user_setting.charger_current;
+#endif
+    for (uint8_t i = 0; i < kChargeCurrentLevels; ++i) {
+        if (cur == kChargeCurrentTable[i]) return i;
     }
     return 0;
 #endif
@@ -210,57 +208,31 @@ uint8_t hw_get_charger_current_level()
 
 uint16_t hw_set_charger_current_level(uint8_t level)
 {
-#ifdef ARDUINO
-#if defined(USING_PPM_MANAGE)
+#if defined(ARDUINO) && defined(USING_PPM_MANAGE)
     log_d("set charge current:%u mA", level * dev_conts_var.charge_steps);
     instance.ppm.setChargerConstantCurr(level * dev_conts_var.charge_steps);
     return  level * dev_conts_var.charge_steps;
-#elif defined(USING_PMU_MANAGE)
-    const uint16_t table[] = {
-        100, 125, 150, 175,
-        200, 300, 400, 500,
-        600, 700, 800, 900,
-        1000
-    };
-    if (level > (sizeof(table) / sizeof(table[0]) - 1)) {
-        level = sizeof(table) / sizeof(table[0]) - 1;
-    }
-    log_d("set charge current:%u mA", table[level]);
-    instance.setChargeCurrent(table[level]);
-    return  table[level];
+#elif defined(USING_PMU_MANAGE) || !defined(ARDUINO)
+    if (level > kChargeCurrentLevels - 1) level = kChargeCurrentLevels - 1;
+    log_d("set charge current:%u mA", kChargeCurrentTable[level]);
+#if defined(ARDUINO)
+    instance.setChargeCurrent(kChargeCurrentTable[level]);
 #endif
-#else
-
-    const uint16_t table[] = {
-        100, 125, 150, 175,
-        200, 300, 400, 500,
-        600, 700, 800, 900,
-        1000
-    };
-    if (level > (sizeof(table) / sizeof(table[0]) - 1)) {
-        level = sizeof(table) / sizeof(table[0]) - 1;
-    }
-    log_d("set charge current:%u mA", table[level]);
-    return  table[level];
+    return kChargeCurrentTable[level];
 #endif
-
 }
 
 // --- Monitor / power params -------------------------------------------
 
-// File-level so hw_invalidate_monitor_cache() can zero last_refresh.
+#ifdef ARDUINO
 static monitor_params_t s_cached_monitor_params;
 static uint32_t s_monitor_last_refresh = 0;
+#endif
 
-// Force the next hw_get_monitor_params() call to bypass the TTL cache and
-// do a fresh hardware read.  Call this before re-enabling the BQ25896 ADC
-// (e.g. in the charge overlay wakeup path) so usb_voltage / sys_voltage
-// are read with the ADC live rather than served from a stale pre-sleep cache.
-void hw_invalidate_monitor_cache()
-{
-    s_monitor_last_refresh = 0;
-}
-
+// On the pager none of these reads use the BQ25896 ADC (charge status is a
+// status-register bit; voltage and percent come from the fuel gauge), so the
+// result stays valid in fake sleep, where hw_power_down_all() turns the ADC
+// off.
 void hw_get_monitor_params(monitor_params_t &params)
 {
 #ifdef ARDUINO
@@ -268,7 +240,7 @@ void hw_get_monitor_params(monitor_params_t &params)
     // Refresh at most once per second while charging (the status bar animates
     // the bolt / rising percent), but back off to 5 s when discharging: the
     // full sweep below is ~4 I2C gauge register reads (9 removed by PB.14)
-    // plus ~5 PPM reads, all under the instance mutex, and an idle battery
+    // plus 2 PPM status reads, all under the instance mutex, and an idle battery
     // percent barely moves second-to-second. A freshly-plugged charger is
     // picked up within one 5 s tick.
     uint32_t ttl_ms = s_cached_monitor_params.is_charging ? 1000 : 5000;
@@ -281,31 +253,15 @@ void hw_get_monitor_params(monitor_params_t &params)
     params = monitor_params_t{};
 
 #if defined(USING_PPM_MANAGE)
-    params.type = MONITOR_PPM;
-    params.charge_state = instance.ppm.getChargeStatusString();
     // "Charging" means current is actually flowing into the cell. VBUS-in
     // alone over-reports — a plugged-in device that has hit termination is
     // not charging anymore. isChargeDone() drops to false during pre/fast
     // charge and rises to true at termination.
     params.is_charging = instance.ppm.isCharging() && !instance.ppm.isChargeDone();
-    params.usb_voltage = instance.ppm.getVbusVoltage();
-    params.sys_voltage = instance.ppm.getSystemVoltage();
-    instance.ppm.getFaultStatus();
-    if (instance.ppm.isNTCFault()) {
-        params.ntc_state = instance.ppm.getNTCStatusString();
-    } else {
-        params.ntc_state = "Normal";
-    }
 #elif defined(USING_PMU_MANAGE)
-    params.type = MONITOR_PMU;
     params.is_charging = instance.pmu.isCharging();
-    params.charge_state = params.is_charging ? "Charging" : "Not charging";
-    params.usb_voltage = instance.pmu.getVbusVoltage();
-    params.sys_voltage = instance.pmu.getSystemVoltage();
     params.battery_voltage = instance.pmu.getBattVoltage();
     params.battery_percent = instance.pmu.getBatteryPercent();
-    params.temperature = instance.pmu.getTemperature();
-    params.ntc_state = "Normal"; //TODO:
 #endif
 
 #ifdef USING_BQ_GAUGE
@@ -337,13 +293,9 @@ void hw_get_monitor_params(monitor_params_t &params)
 #endif
     s_cached_monitor_params = params;
 #else
-    params.type = MONITOR_PPM;
-    params.battery_percent = 30 + rand() % (100 - 30 + 1);;
+    params.battery_percent = 30 + rand() % (100 - 30 + 1);
     params.battery_voltage = 4178;
     params.is_charging = true;
-    params.charge_state = "Fast charging";
-    params.usb_voltage = 4998;
-    params.ntc_state = "Normal";
 #endif
 }
 

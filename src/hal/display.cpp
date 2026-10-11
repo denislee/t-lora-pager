@@ -48,7 +48,9 @@ void hw_enable_keyboard()
     // would look identical to "still held" and the second tap would be
     // swallowed. Off means one KB_PRESSED per physical tap: no auto-repeat
     // on hold (by design) and every fast re-tap registers.
+#if defined(ARDUINO_T_LORA_PAGER)
     instance.kb.setRepeat(false);
+#endif
 #endif
 }
 

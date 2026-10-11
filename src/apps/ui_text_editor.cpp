@@ -47,7 +47,7 @@ static bool content_dirty = false;
 // typing stutter as a note grows past a few hundred chars.
 static lv_timer_t *word_count_debounce_timer = NULL;
 
-void ui_text_editor_exit(lv_obj_t *parent);
+static void ui_text_editor_exit(lv_obj_t *parent);
 static void update_word_count();
 static void schedule_word_count_update();
 
@@ -87,7 +87,6 @@ static bool save_content(bool show_error_popup, bool allow_prune = true)
     if (success) {
         content_dirty = false;
         if (current_file_path.empty()) current_file_path = target_path;
-        update_word_count();
     } else if (show_error_popup) {
         string msg = "Failed to save file: " + err;
         ui_msg_pop_up("Save", msg.c_str());
@@ -143,14 +142,6 @@ static void do_exit()
     save_content(true);
     // menu_show will trigger AppManager::switchApp which calls ui_text_editor_exit
     menu_show();
-}
-
-static void back_event_handler(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    if (lv_menu_back_btn_is_root(menu, obj)) {
-        do_exit();
-    }
 }
 
 static void exit_btn_cb(lv_event_t *e)
@@ -307,7 +298,7 @@ static lv_obj_t *make_editor_pill(lv_obj_t *bar, const char *symbol,
     lv_obj_set_size(btn, pill_h + 14, pill_h);
     lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_radius(btn, pill_h / 2, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x15171d), 0);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(btn, accent, 0);
     lv_obj_set_style_border_width(btn, 1, 0);
@@ -353,7 +344,7 @@ static void editor_unlock_result_cb(bool ok, void *ud)
     }
 }
 
-void ui_text_editor_enter(lv_obj_t *parent)
+static void ui_text_editor_enter(lv_obj_t *parent)
 {
     if (notes_crypto_is_enabled() && !notes_crypto_is_unlocked()) {
         pending_editor_parent = parent;
@@ -377,7 +368,7 @@ static void editor_build_ui(lv_obj_t *parent)
 
     content_dirty = false;
 
-    menu = create_menu(parent, back_event_handler);
+    menu = create_menu(parent, nullptr);
 
     lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_COLUMN);
@@ -392,7 +383,7 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_set_flex_grow(text_area, 1);
     lv_textarea_set_placeholder_text(text_area, "");
     lv_obj_set_style_text_font(text_area, get_editor_font(), 0);
-    lv_obj_set_style_bg_color(text_area, lv_color_hex(0x080808), 0);
+    lv_obj_set_style_bg_color(text_area, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(text_area, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(text_area, UI_RADIUS, 0);
     lv_obj_set_style_border_color(text_area, UI_COLOR_MUTED, 0);
@@ -403,7 +394,7 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_set_style_border_opa(text_area, LV_OPA_COVER, LV_STATE_FOCUSED);
 
     /* Cursor style */
-    lv_obj_set_style_bg_color(text_area, lv_color_white(), LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(text_area, UI_COLOR_FG, LV_PART_CURSOR | LV_STATE_FOCUSED);
     lv_obj_set_style_bg_opa(text_area, LV_OPA_COVER, LV_PART_CURSOR | LV_STATE_FOCUSED);
     lv_obj_set_style_width(text_area, 8, LV_PART_CURSOR | LV_STATE_FOCUSED);
     lv_obj_set_style_anim_duration(text_area, 0, LV_PART_CURSOR | LV_STATE_FOCUSED);
@@ -471,7 +462,7 @@ static void editor_build_ui(lv_obj_t *parent)
 
     word_count_label = lv_label_create(lv_obj_get_parent(back_btn));
     lv_label_set_text(word_count_label, "0 words | 0 chars");
-    lv_obj_set_style_text_color(word_count_label, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_text_color(word_count_label, ui_color_title_muted()  /* lives in the status bar */, 0);
     lv_obj_set_style_text_font(word_count_label, &lv_font_montserrat_12, 0);
     lv_obj_align_to(word_count_label, back_btn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
 
@@ -483,7 +474,6 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_group_t *g = lv_obj_get_group(text_area);
     if (g) {
         lv_group_focus_obj(text_area);
-        editor_auto_edit = false;
     }
     update_word_count();
 
@@ -512,7 +502,7 @@ void ui_text_editor_open_file(const char *path)
     }
 }
 
-void ui_text_editor_exit(lv_obj_t *parent)
+static void ui_text_editor_exit(lv_obj_t *parent)
 {
     // Persist the buffer on every teardown path, not just do_exit(): the
     // AppManager can stop us from app-switching, sleep, or any code that
@@ -558,7 +548,6 @@ void ui_text_editor_exit(lv_obj_t *parent)
         quit_btn = NULL;
     }
     text_area = NULL;
-    word_count_label = NULL;
     disable_keyboard();
     current_file_path = "";
 }

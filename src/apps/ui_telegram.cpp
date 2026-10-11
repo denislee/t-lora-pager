@@ -42,6 +42,7 @@
 #include "../hal/secrets.h"
 #include "../hal/hub.h"
 #include "../hal/nvs.h"
+#include "../hal/str_encode.h"
 #include "../core/app.h"
 #include "../core/app_manager.h"
 #include "../core/notify.h"
@@ -96,6 +97,7 @@ static std::string load_token_plain() {
     return hal::secret_load(TG_PREFS_NS, "token_enc");
 }
 
+// secret_store trims the pasted whitespace that would break every Bot API URL.
 static bool save_token(const char *value, std::string *err) {
     bool ok = hal::secret_store(TG_PREFS_NS, "token_enc", value, err);
     // Clearing or rewriting the encrypted slot also nukes any legacy
@@ -103,12 +105,6 @@ static bool save_token(const char *value, std::string *err) {
     if (ok) hal::secret_purge_legacy(TG_PREFS_NS, "token");
     return ok;
 }
-
-static void purge_legacy_plaintext_token() {
-    hal::secret_purge_legacy(TG_PREFS_NS, "token");
-}
-
-static void scrub_string(std::string &s) { hal::secret_scrub(s); }
 
 // --- state ----------------------------------------------------------------
 
@@ -169,10 +165,12 @@ static std::vector<Message> s_msgs;
 // poll whose data is identical skips the full lv_obj_clean + rebuild (and, for
 // the chat list, avoids reseating the &s_chats[i] button user-data). Reset to
 // invalid whenever a page is (re)built so the first render always happens.
-static uint32_t s_chats_sig = 0;
 static bool     s_chats_sig_valid = false;
-static uint32_t s_msgs_sig = 0;
 static bool     s_msgs_sig_valid = false;
+#ifdef ARDUINO
+static uint32_t s_chats_sig = 0;
+static uint32_t s_msgs_sig = 0;
+#endif
 
 // Favorite chat IDs. The chat list in the Telegram app filters to this set;
 // the full list is only visible from Settings → Telegram → Favorites.
@@ -187,6 +185,8 @@ static bool s_favorites_loaded = false;
 // poll when the Telegram view is open, and by the background poll otherwise
 // (see tg_bg_timer below).
 static int s_unread_total = 0;
+
+#ifdef ARDUINO
 static lv_timer_t *s_bg_timer = nullptr;
 
 // Baseline for the background notifier. -1 means "not initialized yet": the
@@ -195,7 +195,6 @@ static lv_timer_t *s_bg_timer = nullptr;
 // notifiers only when `sum > s_last_notified_unread`.
 static int s_last_notified_unread = -1;
 
-#ifdef ARDUINO
 // s_bg_task is the single HTTPS worker slot, shared between the background
 // unread notifier and the foreground poll/send worker so the two never run a
 // TLS session at the same time (each costs several KB of internal heap).
@@ -335,6 +334,26 @@ static bool configured()
     return !s_base_url.empty() && !s_auth_header.empty();
 }
 
+// Floating label with a surface background behind the text only, used for
+// the status and chat-title pills. FLOATING keeps it out of the parent's
+// flex column so it overlays the list / history.
+static lv_obj_t *make_pill(lv_obj_t *parent, const char *text,
+                           lv_align_t align, int32_t x_ofs, int32_t y_ofs)
+{
+    lv_obj_t *pill = lv_label_create(parent);
+    lv_label_set_text(pill, text);
+    lv_obj_set_style_text_font(pill, get_telegram_font(), 0);
+    lv_obj_set_style_text_color(pill, UI_COLOR_FG, 0);
+    lv_obj_set_style_bg_color(pill, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(pill, 4, 0);
+    lv_obj_set_style_pad_ver(pill, 1, 0);
+    lv_obj_set_style_radius(pill, 2, 0);
+    lv_obj_add_flag(pill, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(pill, align, x_ofs, y_ofs);
+    return pill;
+}
+
 static void set_status(const char *text, lv_color_t color)
 {
     if (!s_status_label) return;
@@ -345,15 +364,6 @@ static void set_status(const char *text, lv_color_t color)
     else       lv_obj_clear_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
 }
 
-static std::string make_url(const char *path)
-{
-    std::string u = s_base_url;
-    if (!u.empty() && u.back() == '/') u.pop_back();
-    if (path && *path != '/') u.push_back('/');
-    if (path) u += path;
-    return u;
-}
-
 // Drop any codepoint the Telegram font (Inter + emoji fallback) can't
 // render so the label doesn't show a tofu rectangle for it. Ask LVGL
 // directly: lv_font_get_glyph_dsc walks the fallback chain, so ASCII +
@@ -362,6 +372,15 @@ static std::string make_url(const char *path)
 //
 // Also strips bare control bytes (except \n/\t) and discards malformed
 // UTF-8.
+//
+// Called on the UI thread (chat list / title pill) AND on the fg worker
+// (tg_parse_msgs). The worker call is safe in practice: every font
+// get_telegram_font() can return is a const lv_font_fmt_txt font (LVGL 9's
+// fmt_txt glyph lookup keeps no mutable cache), so lv_font_get_glyph_dsc
+// only reads constant tables. Caveats: get_telegram_font() lazily builds the
+// Inter+emoji fallback chain on first use (unsynchronised, but always first
+// reached from the UI thread when the view is built) and copies the settings
+// struct without a lock.
 static std::string ascii_safe(const std::string &in)
 {
     std::string out;
@@ -399,32 +418,15 @@ static std::string ascii_safe(const std::string &in)
     return out;
 }
 
-// Serialize a single {"text":"..."} JSON body with minimal escaping.
+#ifdef ARDUINO
+// Serialize a single {"text":"..."} JSON body.
 static std::string json_text_body(const char *text)
 {
-    std::string b;
-    b.reserve(16 + (text ? strlen(text) : 0));
-    b += "{\"text\":\"";
-    for (const char *p = text; p && *p; p++) {
-        char c = *p;
-        switch (c) {
-            case '"':  b += "\\\""; break;
-            case '\\': b += "\\\\"; break;
-            case '\n': b += "\\n";  break;
-            case '\r':              break;
-            case '\t': b += "\\t";  break;
-            default:
-                if ((unsigned char)c >= 0x20) b.push_back(c);
-                break;
-        }
-    }
-    b += "\"}";
-    return b;
+    return "{\"text\":\"" + hal::json_escape(text ? text : "") + "\"}";
 }
 
 // --- HTTP -----------------------------------------------------------------
 
-#ifdef ARDUINO
 // Cached internet reachability. WiFi-associated does not imply the bridge is
 // reachable (captive portals, ISP outage, DNS down), and the bridge HTTPS
 // timeout is multi-second — so we probe TCP/53 to 1.1.1.1 and cache the
@@ -484,13 +486,6 @@ static bool internet_available()
     return s_inet_ok;
 }
 
-static bool require_internet(std::string *err)
-{
-    if (internet_available()) return true;
-    if (err) *err = hw_get_wifi_connected() ? "No internet" : "WiFi not connected";
-    return false;
-}
-
 static bool tg_http_request(const std::string &url, const char *method,
                             const char *body, size_t body_len,
                             const char *content_type, const char *auth_header,
@@ -524,10 +519,23 @@ static bool tg_http_request(const std::string &url, const char *method,
         cJSON_Delete(req);
         
         if (!req_body.empty()) {
-            return hw_http_request(proxy_url.c_str(), "POST",
-                                   req_body.c_str(), req_body.size(),
-                                   "application/json", nullptr,
-                                   out_body, out_code, err);
+            int pcode = 0;
+            if (hw_http_request(proxy_url.c_str(), "POST",
+                                req_body.c_str(), req_body.size(),
+                                "application/json", nullptr,
+                                out_body, &pcode, err)) {
+                if (out_code) *out_code = pcode;
+                return true;
+            }
+            // P6.28: the hub proxy answers 4xx for a URL it won't forward (its
+            // allowlist predates the bridge API), and a transport failure means
+            // the hub went away — retry both directly. A 5xx is returned as-is:
+            // the hub may already have forwarded a POST (send / mark-read).
+            if (pcode >= 500) {
+                if (out_code) *out_code = pcode;
+                return false;
+            }
+            out_body.clear();
         }
     }
 #endif
@@ -535,21 +543,8 @@ static bool tg_http_request(const std::string &url, const char *method,
                            content_type, auth_header, out_body, out_code, err);
 }
 
-// Synchronous GET used only by the one-shot fetch_chat_title() lookup. The
-// polling/send path no longer goes through here — it runs on the async worker
-// (tg_fg_task) with url+auth captured up front, so it never touches these
-// UI-thread config globals off-thread.
-static bool tg_get(const char *path, std::string &out, std::string *err = nullptr)
-{
-    if (!require_internet(err)) return false;
-    std::string url = make_url(path);
-    int code = 0;
-    return tg_http_request(url, "GET", nullptr, 0, nullptr,
-                           s_auth_header.c_str(), out, &code, err);
-}
-#endif
-
 // --- chat list ------------------------------------------------------------
+// Rendering is driven by tg_drain_tick (hardware-only worker results).
 
 static void chat_click_cb(lv_event_t *e)
 {
@@ -620,8 +615,8 @@ static void render_msgs()
         lv_obj_t *row = lv_obj_create(wrap);
         lv_obj_set_width(row, lv_pct(85));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_style_bg_color(row, it->out ? lv_color_hex(0x3a3a3a)
-                                               : lv_color_hex(0x222222), 0);
+        lv_obj_set_style_bg_color(row, it->out ? lv_color_mix(UI_COLOR_ACCENT, UI_COLOR_SURFACE, LV_OPA_40)
+                                               : lv_color_mix(UI_COLOR_FG, UI_COLOR_SURFACE, LV_OPA_10), 0);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(row, UI_RADIUS, 0);
         lv_obj_set_style_pad_all(row, 6, 0);
@@ -668,14 +663,57 @@ static void render_msgs()
     lv_obj_scroll_to_y(s_msgs_holder, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
-#ifdef ARDUINO
 static void tg_drain_tick(lv_timer_t *t);   // fwd (defined after the kickers)
 
-// Parse a /v1/chats array (worker thread) into res->chats + unread_total.
-static void tg_parse_chats(cJSON *arr, FgResult *res)
+// Load the bridge URL and build the "Bearer <token>" header from NVS (worker
+// safe). On failure `auth` is empty and *err says what is missing; the token
+// plaintext never outlives this call except inside `auth`, which the caller
+// must hal::secret_scrub().
+static bool load_bridge_auth(std::string &url, std::string &auth, std::string *err)
 {
+    url = load_pref("url");
+    std::string tok = load_token_plain();
+    if (url.empty()) {
+        hal::secret_scrub(tok);
+        if (err) *err = "Bridge URL not set.";
+        return false;
+    }
+    if (tok.empty()) {
+        if (err) *err = token_is_encrypted()
+                        ? "Token locked — open Notes to unlock."
+                        : "Bearer token not set.";
+        return false;
+    }
+    auth = "Bearer " + tok;
+    hal::secret_scrub(tok);  // plaintext is now only inside `auth`
+    return true;
+}
+
+// GET <base_url>/v1/chats through tg_http_request (hub proxy first, direct
+// fallback) and parse it into `out`. Worker-safe: no LVGL, no shared state.
+// *unread_total (optional) gets the sum of the positive per-chat unread counts.
+static bool fetch_chats(std::string base_url, const std::string &auth,
+                        std::vector<Chat> &out, int *unread_total,
+                        std::string *err)
+{
+    out.clear();
+    if (unread_total) *unread_total = 0;
+    if (!base_url.empty() && base_url.back() == '/') base_url.pop_back();
+    char path[64];
+    snprintf(path, sizeof(path), "/v1/chats?limit=%d", TG_CHAT_LIMIT);
+    std::string body; int code = 0;
+    if (!tg_http_request(base_url + path, "GET", nullptr, 0, nullptr,
+                         auth.c_str(), body, &code, err)) {
+        return false;
+    }
+    cJSON *arr = cJSON_Parse(body.c_str());
+    if (!arr || !cJSON_IsArray(arr)) {
+        if (arr) cJSON_Delete(arr);
+        if (err) *err = "Parse error";
+        return false;
+    }
     int n = cJSON_GetArraySize(arr);
-    res->chats.reserve((size_t)n);
+    out.reserve((size_t)n);
     int unread_sum = 0;
     for (int i = 0; i < n; i++) {
         cJSON *it = cJSON_GetArrayItem(arr, i);
@@ -687,9 +725,11 @@ static void tg_parse_chats(cJSON *arr, FgResult *res)
         c.title  = (jti  && cJSON_IsString(jti))  ? jti->valuestring : "(no title)";
         c.unread = (junr && cJSON_IsNumber(junr)) ? (int)junr->valuedouble : 0;
         if (c.unread > 0) unread_sum += c.unread;
-        res->chats.push_back(std::move(c));
+        out.push_back(std::move(c));
     }
-    res->unread_total = unread_sum;
+    cJSON_Delete(arr);
+    if (unread_total) *unread_total = unread_sum;
+    return true;
 }
 
 // Parse a /v1/chats/{id}/messages array (worker thread) into res->msgs.
@@ -734,8 +774,9 @@ static int tg_parse_msgs(cJSON *arr, FgResult *res)
 
 // The HTTPS worker. Runs one request (chats / messages / send), parses into a
 // heap FgResult, and publishes it under the instance mutex for the drain tick.
-// Never touches the LVGL tree (parsing produces raw strings; ascii_safe/render
-// happen on the UI thread), so it is safe to outlive the app.
+// Never touches the LVGL tree (parsing produces plain strings; only rendering
+// happens on the UI thread), so it is safe to outlive the app. tg_parse_msgs
+// does run ascii_safe here, i.e. LVGL glyph lookups — see that function.
 static void tg_fg_task(void *arg)
 {
     FgReq *req = (FgReq *)arg;
@@ -751,23 +792,12 @@ static void tg_fg_task(void *arg)
     if (!base.empty() && base.back() == '/') base.pop_back();
 
     if (req->op == FG_FETCH_CHATS) {
-        char path[64];
-        snprintf(path, sizeof(path), "/v1/chats?limit=%d", TG_CHAT_LIMIT);
-        std::string body, err; int code = 0;
-        if (!tg_http_request(base + path, "GET", nullptr, 0, nullptr,
-                             req->auth.c_str(), body, &code, &err)) {
+        std::string err;
+        if (fetch_chats(base, req->auth, res->chats, &res->unread_total, &err)) {
+            res->ok = true;
+        } else {
             res->status = err;
             res->status_color = lv_palette_main(LV_PALETTE_RED);
-        } else {
-            cJSON *arr = cJSON_Parse(body.c_str());
-            if (!arr || !cJSON_IsArray(arr)) {
-                res->status = "Parse error";
-                res->status_color = lv_palette_main(LV_PALETTE_RED);
-            } else {
-                tg_parse_chats(arr, res);
-                res->ok = true;
-            }
-            if (arr) cJSON_Delete(arr);
         }
     } else if (req->op == FG_FETCH_MSGS) {
         char path[80];
@@ -838,7 +868,7 @@ static void tg_fg_task(void *arg)
         s_bg_task = nullptr;
     }
     if (res) delete res;
-    scrub_string(req->auth);
+    hal::secret_scrub(req->auth);
     delete req;
     vTaskDelete(NULL);
 }
@@ -866,12 +896,12 @@ static FgReq *make_req(FgOp op)
 // after freeing req — if the single worker slot is busy or the spawn fails.
 static bool kick_worker(FgReq *req)
 {
-    if (s_bg_task != nullptr) { scrub_string(req->auth); delete req; return false; }
+    if (s_bg_task != nullptr) { hal::secret_scrub(req->auth); delete req; return false; }
     // 8 KB stack: the mbedtls TLS handshake + cert chain dominates, same as the
     // weather worker; parsing 30 chats / 20 messages is cheap next to it.
     if (xTaskCreate(tg_fg_task, "tg_fg", 8192, req, 2, &s_bg_task) != pdPASS) {
         s_bg_task = nullptr;
-        scrub_string(req->auth);
+        hal::secret_scrub(req->auth);
         delete req;
         return false;
     }
@@ -1020,10 +1050,14 @@ static void kick_send(const char *) {}
 
 // --- polling --------------------------------------------------------------
 
+static void stop_timer()
+{
+    if (s_timer) { lv_timer_del(s_timer); s_timer = nullptr; }
+}
+
+#ifdef ARDUINO
 static void poll_tick(lv_timer_t *t)
 {
-    (void)t;
-#ifdef ARDUINO
     if (!configured()) return;
     if (!internet_available()) {
         set_status("No internet", UI_COLOR_MUTED);
@@ -1054,12 +1088,6 @@ static void poll_tick(lv_timer_t *t)
     // earlier overlap with the notifier may have dropped us to a 1 s retry).
     if (kicked)
         lv_timer_set_period(t, s_view == V_CHAT ? TG_CHAT_POLL_MS : TG_LIST_POLL_MS);
-#endif
-}
-
-static void stop_timer()
-{
-    if (s_timer) { lv_timer_del(s_timer); s_timer = nullptr; }
 }
 
 static void start_timer(uint32_t period_ms)
@@ -1067,6 +1095,7 @@ static void start_timer(uint32_t period_ms)
     stop_timer();
     s_timer = lv_timer_create(poll_tick, period_ms, nullptr);
 }
+#endif
 
 // --- view switching -------------------------------------------------------
 
@@ -1182,19 +1211,8 @@ static void msgs_holder_event_cb(lv_event_t *e)
     } else if (code == LV_EVENT_KEY) {
         if (!lv_group_get_editing(g) ||
             lv_group_get_focused(g) != holder) return;
-        uint32_t key = lv_event_get_key(e);
-        int32_t step = 40;
-        if (key == LV_KEY_UP || key == LV_KEY_LEFT) {
-            int32_t cur_y = lv_obj_get_scroll_y(holder);
-            if (cur_y < step) step = cur_y;
-            if (step > 0) lv_obj_scroll_by(holder, 0, step, LV_ANIM_ON);
+        if (ui_scroll_key_clamped(holder, lv_event_get_key(e), 40, LV_ANIM_ON))
             lv_event_stop_processing(e);
-        } else if (key == LV_KEY_DOWN || key == LV_KEY_RIGHT) {
-            int32_t bottom = lv_obj_get_scroll_bottom(holder);
-            if (bottom < step) step = bottom;
-            if (step > 0) lv_obj_scroll_by(holder, 0, -step, LV_ANIM_ON);
-            lv_event_stop_processing(e);
-        }
     }
 }
 
@@ -1262,20 +1280,9 @@ static void show_chat_list()
     lv_obj_set_style_border_width(s_list_holder, 0, 0);
     lv_obj_set_style_pad_top(s_list_holder, 0, 0);
 
-    // Floating status pill at bottom-right, black bg on text only.
-    // FLOATING keeps it out of the flex column so it overlays the list.
-    s_status_label = lv_label_create(s_root);
-    lv_label_set_text(s_status_label, "");
-    lv_obj_set_style_text_font(s_status_label, get_telegram_font(), 0);
-    lv_obj_set_style_text_color(s_status_label, UI_COLOR_FG, 0);
-    lv_obj_set_style_bg_color(s_status_label, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_status_label, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_hor(s_status_label, 4, 0);
-    lv_obj_set_style_pad_ver(s_status_label, 1, 0);
-    lv_obj_set_style_radius(s_status_label, 2, 0);
-    lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_FLOATING);
+    // Floating status pill at bottom-right, overlaying the list.
+    s_status_label = make_pill(s_root, "", LV_ALIGN_BOTTOM_RIGHT, -4, -4);
     lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
 
     if (!configured()) {
         set_status("Not configured — Settings → Telegram", UI_COLOR_MUTED);
@@ -1350,34 +1357,14 @@ static void show_chat(long long id, const char *title)
     lv_obj_add_event_cb(s_msgs_holder, msgs_holder_event_cb, LV_EVENT_FOCUSED, nullptr);
     lv_obj_add_event_cb(s_msgs_holder, msgs_holder_event_cb, LV_EVENT_DEFOCUSED, nullptr);
 
-    // Floating chat-title pill at the top-right of the history area, with a
-    // black background behind the text only.
-    lv_obj_t *title_pill = lv_label_create(msgs_wrap);
-    lv_label_set_text(title_pill, ascii_safe(s_current_chat_title).c_str());
-    lv_obj_set_style_text_color(title_pill, UI_COLOR_FG, 0);
-    lv_obj_set_style_text_font(title_pill, get_telegram_font(), 0);
-    lv_obj_set_style_bg_color(title_pill, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(title_pill, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_hor(title_pill, 4, 0);
-    lv_obj_set_style_pad_ver(title_pill, 1, 0);
-    lv_obj_set_style_radius(title_pill, 2, 0);
-    lv_obj_add_flag(title_pill, LV_OBJ_FLAG_FLOATING);
-    lv_obj_align(title_pill, LV_ALIGN_TOP_RIGHT, -2, 2);
+    // Floating chat-title pill at the top-right of the history area.
+    make_pill(msgs_wrap, ascii_safe(s_current_chat_title).c_str(),
+              LV_ALIGN_TOP_RIGHT, -2, 2);
 
     // Status label floats at bottom-right of history too, same style, so
     // errors/send feedback don't steal a line of message area.
-    s_status_label = lv_label_create(msgs_wrap);
-    lv_label_set_text(s_status_label, "");
-    lv_obj_set_style_text_font(s_status_label, get_telegram_font(), 0);
-    lv_obj_set_style_text_color(s_status_label, UI_COLOR_FG, 0);
-    lv_obj_set_style_bg_color(s_status_label, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_status_label, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_hor(s_status_label, 4, 0);
-    lv_obj_set_style_pad_ver(s_status_label, 1, 0);
-    lv_obj_set_style_radius(s_status_label, 2, 0);
-    lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_FLOATING);
+    s_status_label = make_pill(msgs_wrap, "", LV_ALIGN_BOTTOM_RIGHT, -2, -2);
     lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_RIGHT, -2, -2);
 
     s_input_ta = lv_textarea_create(s_root);
     lv_textarea_set_one_line(s_input_ta, true);
@@ -1433,45 +1420,10 @@ static void show_not_configured()
 
 // --- App ------------------------------------------------------------------
 
-#ifdef ARDUINO
-// One-shot title lookup for the single-favorite shortcut path: hits
-// /v1/chats and returns the title for the given id, or "" on any failure.
-// Used to backfill titles for favorites added by builds that didn't cache
-// them, so the chat-screen pill reads the actual person name instead of
-// a placeholder.
-static std::string fetch_chat_title(long long id)
-{
-    std::string body, err;
-    char path[64];
-    snprintf(path, sizeof(path), "/v1/chats?limit=%d", TG_CHAT_LIMIT);
-    if (!tg_get(path, body, &err)) return std::string();
-    cJSON *arr = cJSON_Parse(body.c_str());
-    if (!arr || !cJSON_IsArray(arr)) {
-        if (arr) cJSON_Delete(arr);
-        return std::string();
-    }
-    std::string title;
-    int n = cJSON_GetArraySize(arr);
-    for (int i = 0; i < n; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
-        cJSON *jid = cJSON_GetObjectItemCaseSensitive(it, "id");
-        if (jid && cJSON_IsNumber(jid) && (long long)jid->valuedouble == id) {
-            cJSON *jti = cJSON_GetObjectItemCaseSensitive(it, "title");
-            if (jti && cJSON_IsString(jti) && jti->valuestring) {
-                title = jti->valuestring;
-            }
-            break;
-        }
-    }
-    cJSON_Delete(arr);
-    return title;
-}
-#endif
-
 // Single-favorite shortcut: skip the chat list and drop the user straight
 // into their one favorited chat. If we never cached the title (favorite
-// added by an older build), do a one-shot lookup over HTTP and persist it
-// so subsequent opens are instant.
+// added by an older build), show a generic "Chat" title rather than block
+// the UI on an HTTP lookup.
 static void show_default_view()
 {
     if (s_favorites.size() == 1) {
@@ -1490,6 +1442,7 @@ static void show_default_view()
     show_chat_list();
 }
 
+#ifdef ARDUINO
 static void on_unlocked(bool ok, void *)
 {
     if (!ok) {
@@ -1505,6 +1458,7 @@ static void on_unlocked(bool ok, void *)
         show_not_configured();
     }
 }
+#endif
 
 class TelegramApp : public core::App {
 public:
@@ -1583,7 +1537,7 @@ public:
         s_msgs.clear();
         // Wipe the plaintext bearer header; clear() keeps capacity, so we
         // overwrite the buffer before release.
-        scrub_string(s_auth_header);
+        hal::secret_scrub(s_auth_header);
         s_base_url.clear();
         core::App::onStop();
     }
@@ -1598,6 +1552,7 @@ public:
 static int8_t s_notif_toast_cache = -1;
 static int8_t s_notif_vib_cache   = -1;
 
+#ifdef ARDUINO
 static bool notif_toast_enabled()
 {
     if (s_notif_toast_cache < 0)
@@ -1632,72 +1587,30 @@ static void fire_notifications(int delta)
             n.title = buf;
         }
         n.severity = core::notify::Severity::Info;
-        n.source   = "telegram";
         n.haptic   = vib;   // bus buzzes once with the banner
         core::notify::post(std::move(n));
     } else if (vib) {
-#ifdef ARDUINO
         // Toast disabled but haptic still on — fire directly. hw_feedback
         // no-ops when the global haptic toggle is off.
         hw_feedback();
-#endif
     }
 }
 
-#ifdef ARDUINO
 static void tg_bg_task(void *arg)
 {
-    std::string url   = load_pref("url");
-    std::string token = load_token_plain();
-    if (url.empty() || token.empty()) {
-        scrub_string(token);
-        s_bg_task = nullptr;
-        vTaskDelete(NULL);
-        return;
-    }
-    if (!internet_available()) {
-        scrub_string(token);
-        s_bg_task = nullptr;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    std::string auth = "Bearer " + token;
-    scrub_string(token);  // plaintext is now only inside `auth`
-    if (!url.empty() && url.back() == '/') url.pop_back();
-    url += "/v1/chats?limit=";
-    char n[8]; snprintf(n, sizeof(n), "%d", TG_CHAT_LIMIT); url += n;
-
-    std::string body; int code = 0;
-    bool http_ok = hw_http_request(url.c_str(), "GET", nullptr, 0, nullptr,
-                                   auth.c_str(), body, &code, nullptr);
-    scrub_string(auth);
-    if (!http_ok) { 
-        s_bg_task = nullptr;
-        vTaskDelete(NULL); 
-        return; 
-    }
-
-    cJSON *arr = cJSON_Parse(body.c_str());
-    if (!arr || !cJSON_IsArray(arr)) { 
-        if (arr) cJSON_Delete(arr); 
-        s_bg_task = nullptr;
-        vTaskDelete(NULL); 
-        return; 
-    }
+    (void)arg;
+    // Worker-safe gate only: tg_bg_tick() already checked the cached internet
+    // verdict on the UI thread, and internet_available() itself is UI-thread
+    // only (it reads lv_tick and may spawn the probe task).
+    std::string url, auth;
+    std::vector<Chat> chats;
     int sum = 0;
-    int sz  = cJSON_GetArraySize(arr);
-    for (int i = 0; i < sz; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
-        cJSON *ju = cJSON_GetObjectItemCaseSensitive(it, "unread");
-        if (ju && cJSON_IsNumber(ju)) {
-            int u = (int)ju->valuedouble;
-            if (u > 0) sum += u;
-        }
-    }
-    cJSON_Delete(arr);
+    bool ok = hw_get_wifi_connected() &&
+              load_bridge_auth(url, auth, nullptr) &&
+              fetch_chats(url, auth, chats, &sum, nullptr);
+    hal::secret_scrub(auth);
 
-    {
+    if (ok) {
         core::ScopedInstanceLock lock;
         s_unread_total = sum;
 
@@ -1756,7 +1669,10 @@ APP_FACTORY(make_telegram_app, TelegramApp)
 
 int tg_get_unread_count() { return s_unread_total; }
 
-// --- config helpers called from ui_settings.cpp ---------------------------
+// --- config helpers called from settings_telegram.cpp ---------------------
+// Their only callers run inside the Settings app, after TelegramApp::onStop
+// has reset s_view to V_NONE, so none of them needs to refresh an open view:
+// onStart re-reads the config and re-renders from scratch.
 
 std::string tg_cfg_get_url()
 {
@@ -1766,27 +1682,17 @@ std::string tg_cfg_get_url()
 void tg_cfg_set_url(const char *url)
 {
     save_pref("url", url ? url : "");
-    if (s_view != V_NONE) reload_config();
 }
 
-// Returns a masked representation suitable for display: "(not set)",
-// "(locked)" when the token is encrypted but the notes session isn't
-// unlocked, or "********abcd" showing the last four characters.
+// Masked form for the Settings label — see hal::secret_mask_display.
 std::string tg_cfg_get_token_display()
 {
-    std::string tok = load_token_plain();
-    if (tok.empty()) {
-        return token_is_encrypted() ? "(locked)" : "(not set)";
-    }
-    if (tok.size() <= 8) return "********";
-    return std::string("********") + tok.substr(tok.size() - 4);
+    return hal::secret_mask_display(TG_PREFS_NS, "token_enc");
 }
 
 bool tg_cfg_set_token(const char *tok, std::string *err)
 {
-    bool ok = save_token(tok ? tok : "", err);
-    if (ok && s_view != V_NONE) reload_config();
-    return ok;
+    return save_token(tok ? tok : "", err);
 }
 
 bool tg_cfg_token_is_encrypted()
@@ -1824,14 +1730,6 @@ void tg_cfg_set_favorite(long long id, const char *title, bool on)
         if (s_favorite_titles.erase(id) > 0) changed = true;
     }
     if (changed) save_favorites();
-    // If the chat list view is on screen, re-render so the filter is
-    // immediately reflected when the user comes back from settings. Invalidate
-    // the render signature: the favorite set (which gates the signature) just
-    // changed, so the next poll must re-evaluate rather than skip.
-    if (s_view == V_LIST) {
-        s_chats_sig_valid = false;
-        render_chats();
-    }
 }
 
 bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
@@ -1839,49 +1737,23 @@ bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
 {
     out.clear();
 #ifdef ARDUINO
-    std::string url = load_pref("url");
-    std::string tok = load_token_plain();
-    if (url.empty()) { scrub_string(tok); if (err) *err = "Bridge URL not set."; return false; }
-    if (tok.empty()) {
-        if (err) *err = token_is_encrypted()
-                        ? "Token locked — open Notes to unlock."
-                        : "Bearer token not set.";
+    // Runs on the Settings favourites worker, so only worker-safe checks here
+    // (internet_available() is UI-thread only).
+    std::string url, auth;
+    if (!load_bridge_auth(url, auth, err)) return false;
+    if (!hw_get_wifi_connected()) {
+        hal::secret_scrub(auth);
+        if (err) *err = "WiFi not connected";
         return false;
     }
-    if (!internet_available()) {
-        scrub_string(tok);
-        if (err) *err = hw_get_wifi_connected() ? "No internet" : "WiFi not connected";
-        return false;
+    std::vector<Chat> chats;
+    bool ok = fetch_chats(url, auth, chats, nullptr, err);
+    hal::secret_scrub(auth);
+    if (!ok) return false;
+    out.reserve(chats.size());
+    for (auto &c : chats) {
+        if (c.id != 0) out.emplace_back(c.id, std::move(c.title));
     }
-    std::string auth = "Bearer " + tok;
-    scrub_string(tok);  // plaintext is now only inside `auth`
-    if (!url.empty() && url.back() == '/') url.pop_back();
-    char limitpart[32];
-    snprintf(limitpart, sizeof(limitpart), "/v1/chats?limit=%d", TG_CHAT_LIMIT);
-    std::string full = url + limitpart;
-    std::string body;
-    int code = 0;
-    bool http_ok = tg_http_request(full, "GET", nullptr, 0, nullptr,
-                                   auth.c_str(), body, &code, err);
-    scrub_string(auth);
-    if (!http_ok) return false;
-    cJSON *arr = cJSON_Parse(body.c_str());
-    if (!arr || !cJSON_IsArray(arr)) {
-        if (arr) cJSON_Delete(arr);
-        if (err) *err = "Parse error";
-        return false;
-    }
-    int n = cJSON_GetArraySize(arr);
-    out.reserve((size_t)n);
-    for (int i = 0; i < n; i++) {
-        cJSON *it = cJSON_GetArrayItem(arr, i);
-        cJSON *jid = cJSON_GetObjectItemCaseSensitive(it, "id");
-        cJSON *jti = cJSON_GetObjectItemCaseSensitive(it, "title");
-        long long id = (jid && cJSON_IsNumber(jid)) ? (long long)jid->valuedouble : 0;
-        std::string title = (jti && cJSON_IsString(jti)) ? jti->valuestring : "(no title)";
-        if (id != 0) out.emplace_back(id, std::move(title));
-    }
-    cJSON_Delete(arr);
     return true;
 #else
     (void)out;
@@ -1892,10 +1764,6 @@ bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
 
 void tg_begin_background_poll() {
 #ifdef ARDUINO
-    // First call at boot: drop any plaintext bearer a pre-hardening build
-    // may have left. Cheap no-op afterwards so the idempotent double-call
-    // pattern this function already tolerates still holds.
-    purge_legacy_plaintext_token();
     if (s_bg_timer) return;
     // Start at the fast cadence (TG_BG_POLL_FAST_MS = 60 s).  tg_bg_tick()
     // backs off to TG_BG_POLL_SLOW_MS (5 min) once the LVGL inactive time

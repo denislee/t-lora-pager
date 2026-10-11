@@ -8,7 +8,6 @@
 
 // --- WiFi ---
 void hw_get_wifi_ssid(std::string &param);
-wl_status_t hw_get_wifi_status();
 void hw_get_ip_address(std::string &param);
 int16_t hw_get_wifi_rssi();
 
@@ -79,13 +78,17 @@ bool hw_http_request(const char *url,
 // Quick internet reachability test. Opens a TCP connection to `host:port` with
 // `timeout_ms`, returns true on success. On success `elapsed_ms` (optional)
 // receives the round-trip time to connect. On failure `error` (optional) gets
-// a short diagnostic. Defaults target Cloudflare DNS (1.1.1.1:53) since it is
-// always-up, firewall-friendly, and does not require ICMP.
-bool hw_ping_internet(const char *host = "1.1.1.1",
-                      uint16_t port = 53,
-                      uint32_t timeout_ms = 3000,
-                      uint32_t *elapsed_ms = nullptr,
-                      std::string *error = nullptr);
+// a short diagnostic.
+bool hw_ping_internet(const char *host, uint16_t port, uint32_t timeout_ms,
+                      uint32_t *elapsed_ms, std::string *error);
+
+// The default probe: Cloudflare DNS (1.1.1.1:53) with a 3 s timeout — always
+// up, firewall-friendly, and does not require ICMP.
+inline bool hw_ping_internet(uint32_t *elapsed_ms = nullptr,
+                             std::string *error = nullptr)
+{
+    return hw_ping_internet("1.1.1.1", 53, 3000, elapsed_ms, error);
+}
 
 // --- BLE ---
 bool hw_get_bt_enable();

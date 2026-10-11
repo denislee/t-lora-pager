@@ -15,15 +15,12 @@
 
 #ifdef ARDUINO
 
-#include <Arduino.h>
 #include <lvgl.h>
 #include <LV_Helper.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 #include "../core/scoped_lock.h"
 #include "../core/system.h"
-#include "../core/system_hooks.h"
+#include "task_util.h"
 
 namespace {
 
@@ -34,11 +31,6 @@ namespace {
 // for UI responsiveness without the starvation hazard.
 constexpr UBaseType_t kTaskPriority = 8;
 constexpr BaseType_t  kTaskCore     = 1;
-// Fallback re-check cadence while the display is off. Normally the task is
-// woken instantly by hw_lvgl_task_notify_wake() (from ui_resume_timers() on
-// wake or an editor-switch); this 1 s timeout is only a safety net so a
-// missed notify still recovers, without waking 5×/s as the 200 ms value did.
-constexpr uint32_t    kFakeSleepIdleMs = 1000;
 // Cap for lv_timer_handler()'s returned deadline while the display is on.
 // lv_timer_handler() returns the real next deadline — small values when
 // animations or timers are running, and large values (≥ LV_DEF_REFR_PERIOD =
@@ -64,14 +56,11 @@ TaskHandle_t s_task = nullptr;
 void lvgl_task_fn(void *)
 {
     for (;;) {
-        if (ui_is_fake_sleep()) {
-            // Nothing to render while the display is off. Block until a wake /
-            // editor-switch notification arrives instead of spinning at 20 Hz;
-            // the timeout is a safety net so a missed notify still gets
-            // re-checked within kFakeSleepIdleMs.
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kFakeSleepIdleMs));
-            continue;
-        }
+        // Nothing to render while the display is off. Block until a wake /
+        // editor-switch notification (hw_lvgl_task_notify_wake() from
+        // ui_resume_timers()) arrives instead of spinning; the hal::kTaskParkMs
+        // timeout is only a safety net so a missed notify still recovers.
+        if (hal::park_if_fake_sleep()) continue;
 
         uint32_t next;
         {
@@ -95,24 +84,13 @@ void lvgl_task_fn(void *)
 
 }  // namespace
 
-void hw_lvgl_task_notify_wake()
-{
-    // Safe from any task context; a give while the task is running (not
-    // blocked) simply leaves the notification pending for the next take.
-    if (s_task) xTaskNotifyGive(s_task);
-}
+void hw_lvgl_task_notify_wake() { hal::notify_task(s_task); }
 
 void hw_lvgl_task_start()
 {
     if (s_task) return;
-
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        lvgl_task_fn, "lvgl", kStackBytes, nullptr,
-        kTaskPriority, &s_task, kTaskCore);
-    if (ok != pdPASS) {
-        log_e("lvgl_task: task create failed");
-        s_task = nullptr;
-    }
+    hal::start_pinned_task(lvgl_task_fn, "lvgl", kStackBytes,
+                           kTaskPriority, kTaskCore, &s_task, "lvgl_task");
 }
 
 #else  // !ARDUINO

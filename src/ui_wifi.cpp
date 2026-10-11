@@ -16,15 +16,12 @@
 namespace {
 
 struct WifiCtx {
-    lv_obj_t *overlay      = nullptr;
+    ui_overlay_t ov        = {};
     lv_obj_t *status_label = nullptr;
     lv_obj_t *list         = nullptr;
     lv_obj_t *scan_btn     = nullptr;
     lv_obj_t *forget_btn   = nullptr;
     lv_timer_t *poll_timer = nullptr;
-    lv_group_t *group      = nullptr;
-    lv_group_t *prev_group = nullptr;
-    lv_event_cb_t prev_back_cb = nullptr;
     bool scan_in_flight    = false;
     bool connect_in_flight = false;
     std::string pending_ssid;
@@ -260,7 +257,7 @@ static void populate_list(const std::vector<wifi_scan_params_t> &nets)
         lv_obj_set_user_data(btn, (void *)(intptr_t)g_ctx->displayed_ssids.size());
         g_ctx->displayed_ssids.push_back(n.ssid);
         lv_obj_add_event_cb(btn, net_clicked_cb, LV_EVENT_CLICKED, nullptr);
-        lv_group_add_obj(g_ctx->group, btn);
+        lv_group_add_obj(g_ctx->ov.group, btn);
     }
 }
 
@@ -315,44 +312,10 @@ static void tear_down()
     if (ctx->poll_timer) {
         lv_timer_del(ctx->poll_timer);
     }
-    if (ctx->overlay) {
-        lv_obj_del(ctx->overlay);
-    }
-    if (ctx->group) {
-        lv_group_del(ctx->group);
-    }
-    if (ctx->prev_group) {
-        set_default_group(ctx->prev_group);
-    }
-    // Restore the previous back-button handler so the underlying screen (the
-    // Settings subpage that opened us) keeps working. ui_show_back_button
-    // re-adds the button to the now-restored default group.
-    if (ctx->prev_back_cb) {
-        ui_show_back_button(ctx->prev_back_cb);
-    }
+    // Also restores the previous back-button handler so the underlying
+    // screen (the Settings subpage that opened us) keeps working.
+    ui_overlay_close(&ctx->ov);
     delete ctx;
-}
-
-static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
-{
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_style_radius(btn, UI_RADIUS, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x151515), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a1a00), LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_height(btn, LV_SIZE_CONTENT);
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_color(lbl, UI_COLOR_FG, 0);
-    lv_obj_center(lbl);
-    if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
-    return btn;
 }
 
 } /* namespace */
@@ -363,41 +326,11 @@ void ui_wifi_networks_open()
     WifiCtx *ctx = new WifiCtx();
     g_ctx = ctx;
 
-    ctx->prev_group = lv_group_get_default();
-    ctx->prev_back_cb = ui_get_back_button_cb();
-    ctx->group = lv_group_create();
-    lv_group_set_wrap(ctx->group, false);
-    set_default_group(ctx->group);
-
     // Re-point the status-bar back button at our close handler so both touch
     // and keyboard navigation land on a working "back" inside this overlay.
-    // ui_show_back_button adds the button to the current default group, which
-    // we've just set to ours, so it becomes keyboard-reachable too.
-    ui_show_back_button(close_event_cb);
-
-    enable_keyboard();
-
-    // Match the status-bar height so the overlay sits just below it instead
-    // of covering it — users still see time/battery/etc. while picking a
-    // network. Formula mirrors core::System::setupGlobalUI().
-    const lv_font_t *header_font = get_header_font();
-    int32_t bar_h = lv_font_get_line_height(header_font) + 8;
-    if (bar_h < 30) bar_h = 30;
-    int32_t v_res = lv_display_get_vertical_resolution(NULL);
-    if (v_res <= 0) v_res = 222;
-
-    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
-    ctx->overlay = overlay;
-    lv_obj_set_size(overlay, lv_pct(100), v_res - bar_h);
-    lv_obj_align(overlay, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(overlay, UI_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
-    lv_obj_set_style_pad_all(overlay, 8, 0);
-    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(overlay, 6, 0);
+    // The overlay sits just below the status bar instead of covering it —
+    // users still see time/battery/etc. while picking a network.
+    lv_obj_t *overlay = ui_overlay_open(&ctx->ov, close_event_cb, false);
 
     /* Button row: Scan, Forget. Close is handled by the status-bar back
      * button, re-pointed to close_event_cb above. */
@@ -412,15 +345,15 @@ void ui_wifi_networks_open()
     lv_obj_set_style_pad_column(row, 4, 0);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-    ctx->scan_btn   = build_button(row, LV_SYMBOL_REFRESH " Scan",  scan_event_cb);
-    ctx->forget_btn = build_button(row, LV_SYMBOL_TRASH   " Forget", forget_event_cb);
+    ctx->scan_btn   = ui_modal_btn_create(row, LV_SYMBOL_REFRESH " Scan",  scan_event_cb, nullptr);
+    ctx->forget_btn = ui_modal_btn_create(row, LV_SYMBOL_TRASH   " Forget", forget_event_cb, nullptr);
     lv_obj_set_flex_grow(ctx->scan_btn,   1);
     lv_obj_set_flex_grow(ctx->forget_btn, 1);
     if (!hw_wifi_has_saved()) {
         lv_obj_add_state(ctx->forget_btn, LV_STATE_DISABLED);
     }
-    lv_group_add_obj(ctx->group, ctx->scan_btn);
-    lv_group_add_obj(ctx->group, ctx->forget_btn);
+    lv_group_add_obj(ctx->ov.group, ctx->scan_btn);
+    lv_group_add_obj(ctx->ov.group, ctx->forget_btn);
 
     /* Status line under the buttons. */
     ctx->status_label = lv_label_create(overlay);

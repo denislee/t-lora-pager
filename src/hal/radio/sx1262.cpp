@@ -24,11 +24,9 @@ void default_params(radio_params_t &params)
     params.bandwidth = 125.0;
     params.freq      = RADIO_DEFAULT_FREQUENCY;
     params.cr        = 5;
-    params.isRunning = false;
     params.mode      = RADIO_DISABLE;
     params.sf        = 12;
     params.power     = 22;
-    params.interval  = 3000;
     params.syncWord  = 0xCD;
 }
 

@@ -6,7 +6,6 @@
 #include "internal.h"
 #include "board_config.h"
 #include "system.h"
-#include "storage.h"
 #include "core/system_hooks.h"
 #include "ca_certs.h"   // P4.27 root CA bundle
 
@@ -16,11 +15,13 @@
 #include <esp_wifi.h>      // esp_wifi_set_ps() for fine-grained power-save control
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <SD.h>
-#include <FFat.h>
 #include <Preferences.h>
-#define CONFIG_BLE_KEYBOARD
-#if defined(USING_BLE_KEYBOARD)
+#include "task_util.h"
+// board_config.h defines USING_BLE_KEYBOARD for every supported board, so the
+// BLE keyboard code below is guarded on ARDUINO alone.
+#if !defined(USING_BLE_KEYBOARD)
+#error "USING_BLE_KEYBOARD is expected on every board (see hal/board_config.h)"
+#endif
 #include <BleKeyboard.h>
 #include <NimBLEDevice.h>
 #include <NimBLEServer.h>
@@ -61,8 +62,7 @@ static void ble_kb_keepalive_task(void *)
         // here removes the 1 Hz wakes. was_connected is cleared so conn-params
         // re-apply on the next real connect after wake. ui_resume_timers()
         // calls hw_ble_kb_task_notify_wake() to unblock immediately on wake.
-        if (ui_is_fake_sleep()) {
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        if (hal::park_if_fake_sleep()) {
             was_connected = false;
             continue;
         }
@@ -84,7 +84,6 @@ static void ble_kb_keepalive_task(void *)
         vTaskDelay(pdMS_TO_TICKS(now_connected ? 1000 : 5000));
     }
 }
-#endif
 
 #define WIFI_PREFS_NS     "wifi_cred"
 #define WIFI_PREFS_COUNT  "count"
@@ -192,15 +191,6 @@ void hw_get_wifi_ssid(std::string &param)
     param = WiFi.isConnected() ?  WiFi.SSID().c_str() : "N.A";
 #else
     param = "NO CONFIG";
-#endif
-}
-
-wl_status_t hw_get_wifi_status()
-{
-#ifdef ARDUINO
-    return WiFi.status();
-#else
-    return WL_NO_SSID_AVAIL;
 #endif
 }
 
@@ -470,7 +460,7 @@ namespace {
 //
 // There is no setInsecure() fallback on failure — that would reintroduce the
 // downgrade this fixes. A validation failure surfaces as a failed request.
-static void setup_secure_for_url(WiFiClientSecure &sec, const char * /*url*/)
+static void setup_secure(WiFiClientSecure &sec)
 {
     sec.setCACertBundle(kRootCaBundle);
 }
@@ -488,7 +478,7 @@ static bool http_open(HttpClients &c, const char *url, std::string *error)
         if (error) *error = "WiFi not connected.";
         return false;
     }
-    setup_secure_for_url(c.secure, url);   // P4.27: cert validation
+    setup_secure(c.secure);                // P4.27: cert validation
     c.http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     c.http.setTimeout(5000);
     c.http.setConnectTimeout(5000);
@@ -582,7 +572,7 @@ bool hw_http_request(const char *url,
         return false;
     }
     HttpClients c;
-    setup_secure_for_url(c.secure, url);   // P4.27: cert validation
+    setup_secure(c.secure);                // P4.27: cert validation
     c.http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     c.http.setTimeout(5000);
     c.http.setConnectTimeout(5000);
@@ -748,9 +738,8 @@ const char *hw_get_ble_kb_name()
 
 void hw_set_ble_kb_enable()
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-#ifdef CONFIG_BLE_KEYBOARD
-    bleKeyboard.setName("lilygo-pager");
+#ifdef ARDUINO
+    bleKeyboard.setName(hw_get_ble_kb_name());
     bleKeyboard.begin();
     // PB.12/Lever4: lower TX power from the +3 dBm default to 0 dBm.
     // A BLE HID keyboard is used at < 1 m; the extra 3 dB buys nothing while
@@ -767,12 +756,11 @@ void hw_set_ble_kb_enable()
                     tskIDLE_PRIORITY + 1, &ble_kb_keepalive_handle);
     }
 #endif
-#endif
 }
 
 void hw_set_ble_kb_disable()
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
+#ifdef ARDUINO
     if (ble_kb_keepalive_handle) {
         vTaskDelete(ble_kb_keepalive_handle);
         ble_kb_keepalive_handle = nullptr;
@@ -784,57 +772,48 @@ void hw_set_ble_kb_disable()
 
 void hw_set_ble_kb_char(const char *c)
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-#ifdef CONFIG_BLE_KEYBOARD
+#ifdef ARDUINO
     if (bleKeyboard.isConnected()) {
         bleKeyboard.print(c);
     }
-#endif
 #endif
 }
 
 bool hw_get_ble_kb_connected()
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-#ifdef CONFIG_BLE_KEYBOARD
+#ifdef ARDUINO
     if (bleKeyboard.isConnected()) {
         return true;
     }
-#endif
 #endif
     return false;
 }
 
 std::string hw_get_ble_kb_peer_address()
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-#ifdef CONFIG_BLE_KEYBOARD
+#ifdef ARDUINO
     NimBLEServer *server = NimBLEDevice::getServer();
     if (server && server->getConnectedCount() > 0) {
         return server->getPeerInfo(0).getAddress().toString();
     }
-#endif
 #endif
     return "";
 }
 
 void hw_disconnect_ble_kb()
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-#ifdef CONFIG_BLE_KEYBOARD
+#ifdef ARDUINO
     NimBLEServer *server = NimBLEDevice::getServer();
     if (server && server->getConnectedCount() > 0) {
         NimBLEConnInfo peerInfo = server->getPeerInfo(0);
         server->disconnect(peerInfo.getConnHandle());
     }
 #endif
-#endif
 }
 
 void hw_set_ble_key(media_key_value_t key)
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-#ifdef CONFIG_BLE_KEYBOARD
+#ifdef ARDUINO
     if (bleKeyboard.isConnected()) {
         switch (key) {
         case MEDIA_VOLUME_UP:
@@ -857,17 +836,15 @@ void hw_set_ble_key(media_key_value_t key)
 
     }
 #endif
-#endif
 }
 
 // PB.12/Lever3: unblock the BLE keepalive task when leaving fake sleep.
 // Called from ui_resume_timers() alongside the LVGL/keyboard/rotary kicks.
 // Safe from any task context — a give while the task is running simply
-// leaves the notification pending for the next take. No-op on the emulator
-// and on pager builds that have USING_BLE_KEYBOARD unset.
+// leaves the notification pending for the next take. No-op on the emulator.
 void hw_ble_kb_task_notify_wake()
 {
-#if defined(ARDUINO) && defined(USING_BLE_KEYBOARD)
-    if (ble_kb_keepalive_handle) xTaskNotifyGive(ble_kb_keepalive_handle);
+#ifdef ARDUINO
+    hal::notify_task(ble_kb_keepalive_handle);
 #endif
 }

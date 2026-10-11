@@ -3,8 +3,11 @@
  * @brief     Chronological view of internal files with timestamps in blog style.
  *
  * State reset on onStop (ui_journal_exit):
- *   widgets: menu, quit_btn, parent_obj, pending_journal_parent
- *                                       — destroyed via lv_obj_del then nulled
+ *   widgets: menu, quit_btn            — destroyed via lv_obj_del then nulled
+ *            parent_obj, pending_journal_parent
+ *                                       — nulled (not owned)
+ *   paging:  target_focus_index, current_page — reset
+ *   cache:   journal_entries / cache_valid    — kept on purpose (warm reopen)
  *   timers:  bg_refresh_timer           — the deferred one-shot rescan queued
  *                                         when the FS changed; cancelled via
  *                                         cancel_bg_refresh() on exit/rebuild.
@@ -15,6 +18,7 @@
 #include "app_registry.h"
 #include "../core/app_manager.h"
 #include "../hal/notes_crypto.h"
+#include "../hal/notes_path.h"
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -85,7 +89,7 @@ bool load_index_file(std::vector<JournalEntry> &out)
 
     /* Encrypted indices carry the OpenSSL Salted__ prefix. Decrypt in place
      * before the header checks below try to interpret the bytes. */
-    if (raw.size() >= 8 && memcmp(raw.data(), "Salted__", 8) == 0) {
+    if (content_has_salted_magic((const char *)raw.data(), raw.size())) {
         if (!notes_crypto_is_unlocked()) return false;
         std::string plain;
         if (!notes_crypto_decrypt_buffer(raw.data(), raw.size(), plain)) return false;
@@ -149,7 +153,8 @@ void save_index_file(const std::vector<JournalEntry> &entries)
         buf.push_back(e.truncated ? 1 : 0);
     }
 
-    /* The index caches the first 4KB of every note as a plaintext snippet.
+    /* The index caches the first kSnippetBytes (1.5 KB) of every note as a
+     * plaintext snippet.
      * Without encryption that would defeat the at-rest protection on the
      * notes themselves, so we encrypt the whole blob with the same key. */
     if (notes_crypto_should_encrypt()) {
@@ -201,8 +206,7 @@ void refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb =
 
     current.erase(std::remove_if(current.begin(), current.end(),
                                  [](const std::pair<std::string, uint32_t> &p) {
-                                     return p.first == "tasks.txt" ||
-                                            p.first == "/tasks.txt";
+                                     return notes_path_is_tasks_file(p.first.c_str());
                                  }),
                   current.end());
 
@@ -268,9 +272,8 @@ void refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb =
         }
     }
 
-    std::sort(next.begin(), next.end(), [](const JournalEntry &a, const JournalEntry &b) {
-        return a.filename > b.filename;
-    });
+    // `next` is already filename-descending: it was built by walking the
+    // sorted `current` list above.
 
     if (dirty) {
         report(cb, ud, "Saving index...", 0, 1, nullptr);
@@ -355,7 +358,7 @@ static void free_post_user_data()
         lv_obj_t *child = lv_obj_get_child(main_page, i);
         void *data = lv_obj_get_user_data(child);
         if (data) {
-            lv_mem_free(data);
+            lv_free(data);
             lv_obj_set_user_data(child, NULL);
         }
     }
@@ -454,14 +457,6 @@ static void prev_page_cb(lv_event_t *e)
     }
 }
 
-static void back_event_handler(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    if (lv_menu_back_btn_is_root(menu, obj)) {
-        do_exit();
-    }
-}
-
 static void exit_btn_cb(lv_event_t *e)
 {
     do_exit();
@@ -504,29 +499,13 @@ static void post_click_cb(lv_event_t *e)
     }
 }
 
-static void delete_msgbox_cb(lv_event_t *e)
+static void delete_confirm_cb(bool yes, void *ud)
 {
-    uint16_t id = 0;
-    lv_obj_t *mbox_to_del = NULL;
-#if LVGL_VERSION_MAJOR == 9
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t *label = lv_obj_get_child(btn, 0);
-    const char *text = lv_label_get_text(label);
-    if (strcmp(text, "No") == 0) {
-        id = 1;
-    }
-    mbox_to_del = lv_obj_get_parent(lv_obj_get_parent(btn));
-#else
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_current_target(e);
-    id = lv_msgbox_get_active_btn(obj);
-    mbox_to_del = obj;
-#endif
-
-    const char *path = (const char *)lv_event_get_user_data(e);
+    const char *path = (const char *)ud;
     bool deleted = false;
 
-    if (id == 0) { // Yes
-        if (hw_delete_preferred_file(path)) {
+    if (yes) {
+        if (hw_delete_file(path)) {
             journal_entries.erase(std::remove_if(journal_entries.begin(), journal_entries.end(),
                                               [&](const JournalEntry &be) { return be.filename == path; }),
                                journal_entries.end());
@@ -539,26 +518,23 @@ static void delete_msgbox_cb(lv_event_t *e)
         target_focus_index = -1;
     }
 
-    destroy_msgbox(mbox_to_del);
-
     if (deleted) {
         teardown_menu_for_rerender();
         ui_journal_enter(parent_obj);
     }
 
-    if (path) lv_mem_free((void *)path);
+    if (path) lv_free((void *)path);
 }
 
 static void show_delete_confirm(const char *filename)
 {
-    static const char *btns[] = {"Yes", "No", ""};
     char msg[128];
     snprintf(msg, sizeof(msg), "Delete this entry?\n%s", filename);
 
-    char *path_dup = (char *)lv_mem_alloc(strlen(filename) + 1);
+    char *path_dup = (char *)lv_malloc(strlen(filename) + 1);
     strcpy(path_dup, filename);
 
-    create_msgbox(NULL, "Confirm", msg, btns, delete_msgbox_cb, path_dup);
+    ui_confirm("Confirm", msg, delete_confirm_cb, path_dup);
 }
 
 static void journal_key_event_cb(lv_event_t *e)
@@ -568,8 +544,9 @@ static void journal_key_event_cb(lv_event_t *e)
     uint32_t key = lv_event_get_key(e);
     if (key == 'r' || key == 'R') {
         cache_valid = false;
+        lv_obj_t *parent = parent_obj;  // ui_journal_exit nulls it
         ui_journal_exit(NULL);
-        ui_journal_enter(parent_obj);
+        ui_journal_enter(parent);
         return;
     }
     if (key != 'd' && key != 'D' && key != LV_KEY_BACKSPACE) return;
@@ -675,7 +652,7 @@ static void journal_build_ui(lv_obj_t *parent)
     // in the background so the app opens instantly even with a stale index.
     bool show_loader = need_refresh && !have_cache;
     if (show_loader) loader_show();
-    menu = create_menu(parent, back_event_handler);
+    menu = create_menu(parent, nullptr);
     if (show_loader) {
         refresh_journal_entries(journal_entries, loader_update, nullptr);
         cache_valid = true;
@@ -751,7 +728,7 @@ static void journal_build_ui(lv_obj_t *parent)
             lv_obj_set_style_pad_gap(post_cont, 0, 0);
             lv_obj_set_style_border_width(post_cont, 0, 0); 
             lv_obj_set_style_bg_opa(post_cont, LV_OPA_COVER, 0);
-            lv_obj_set_style_bg_color(post_cont, lv_color_black(), 0);
+            lv_obj_set_style_bg_color(post_cont, UI_COLOR_SURFACE, 0);
             lv_obj_set_style_clip_corner(post_cont, true, 0);
             lv_obj_clear_flag(post_cont, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -770,7 +747,7 @@ static void journal_build_ui(lv_obj_t *parent)
             lv_obj_clear_flag(scroll_area, LV_OBJ_FLAG_SCROLL_ELASTIC); 
             lv_obj_set_scrollbar_mode(scroll_area, LV_SCROLLBAR_MODE_AUTO);
 
-            char *fn_dup = (char *)lv_mem_alloc(entry.filename.length() + 1);
+            char *fn_dup = (char *)lv_malloc(entry.filename.length() + 1);
             strcpy(fn_dup, entry.filename.c_str());
             lv_obj_set_user_data(post_cont, fn_dup);
 
@@ -790,26 +767,13 @@ static void journal_build_ui(lv_obj_t *parent)
                 lv_group_t *g = lv_group_get_default();
                 if (!lv_group_get_editing(g) || lv_group_get_focused(g) != wrapper) return;
 
-                uint32_t key = lv_event_get_key(ev);
-                if (key == LV_KEY_UP || key == LV_KEY_LEFT) {
-                    int32_t cur_y = lv_obj_get_scroll_y(scroller);
-                    int32_t step = 40;
-                    if (cur_y < step) step = cur_y;
-                    if (step > 0) lv_obj_scroll_by(scroller, 0, step, LV_ANIM_ON);
-                } else if (key == LV_KEY_DOWN || key == LV_KEY_RIGHT) {
-                    int32_t bottom = lv_obj_get_scroll_bottom(scroller);
-                    int32_t step = 40;
-                    if (bottom < step) step = bottom;
-                    if (step > 0) lv_obj_scroll_by(scroller, 0, -step, LV_ANIM_ON);
-                }
+                ui_scroll_key_clamped(scroller, lv_event_get_key(ev), 40, LV_ANIM_ON);
             }, LV_EVENT_KEY, NULL);
 
             lv_obj_add_event_cb(post_cont, journal_key_event_cb, LV_EVENT_KEY, NULL);
 
             if (target_focus_index != -1) {
-                if (current_child_idx == target_focus_index) {
-                    focus_target = post_cont;
-                } else if (current_child_idx < target_focus_index) {
+                if (current_child_idx <= target_focus_index) {
                     focus_target = post_cont;
                 }
             }
@@ -817,13 +781,13 @@ static void journal_build_ui(lv_obj_t *parent)
             lv_obj_t *header = lv_label_create(scroll_area);
             lv_label_set_text(header, parse_filename_to_human(entry.filename).c_str());
             lv_obj_set_style_text_font(header, font, 0);
-            lv_obj_set_style_text_color(header, lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_text_color(header, UI_COLOR_MUTED, 0);
             lv_obj_set_width(header, lv_pct(100));
             lv_obj_set_style_pad_left(header, 4, 0); 
 
             lv_obj_t *line = lv_obj_create(scroll_area);
             lv_obj_set_size(line, lv_pct(100), 1);
-            lv_obj_set_style_bg_color(line, lv_palette_main(LV_PALETTE_GREY), 0);
+            lv_obj_set_style_bg_color(line, lv_color_mix(UI_COLOR_FG, UI_COLOR_BG, LV_OPA_30), 0);
             lv_obj_set_style_border_width(line, 0, 0);
             lv_obj_set_style_pad_all(line, 0, 0); 
 
@@ -834,7 +798,7 @@ static void journal_build_ui(lv_obj_t *parent)
             lv_label_set_text(label, entry.snippet.c_str());
             lv_obj_set_width(label, lv_pct(100));
             lv_obj_set_style_text_font(label, font, 0);
-            lv_obj_set_style_text_color(label, lv_color_white(), 0);
+            lv_obj_set_style_text_color(label, UI_COLOR_FG, 0);
             lv_obj_set_style_pad_left(label, 4, 0); 
             lv_obj_set_style_pad_right(label, 4, 0);
 
@@ -874,7 +838,7 @@ static void journal_build_ui(lv_obj_t *parent)
         snprintf(buf, sizeof(buf), "Page %d/%d", current_page + 1, (total_files + JOURNAL_PAGE_SIZE - 1) / JOURNAL_PAGE_SIZE);
         lv_label_set_text(page_info, buf);
         lv_obj_set_style_text_font(page_info, font, 0);
-        lv_obj_set_style_text_color(page_info, lv_palette_main(LV_PALETTE_GREY), 0);
+        lv_obj_set_style_text_color(page_info, UI_COLOR_MUTED, 0);
         lv_obj_set_flex_grow(page_info, 1);
         lv_obj_set_style_text_align(page_info, LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_set_style_pad_right(page_info, 10, 0);
@@ -924,6 +888,8 @@ void ui_journal_exit(lv_obj_t *parent)
     }
     target_focus_index = -1;
     current_page = 0;
+    parent_obj = NULL;
+    pending_journal_parent = NULL;  // a still-open unlock prompt must not build
 }
 
 } // namespace

@@ -34,7 +34,6 @@ namespace {
 struct labels_t {
     lv_obj_t *probe_hex    = nullptr;
     lv_obj_t *probe_decode = nullptr;
-    lv_obj_t *i2c_scan     = nullptr;
     lv_obj_t *online       = nullptr;
     lv_obj_t *fw_kernel    = nullptr;
     lv_obj_t *fw_user      = nullptr;
@@ -64,32 +63,7 @@ lv_obj_t *s_page = nullptr;
 
 lv_obj_t *add_row(lv_obj_t *parent, const char *key, const char *val)
 {
-    lv_obj_t *row = lv_menu_cont_create(parent);
-    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_ver(row, 4, 0);
-    lv_obj_set_style_pad_hor(row, 8, 0);
-    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(row, 1, 0);
-    lv_obj_set_style_border_color(row, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
-    lv_obj_set_style_radius(row, 0, 0);
-
-    lv_obj_t *k = lv_label_create(row);
-    lv_label_set_text(k, key);
-    lv_obj_set_style_text_color(k, lv_palette_main(LV_PALETTE_GREY), 0);
-
-    lv_obj_t *v = lv_label_create(row);
-    lv_label_set_text(v, val);
-    lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_max_width(v, LV_PCT(60), 0);
-
-    register_subpage_group_obj(parent, row);
-    return v;
+    return settings_kv_row(parent, key, val, 4, 60);
 }
 
 void reinit_cb(lv_event_t *)
@@ -146,7 +120,7 @@ void rescan_i2c(char *out, size_t cap)
 
 void serial_dump_cb(lv_event_t *)
 {
-#ifdef ARDUINO
+#if defined(ARDUINO) && defined(USING_BHI260_SENSOR)
     if (hw_get_device_online() & HW_BHI260AP_ONLINE) {
         BoschSensorInfo info = instance.sensor.getSensorInfo();
         info.printInfo(Serial);
@@ -221,7 +195,7 @@ void render_tick(lv_timer_t *)
     }
 #endif
 
-#ifdef ARDUINO
+#if defined(ARDUINO) && defined(USING_BHI260_SENSOR)
     // Pull a fresh BoschSensorInfo each tick — cheap. Use the LIVE probe
     // bit rather than the cached diag flag so a failed firmware swap (which
     // can leave the chip in a transient state) doesn't blank these rows.
@@ -358,7 +332,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     {
         char scan[48];
         rescan_i2c(scan, sizeof(scan));
-        lbl.i2c_scan = add_row(sub_page, "I2C @ 0x18/28", scan);
+        add_row(sub_page, "I2C @ 0x18/28", scan);
     }
 
     add_section("Firmware");
@@ -384,51 +358,9 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lbl.face_down  = add_row(sub_page, "Face down?", "no");
 
     add_section("Actions");
-    {
-        lv_obj_t *row = create_text(sub_page, NULL, "Re-init IMU",
-                                    LV_MENU_ITEM_BUILDER_VARIANT_2);
-        lv_obj_t *btn = lv_btn_create(row);
-        lv_obj_set_width(btn, 70);
-        lv_obj_set_style_outline_width(btn, 0, 0);
-        lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_width(btn, 0, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_t *lab = lv_label_create(btn);
-        lv_label_set_text(lab, "Run");
-        lv_obj_center(lab);
-        lv_obj_add_event_cb(btn, reinit_cb, LV_EVENT_CLICKED, NULL);
-        register_subpage_group_obj(sub_page, btn);
-    }
-    {
-        lv_obj_t *row = create_text(sub_page, NULL, "Print to Serial",
-                                    LV_MENU_ITEM_BUILDER_VARIANT_2);
-        lv_obj_t *btn = lv_btn_create(row);
-        lv_obj_set_width(btn, 70);
-        lv_obj_set_style_outline_width(btn, 0, 0);
-        lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_width(btn, 0, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_t *lab = lv_label_create(btn);
-        lv_label_set_text(lab, "Dump");
-        lv_obj_center(lab);
-        lv_obj_add_event_cb(btn, serial_dump_cb, LV_EVENT_CLICKED, NULL);
-        register_subpage_group_obj(sub_page, btn);
-    }
-    {
-        lv_obj_t *row = create_text(sub_page, NULL, "Try sensor.begin",
-                                    LV_MENU_ITEM_BUILDER_VARIANT_2);
-        lv_obj_t *btn = lv_btn_create(row);
-        lv_obj_set_width(btn, 70);
-        lv_obj_set_style_outline_width(btn, 0, 0);
-        lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_width(btn, 0, 0);
-        lv_obj_set_style_shadow_width(btn, 0, 0);
-        lv_obj_t *lab = lv_label_create(btn);
-        lv_label_set_text(lab, "Try");
-        lv_obj_center(lab);
-        lv_obj_add_event_cb(btn, try_begin_cb, LV_EVENT_CLICKED, NULL);
-        register_subpage_group_obj(sub_page, btn);
-    }
+    settings_action_row(sub_page, "Re-init IMU", "Run", reinit_cb, 70);
+    settings_action_row(sub_page, "Print to Serial", "Dump", serial_dump_cb, 70);
+    settings_action_row(sub_page, "Try sensor.begin", "Try", try_begin_cb, 70);
 
     if (tick) lv_timer_del(tick);
     tick = lv_timer_create(render_tick, 200, NULL);

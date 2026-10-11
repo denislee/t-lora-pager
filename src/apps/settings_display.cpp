@@ -1,6 +1,8 @@
 /**
  * @file      settings_display.cpp
- * @brief     Settings » Display & Backlight / Charger / Performance subpages.
+ * @brief     Settings » Display & Backlight / Charger / Performance subpages,
+ *            plus the UI style (Classic / Pixel Iso / Hotel / BeOS) selector
+ *            and the dark-mode toggle.
  *            Extracted from ui_settings.cpp; see settings_internal.h for the
  *            cross-TU contract.
  *
@@ -11,6 +13,7 @@
  */
 #include "../ui_define.h"
 #include "settings_internal.h"
+#include "../core/system.h"
 
 namespace display_cfg {
 
@@ -88,10 +91,8 @@ void show_mem_usage_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     if (code == LV_EVENT_VALUE_CHANGED) {
         bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
-        lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
         local_param.show_mem_usage = turnOn;
         hw_set_user_setting(local_param);
-        if (label) lv_label_set_text(label, turnOn ? " On " : " Off ");
     }
 }
 
@@ -101,10 +102,8 @@ void show_file_count_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     if (code == LV_EVENT_VALUE_CHANGED) {
         bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
-        lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
         local_param.show_file_count = turnOn;
         hw_set_user_setting(local_param);
-        if (label) lv_label_set_text(label, turnOn ? " On " : " Off ");
     }
 }
 
@@ -116,13 +115,10 @@ void otg_output_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     if (code == LV_EVENT_VALUE_CHANGED) {
         bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
-        lv_obj_t *slider_label = (lv_obj_t *)lv_obj_get_user_data(obj);
         printf("State: %s\n", turnOn ? "On" : "Off");
+        // Rejected: un-check, and the row's label follows (" Off ").
         if (hw_set_otg(turnOn) == false) {
             lv_obj_remove_state(obj, LV_STATE_CHECKED);
-            if (slider_label) lv_label_set_text(slider_label, " Off ");
-        } else {
-            if (slider_label) lv_label_set_text(slider_label, turnOn ? " On " : " Off ");
         }
     }
 }
@@ -133,7 +129,6 @@ void charger_enable_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     if (code == LV_EVENT_VALUE_CHANGED) {
         bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
-        lv_obj_t *slider_label = (lv_obj_t *)lv_obj_get_user_data(obj);
         local_param.charger_enable = turnOn;
         printf("State: %s\n", turnOn ? "On" : "Off");
 
@@ -142,8 +137,6 @@ void charger_enable_cb(lv_event_t *e)
         hw_set_user_setting(local_param);
         hw_set_charger(turnOn);
         hw_update_battery_history();
-
-        if (slider_label) lv_label_set_text(slider_label, turnOn ? " On " : " Off ");
     }
 }
 
@@ -163,9 +156,8 @@ void charger_current_cb(lv_event_t *e)
 
 void charge_limit_cb(lv_event_t *e)
 {
-    lv_obj_t *slider = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t *slider_label = (lv_obj_t *)lv_obj_get_user_data(slider);
-    bool turnOn = lv_obj_has_state(slider, LV_STATE_CHECKED);
+    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+    bool turnOn = lv_obj_has_state(btn, LV_STATE_CHECKED);
     local_param.charge_limit_en = turnOn;
 
     hw_set_user_setting(local_param);
@@ -177,8 +169,6 @@ void charge_limit_cb(lv_event_t *e)
     } else {
         hw_update_battery_history();
     }
-
-    if (slider_label) lv_label_set_text(slider_label, turnOn ? " On " : " Off ");
 }
 
 // --- Performance callbacks ---
@@ -190,6 +180,26 @@ void cpu_freq_cb(lv_event_t *e)
     uint16_t freqs[] = {240, 160, 80};
     local_param.cpu_freq_mhz = freqs[index];
     hw_set_user_setting(local_param);
+}
+
+// --- UI style callback ---
+
+void ui_style_cb(lv_event_t *e)
+{
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    ui_style_set((ui_style_t)lv_dropdown_get_selected(obj));
+    core::System::getInstance().applyChromeStyle();
+}
+
+void dark_mode_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
+        ui_dark_mode_set(turnOn);
+        core::System::getInstance().applyChromeStyle();
+    }
 }
 
 } // anonymous namespace
@@ -208,7 +218,7 @@ void build_backlight(lv_obj_t *menu, lv_obj_t *sub_page)
 
     auto add_slider = [&](const char *txt, int32_t min, int32_t max, int32_t val,
                           lv_event_cb_t cb, const char *fmt_str) {
-        slider = create_slider(sub_page, NULL, txt, min, max, val, cb, LV_EVENT_VALUE_CHANGED);
+        slider = create_slider(sub_page, txt, min, max, val, cb);
         parent = lv_obj_get_parent(slider);
         slider_label = lv_label_create(parent);
         char buf[16];
@@ -231,8 +241,8 @@ void build_backlight(lv_obj_t *menu, lv_obj_t *sub_page)
                             (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
     }
 
-    slider = create_slider(sub_page, NULL, "Timeout", 0, 180,
-                           local_param.disp_timeout_second, disp_timeout_cb, LV_EVENT_VALUE_CHANGED);
+    slider = create_slider(sub_page, "Timeout", 0, 180,
+                           local_param.disp_timeout_second, disp_timeout_cb);
     parent = lv_obj_get_parent(slider);
     slider_label = lv_label_create(parent);
     if (local_param.disp_timeout_second == 0) {
@@ -245,8 +255,8 @@ void build_backlight(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_add_event_cb(slider, invert_scroll_key_cb,
                         (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
 
-    slider = create_slider(sub_page, NULL, "Sleep Mode", 0, 1,
-                           local_param.sleep_mode, sleep_mode_cb, LV_EVENT_VALUE_CHANGED);
+    slider = create_slider(sub_page, "Sleep Mode", 0, 1,
+                           local_param.sleep_mode, sleep_mode_cb);
     parent = lv_obj_get_parent(slider);
     slider_label = lv_label_create(parent);
     if (local_param.sleep_mode == 0) {
@@ -257,11 +267,25 @@ void build_backlight(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_user_data(slider, slider_label);
     register_subpage_group_obj(sub_page, slider);
 
-    lv_obj_t *btn = create_toggle_btn_row(sub_page, "Show Memory", local_param.show_mem_usage, show_mem_usage_cb);
-    register_subpage_group_obj(sub_page, btn);
+    create_toggle_btn_row(sub_page, "Show Memory", local_param.show_mem_usage, show_mem_usage_cb);
+    create_toggle_btn_row(sub_page, "Show File Count", local_param.show_file_count, show_file_count_cb);
 
-    btn = create_toggle_btn_row(sub_page, "Show File Count", local_param.show_file_count, show_file_count_cb);
-    register_subpage_group_obj(sub_page, btn);
+    // UI style: applies to newly built screens immediately and fully on
+    // leaving Settings (ui_sys_exit rebuilds the theme + chrome).
+    lv_obj_t *dd = create_dropdown(sub_page, "UI Style",
+                                   "Classic\nPixel Iso\nHotel\nBeOS",
+                                   (uint16_t)ui_style_get(), ui_style_cb);
+    lv_obj_t *row = lv_obj_get_parent(dd);
+    lv_obj_t *title_label = lv_obj_get_child(row, 0);
+    lv_obj_set_flex_grow(title_label, 1);
+    lv_obj_set_width(title_label, 0);
+    lv_obj_set_flex_grow(dd, 0);
+    lv_obj_set_width(dd, LV_PCT(45));
+    register_subpage_group_obj(sub_page, dd);
+
+    // Dark mode: night palette for Hotel / BeOS; Classic and Pixel Iso are
+    // dark already. Same apply-on-exit behaviour as the style above.
+    create_toggle_btn_row(sub_page, "Dark Mode", ui_dark_mode_get(), dark_mode_cb);
 }
 
 void build_otg(lv_obj_t *menu, lv_obj_t *sub_page)
@@ -273,19 +297,15 @@ void build_otg(lv_obj_t *menu, lv_obj_t *sub_page)
     uint8_t total_charge_level = hw_get_charge_level_nums();
     uint8_t curr_charge_level = hw_get_charger_current_level();
 
-    lv_obj_t *btn;
-
     if (hw_has_otg_function()) {
-        btn = create_toggle_btn_row(sub_page, "OTG Output", enableOtg, otg_output_cb);
-        register_subpage_group_obj(sub_page, btn);
+        create_toggle_btn_row(sub_page, "OTG Output", enableOtg, otg_output_cb);
     }
 
-    btn = create_toggle_btn_row(sub_page, "Charging", local_param.charger_enable, charger_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
+    create_toggle_btn_row(sub_page, "Charging", local_param.charger_enable, charger_enable_cb);
 
-    lv_obj_t *slider = create_slider(sub_page, NULL, "Current",
+    lv_obj_t *slider = create_slider(sub_page, "Current",
                                      1, total_charge_level, curr_charge_level,
-                                     charger_current_cb, LV_EVENT_VALUE_CHANGED);
+                                     charger_current_cb);
     lv_obj_t *parent = lv_obj_get_parent(slider);
     lv_obj_t *slider_label = lv_label_create(parent);
     lv_label_set_text_fmt(slider_label, "%umA", local_param.charger_current);
@@ -294,8 +314,7 @@ void build_otg(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_add_event_cb(slider, invert_scroll_key_cb,
                         (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
 
-    btn = create_toggle_btn_row(sub_page, "Limit 80%", local_param.charge_limit_en, charge_limit_cb);
-    register_subpage_group_obj(sub_page, btn);
+    create_toggle_btn_row(sub_page, "Limit 80%", local_param.charge_limit_en, charge_limit_cb);
 }
 
 void build_performance(lv_obj_t *menu, lv_obj_t *sub_page)
@@ -309,7 +328,7 @@ void build_performance(lv_obj_t *menu, lv_obj_t *sub_page)
     if (current_freq == 160) sel_idx = 1;
     else if (current_freq == 80) sel_idx = 2;
 
-    lv_obj_t *dd = create_dropdown(sub_page, NULL, "CPU Clock", freq_options, sel_idx, cpu_freq_cb);
+    lv_obj_t *dd = create_dropdown(sub_page, "CPU Clock", freq_options, sel_idx, cpu_freq_cb);
 
     // Size the dropdown wide enough to comfortably show the longest
     // option ("240 MHz (Max)") plus the arrow, but not stretched across

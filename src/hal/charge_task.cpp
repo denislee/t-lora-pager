@@ -18,17 +18,14 @@
 
 #ifdef ARDUINO
 
-#include <Arduino.h>
 #include <LilyGoLib.h>
 #include <lvgl.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
 #include "../core/scoped_lock.h"
-#include "../core/system_hooks.h"
 #include "../ui_define.h"
 #include "internal.h"
 #include "power.h"
+#include "task_util.h"
 
 namespace {
 
@@ -208,13 +205,6 @@ void charge_task_fn(void *)
                 last_battery_chk_ms = now;
                 core::ScopedInstanceLock lock;
                 hw_update_battery_history();
-                // The BQ25896 ADC is off in fake sleep (PB.4), so the read this
-                // just did populated the TTL cache with zeroed usb/sys voltages.
-                // Drop it so the first post-wake reader gets live values rather
-                // than up to 5 s of stale zeros — the same P4.7 symptom.
-#if defined(USING_PPM_MANAGE)
-                hw_invalidate_monitor_cache();
-#endif
             }
         }
 
@@ -227,15 +217,8 @@ void charge_task_fn(void *)
         lv_obj_t *overlay = nullptr;
         {
             core::ScopedInstanceLock lock;
-            // P4.7 — the BQ25896 ADC is disabled during fake sleep
-            // (hw_power_down_all did ppm.disableMeasure()).  Invalidate the
-            // TTL cache so build_charge_overlay() reads live ADC values, then
-            // re-enable the ADC before the read so usb_voltage / sys_voltage
-            // are not zero on the overlay or on the Info page after wake.
-#if defined(USING_PPM_MANAGE)
-            hw_invalidate_monitor_cache();
-            instance.ppm.enableMeasure();
-#endif
+            // The BQ25896 ADC stays off here (hw_power_down_all): the overlay
+            // reads only battery percent, which comes from the gauge.
             instance.wakeupDisplay();
             instance.setBrightness(target_brightness);
             ui_resume_timers();
@@ -253,11 +236,6 @@ void charge_task_fn(void *)
             ui_pause_timers();
             instance.setBrightness(0);
             instance.sleepDisplay();
-            // P4.7 — put the ADC back to sleep to match hw_power_down_all()
-            // which disabled it on fake-sleep entry.
-#if defined(USING_PPM_MANAGE)
-            instance.ppm.disableMeasure();
-#endif
         }
 
         // Refresh prev_vbus from a fresh sample so a still-asserted VBUS
@@ -271,21 +249,13 @@ void charge_task_fn(void *)
 
 }  // namespace
 
-void hw_charge_task_on_fake_sleep_enter()
-{
-    if (s_task) xTaskNotifyGive(s_task);
-}
+void hw_charge_task_on_fake_sleep_enter() { hal::notify_task(s_task); }
 
 void hw_charge_task_start()
 {
     if (s_task) return;
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        charge_task_fn, "charge_ind", 4096, nullptr,
-        kTaskPriority, &s_task, kTaskCore);
-    if (ok != pdPASS) {
-        log_e("charge_task: task create failed");
-        s_task = nullptr;
-    }
+    hal::start_pinned_task(charge_task_fn, "charge_ind", 4096,
+                           kTaskPriority, kTaskCore, &s_task, "charge_task");
 }
 
 #else  // !ARDUINO

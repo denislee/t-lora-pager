@@ -25,11 +25,11 @@
  * the repo gets the opaque Salted__ blob.
  *
  * State reset on onStop (exit_cb):
- *   widgets: s_root, s_log_label, s_log_scroll       — nulled
+ *   widgets: s_log_label, s_log_scroll               — nulled
  *   timers:  s_bg_timer (drain ticker)               — lv_timer_del + null
- *   tasks:   s_bg_task (sync worker)                 — cooperatively stopped
- *                                                      via stop flag, then
- *                                                      joined
+ *   tasks:   s_bg_task (sync worker)                 — left to finish and
+ *                                                      self-delete; it only
+ *                                                      touches the log queue
  * If you add a new cached LVGL pointer, timer, or FreeRTOS task, list it
  * above AND extend exit_cb() — a sync worker outliving the UI would
  * write into freed log buffers.
@@ -80,7 +80,7 @@ static void        save_pref(const char *key, const char *value)     { hal::nvs_
 // wrapper the Telegram bearer uses, sharing the notes passphrase. A PAT
 // with contents:write on a private repo is a write credential, so we
 // never want it at rest plaintext; the legacy `token` slot is wiped at
-// boot to close that door for any pre-hardening installs.
+// boot (apps::register_all) to close that door for any pre-hardening installs.
 static bool token_is_encrypted() {
     return hal::secret_exists(NSYNC_PREFS_NS, "token_enc");
 }
@@ -89,35 +89,16 @@ static std::string load_token_plain() {
     return hal::secret_load(NSYNC_PREFS_NS, "token_enc");
 }
 
+// secret_store trims the pasted whitespace that would otherwise yield a
+// silent 401 from GitHub.
 static bool save_token(const char *value, std::string *err) {
-    // Keyboard / paste flows routinely append whitespace or a trailing newline;
-    // baking that into the Authorization header yields a silent 401 from GitHub.
-    std::string trimmed = value ? value : "";
-    size_t a = trimmed.find_first_not_of(" \t\r\n");
-    size_t b = trimmed.find_last_not_of(" \t\r\n");
-    trimmed = (a == std::string::npos) ? std::string()
-                                       : trimmed.substr(a, b - a + 1);
-    bool ok = hal::secret_store(NSYNC_PREFS_NS, "token_enc",
-                                trimmed.c_str(), err);
+    bool ok = hal::secret_store(NSYNC_PREFS_NS, "token_enc", value, err);
     if (ok) hal::secret_purge_legacy(NSYNC_PREFS_NS, "token");
-    hal::secret_scrub(trimmed);
     return ok;
 }
 
-static void purge_legacy_plaintext_token() {
-    hal::secret_purge_legacy(NSYNC_PREFS_NS, "token");
-}
-
-// Forward decl — the definition sits further down next to run_sync. The hub
-// helpers in this file scrub their request body the moment hw_http_request
-// returns, since it carries the GitHub PAT.
-#ifdef ARDUINO
-static void scrub_string(std::string &s);
-#endif
-
 // --- state ----------------------------------------------------------------
 
-static lv_obj_t *s_root = nullptr;
 static lv_obj_t *s_log_label = nullptr;
 static lv_obj_t *s_log_scroll = nullptr;
 static std::string s_log_text;
@@ -174,16 +155,6 @@ static void log_append(const char *line)
     }
 }
 
-static void log_appendf(const char *fmt, ...)
-{
-    char buf[160];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    log_append(buf);
-}
-
 // --- config ---------------------------------------------------------------
 
 struct Config {
@@ -191,6 +162,8 @@ struct Config {
     std::string branch;      // default "main"
     std::string token;       // GitHub PAT (contents:write)
 };
+
+#ifdef ARDUINO
 
 static bool load_config(Config &c, std::string *err)
 {
@@ -217,21 +190,18 @@ static bool load_config(Config &c, std::string *err)
 
 // --- Hub API ---------------------------------------------------------------
 
-#ifdef ARDUINO
-
 // Hub-delegated sync: the device builds a manifest of every local note (name
 // + base64-of-raw-bytes) and POSTs it to the configured lilyhub. The hub
 // performs the GitHub list+PUT round-trips on a real CPU with HTTP keepalive
 // and bounded parallelism, returning a JSON summary the device parses back
-// into the same log lines as the direct path. On any transport failure or
-// non-2xx response we return false; the caller falls back to direct.
+// into log lines. On any transport failure or non-2xx response we return
+// false and the caller logs the error.
 //
 // Token is sent in the request body to the hub. It's an in-LAN call so plain
 // HTTP is acceptable for this iteration; a future hub-side stored token can
 // remove the cleartext-on-LAN exposure.
 struct LocalNote {
-    std::string name;
-    bool internal;
+    std::string name;   // internal-FFat path without the leading '/'
 };
 
 static bool try_hub_sync(const Config &cfg,
@@ -261,9 +231,7 @@ static bool try_hub_sync(const Config &cfg,
     for (const auto &n : local) {
         std::vector<uint8_t> bytes;
         std::string abs = "/" + n.name;
-        bool ok = n.internal ? hw_read_internal_bytes_raw(abs.c_str(), bytes)
-                             : hw_read_sd_bytes_raw(abs.c_str(), bytes);
-        if (!ok) { read_skipped++; continue; }
+        if (!hw_read_internal_bytes_raw(abs.c_str(), bytes)) { read_skipped++; continue; }
         std::string b64;
         if (!hal::base64_encode(bytes.data(), bytes.size(), b64)) { read_skipped++; continue; }
         if (!first) body.push_back(',');
@@ -281,7 +249,7 @@ static bool try_hub_sync(const Config &cfg,
                               body.c_str(), body.size(),
                               "application/json",
                               nullptr, resp, &code, &terr);
-    scrub_string(body);
+    hal::secret_scrub(body);
     if (!ok || code / 100 != 2) {
         if (err) {
             if (!terr.empty()) *err = terr;
@@ -342,17 +310,19 @@ static void run_sync_bg()
     Config cfg;
     if (!load_config(cfg, &err)) {
         bg_log_appendf("ERR: %s", err.c_str());
+        hal::secret_scrub(cfg.token);  // loaded even when repo validation fails
         return;
     }
     if (!hw_get_wifi_connected()) {
         bg_log_append("ERR: WiFi not connected.");
+        hal::secret_scrub(cfg.token);
         return;
     }
 
     if (!hal::hub_is_enabled()) {
         bg_log_append("ERR: Local Hub is not enabled.");
         bg_log_append("     Set the URL in Settings " "\xC2\xBB" " Local Hub.");
-        scrub_string(cfg.token);
+        hal::secret_scrub(cfg.token);
         return;
     }
 
@@ -371,7 +341,7 @@ static void run_sync_bg()
     local.reserve(ffat_files.size());
     for (auto &p : ffat_files) {
         strip_slash(p);
-        if (!p.empty()) local.push_back({p, true});
+        if (!p.empty()) local.push_back({p});
     }
     bg_log_appendf("Local notes: %u (internal only)", (unsigned)local.size());
 
@@ -404,7 +374,7 @@ static void run_sync_bg()
         bg_log_appendf("[hub] failed: %s", herr.c_str());
     }
 
-    scrub_string(cfg.token);
+    hal::secret_scrub(cfg.token);
 }
 
 static void notes_sync_bg_task(void *arg)
@@ -421,7 +391,6 @@ static void notes_sync_bg_task(void *arg)
     vTaskDelete(NULL);
 }
 
-static void scrub_string(std::string &s) { hal::secret_scrub(s); }
 #endif  // ARDUINO
 
 // --- UI -------------------------------------------------------------------
@@ -460,7 +429,7 @@ static void notes_sync_drain_tick(lv_timer_t *t)
 }
 #endif
 
-static void sync_btn_cb(lv_event_t *)
+static void start_sync()
 {
     if (s_syncing) return;
     s_syncing = true;
@@ -503,7 +472,6 @@ static void sync_btn_cb(lv_event_t *)
 
 static void enter(lv_obj_t *parent)
 {
-    s_root = parent;
     s_log_text.clear();
     ui_show_back_button(back_btn_cb);
 
@@ -543,18 +511,16 @@ static void enter(lv_obj_t *parent)
             tok_status = "token: not set";
         }
         // Scrub the scratch copy — we only fetched it to check emptiness.
-#ifdef ARDUINO
-        scrub_string(tok);
-#endif
+        hal::secret_scrub(tok);
         lv_label_set_text_fmt(status, "%s  (%s)",
                               repo.c_str(), tok_status);
     }
 
-    // Scrolling log area — PUT/DELETE/download calls each emit a line.
+    // Scrolling log area — the sync worker's progress and summary lines.
     s_log_scroll = lv_obj_create(parent);
     lv_obj_set_width(s_log_scroll, lv_pct(100));
     lv_obj_set_flex_grow(s_log_scroll, 1);
-    lv_obj_set_style_bg_color(s_log_scroll, lv_color_hex(0x101010), 0);
+    lv_obj_set_style_bg_color(s_log_scroll, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(s_log_scroll, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(s_log_scroll, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_width(s_log_scroll, 1, 0);
@@ -572,7 +538,7 @@ static void enter(lv_obj_t *parent)
 
 static void exit_cb(lv_obj_t *) {
     ui_hide_back_button();
-    s_root = s_log_label = s_log_scroll = nullptr;
+    s_log_label = s_log_scroll = nullptr;
     s_log_text.clear();
 #ifdef ARDUINO
     // Stop draining; the bg task (if any) is left to finish and self-delete.
@@ -588,6 +554,7 @@ static void exit_cb(lv_obj_t *) {
     s_syncing = false;
 }
 
+#ifdef ARDUINO
 static void on_unlocked_cb(bool ok, void *ud)
 {
     // The enter() path reads the banner state from NVS + session; after
@@ -599,8 +566,9 @@ static void on_unlocked_cb(bool ok, void *ud)
     if (!parent) return;
     lv_obj_clean(parent);
     enter(parent);
-    if (ok) sync_btn_cb(nullptr);
+    if (ok) start_sync();
 }
+#endif
 
 class NotesSyncApp : public core::App {
 public:
@@ -616,10 +584,10 @@ public:
         if (token_is_encrypted() && !notes_crypto_is_unlocked()) {
             ui_passphrase_unlock(on_unlocked_cb, parent);
         } else {
-            sync_btn_cb(nullptr);
+            start_sync();
         }
 #else
-        sync_btn_cb(nullptr);
+        start_sync();
 #endif
     }
     void onStop() override {
@@ -634,18 +602,7 @@ namespace apps {
 
 APP_FACTORY(make_notes_sync_app, NotesSyncApp)
 
-// Called once at startup by register_all(). Drops the legacy plaintext
-// NVS slot so an older install that persisted the PAT unencrypted isn't
-// left exposed on the next boot. Cheap no-op when there's nothing there.
-void nsync_purge_legacy_token_slot()
-{
-#ifdef ARDUINO
-    purge_legacy_plaintext_token();
-#endif
-}
-
-// --- config helpers called from ui_settings.cpp ---------------------------
-
+// --- config helpers called from settings_notes_sync.cpp -------------------
 std::string nsync_cfg_get_repo()            { return load_pref("repo"); }
 void        nsync_cfg_set_repo(const char *v)    { save_pref("repo", v ? v : ""); }
 
@@ -659,12 +616,7 @@ void nsync_cfg_set_branch(const char *v) { save_pref("branch", v ? v : ""); }
 
 std::string nsync_cfg_get_token_display()
 {
-    std::string tok = load_token_plain();
-    if (tok.empty()) {
-        return token_is_encrypted() ? "(locked)" : "(not set)";
-    }
-    if (tok.size() <= 8) return "********";
-    return std::string("********") + tok.substr(tok.size() - 4);
+    return hal::secret_mask_display(NSYNC_PREFS_NS, "token_enc");
 }
 
 bool nsync_cfg_set_token(const char *tok, std::string *err)

@@ -4,6 +4,7 @@
  */
 #include "notes_crypto.h"
 #include "notes_path.h"
+#include "fs_util.h"
 #include "storage.h"
 #include "../hal_interface.h"
 #include "../core/spi_lock.h"
@@ -446,22 +447,11 @@ static bool raw_read(const ProtFile &pf, std::vector<uint8_t> &out)
 {
     out.clear();
 #ifdef ARDUINO
-    String s = (!pf.path.empty() && pf.path[0] == '/')
-               ? String(pf.path.c_str())
-               : ("/" + String(pf.path.c_str()));
-    File f;
+    char s[256];
+    normalize_path(pf.path.c_str(), s, sizeof(s));
     core::MaybeSpiLock lock(pf.on_sd);
-    if (pf.on_sd) {
-        f = SD.open(s, FILE_READ);
-    } else {
-        f = FFat.open(s, FILE_READ);
-    }
-    if (!f) return false;
-    size_t n = f.size();
-    out.resize(n);
-    if (n) f.read(out.data(), n);
-    f.close();
-    return true;
+    return hal::fs_read_all(pf.on_sd ? static_cast<fs::FS &>(SD)
+                                     : static_cast<fs::FS &>(FFat), s, out);
 #else
     (void)pf; return false;
 #endif
@@ -470,58 +460,30 @@ static bool raw_read(const ProtFile &pf, std::vector<uint8_t> &out)
 static bool raw_write(const ProtFile &pf, const uint8_t *buf, size_t len)
 {
 #ifdef ARDUINO
-    String s = (!pf.path.empty() && pf.path[0] == '/')
-               ? String(pf.path.c_str())
-               : ("/" + String(pf.path.c_str()));
-    File f;
+    char s[256];
+    normalize_path(pf.path.c_str(), s, sizeof(s));
     core::MaybeSpiLock lock(pf.on_sd);
-    if (pf.on_sd) {
-        f = SD.open(s, "w");
-    } else {
-        f = FFat.open(s, "w");
-    }
-    if (!f) return false;
-    size_t w = f.write(buf, len);
-    f.close();
-    return w == len;
+    return hal::fs_write_all(pf.on_sd ? static_cast<fs::FS &>(SD)
+                                      : static_cast<fs::FS &>(FFat), s, buf, len);
 #else
     (void)pf; (void)buf; (void)len; return true;
 #endif
 }
 
-/* Walk the SD /notes directory for protected *.txt files. Mirrors
- * hw_get_sd_txt_files but kept inline so we can reuse the instance lock
- * across the whole scan. */
+/* Protected files on the SD card: the notes/<leaf>.txt list from
+ * hw_get_sd_txt_files (the same NOTES_DIR walk the internal side uses via
+ * hw_get_internal_txt_files), plus the journal index at the SD root. */
 #ifdef ARDUINO
 static void collect_sd_protected(std::vector<ProtFile> &out)
 {
     if (!(HW_SD_ONLINE & hw_get_device_online())) return;
-    core::ScopedSpiLock lock;
-    File dir = SD.open("/notes");
-    if (dir && dir.isDirectory()) {
-        File f = dir.openNextFile();
-        while (f) {
-            if (!f.isDirectory()) {
-                String n = f.name();
-                if (n.endsWith(".txt")) {
-                    /* Normalize to leaf — SD returns the full path; we want a
-                     * "notes/<leaf>" relative path so the protection check and
-                     * raw_read/raw_write helpers route to /notes consistently. */
-                    int slash = n.lastIndexOf('/');
-                    String leaf = (slash >= 0) ? n.substring(slash + 1) : n;
-                    String rel = String("notes/") + leaf;
-                    if (notes_crypto_path_is_protected(rel.c_str())) {
-                        out.push_back({std::string(rel.c_str()), true});
-                    }
-                }
-            }
-            f.close();
-            f = dir.openNextFile();
-        }
-        dir.close();
+    std::vector<std::string> txt;
+    hw_get_sd_txt_files(txt);
+    for (auto &p : txt) {
+        if (notes_crypto_path_is_protected(p.c_str())) out.push_back({p, true});
     }
-    bool has_idx = SD.exists("/journal_idx.bin");
-    if (has_idx) out.push_back({"/journal_idx.bin", true});
+    core::ScopedSpiLock lock;
+    if (SD.exists("/journal_idx.bin")) out.push_back({"/journal_idx.bin", true});
 }
 #endif
 

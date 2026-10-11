@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "lvgl.h"
 #include <unistd.h>
+#include <stdlib.h>
 #define SDL_MAIN_HANDLED        /*To fix SDL's "undefined reference to WinMain" issue*/
 #include <SDL2/SDL.h>
 #include "drivers/sdl/lv_sdl_mouse.h"
@@ -23,6 +24,7 @@
 #include "core/system.h"
 #include "core/system_hooks.h"
 #include "apps/app_registry.h"
+#include "emu_shots.h"
 #include "hal/link.h"
 
 // hw_init() is declared in hal/system.h (reachable via hal_interface.h).
@@ -97,6 +99,12 @@ extern "C" int main(void)
 
     apps::register_all();
     core::System::getInstance().init();
+
+    // UI_SHOTS_DIR=<dir>: render every page in every style / dark-mode
+    // combination to <dir> and exit instead of running interactively.
+    if (const char *shots = getenv("UI_SHOTS_DIR")) {
+        return emu_shots_run(lvDisplay, shots);
+    }
 
     // PagerLink companion protocol over TCP (127.0.0.1:7600, PAGERLINK_PORT=0
     // disables) so the iOS app in the Simulator can talk to the emulator.

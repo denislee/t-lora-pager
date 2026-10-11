@@ -20,7 +20,6 @@
 #include "../ui_define.h"
 #include "../hal/notes_crypto.h"
 #include "../core/app_manager.h"
-#include "../core/settings_registry.h"
 #include "../core/system.h"
 #include "app_registry.h"
 #include "../ui_list_picker.h"
@@ -207,11 +206,6 @@ void activate_subpage_group(lv_obj_t *page)
     }
 }
 
-/* Forward decl for the external-linkage definition below — declaration
- * also appears in apps/settings_internal.h so split-out files can call it. */
-lv_obj_t *create_toggle_btn_row(lv_obj_t *parent, const char *txt, bool initial_state, lv_event_cb_t cb);
-
-
 // External linkage — shared with the split-out settings_*.cpp files.
 void invert_scroll_key_cb(lv_event_t *e)
 {
@@ -235,58 +229,6 @@ void settings_return_to_main_page()
     }
 }
 
-static lv_obj_t *create_subpage_datetime(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_REFRESH, "Date & Time");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&datetime_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_backlight(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_IMAGE, "Display & Backlight");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&display_cfg::build_backlight);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_otg(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_CHARGE, "Charger");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&display_cfg::build_otg);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_performance(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_SETTINGS, "Performance");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&display_cfg::build_performance);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-
-static lv_obj_t *create_subpage_info(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_LIST, "System Info");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&info_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-
-    return cont;
-}
-
 static void build_device_probe(lv_obj_t *menu, lv_obj_t *sub_page)
 {
     lv_obj_add_flag(sub_page, LV_OBJ_FLAG_SCROLLABLE);
@@ -301,111 +243,102 @@ static void build_device_probe(lv_obj_t *menu, lv_obj_t *sub_page)
         if (lv_strcmp(device_name, "") != 0) {
             bool online = (devices_mask & 0x01);
 
-            lv_obj_t *row = lv_menu_cont_create(sub_page);
-            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-            lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-            lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
-            lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-            lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-            lv_obj_set_style_pad_ver(row, 5, 0);
-            lv_obj_set_style_pad_hor(row, 8, 0);
-            lv_obj_set_style_radius(row, 0, 0);
-            lv_obj_set_style_border_width(row, 1, 0);
-            lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-            lv_obj_set_style_border_color(row, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
-
-            lv_obj_t *name = lv_label_create(row);
-            lv_label_set_text(name, device_name);
+            lv_obj_t *status = settings_kv_row(sub_page, device_name,
+                                               online ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE, 5);
+            lv_obj_set_style_text_color(status,
+                lv_palette_main(online ? LV_PALETTE_GREEN : LV_PALETTE_RED), 0);
+            // Here the key (device name) is the primary text: full colour,
+            // truncated rather than the one-glyph status.
+            lv_obj_t *name = lv_obj_get_child(lv_obj_get_parent(status), 0);
+            lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
             lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
             lv_obj_set_style_max_width(name, LV_PCT(65), 0);
-
-            lv_obj_t *status = lv_label_create(row);
-            if (online) {
-                lv_label_set_text(status, LV_SYMBOL_OK);
-                lv_obj_set_style_text_color(status, lv_palette_main(LV_PALETTE_GREEN), 0);
-            } else {
-                lv_label_set_text(status, LV_SYMBOL_CLOSE);
-                lv_obj_set_style_text_color(status, lv_palette_main(LV_PALETTE_RED), 0);
-            }
-
-            register_subpage_group_obj(sub_page, row);
         }
         devices_mask >>= 1;
     }
 }
 
-static lv_obj_t *create_device_probe(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_USB, "Devices");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)build_device_probe);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
+// --- Main-page tile table ------------------------------------------------
+// One row per grid tile, in display (and focus) order. A tile either opens a
+// subpage (`builder` set — lv_menu loads the page and settings_page_changed_cb
+// runs the builder the first time it is shown) or switches to another app
+// (`app` set). `set_sub_page` is for subpages that rebuild themselves in place.
+typedef void (*subpage_builder_t)(lv_obj_t *menu, lv_obj_t *page);
 
-// Defer the app switch via queueSwitchApp: ui_sys_exit() deletes the settings
-// `menu`, which is an ancestor of the clicked menu item whose CLICKED event
-// is still being dispatched. Freeing it synchronously leaves LVGL walking
-// freed memory and freezes the device. queueSwitchApp runs from
-// AppManager::update() after lv_timer_handler fully unwinds — guaranteed
-// next-main-loop-iteration, unlike lv_async_call (period-0 timer) which
-// races the current event dispatch and could miss the first click.
-static void files_click_cb(lv_event_t *e)
+struct SettingsTile {
+    const char *icon;
+    const char *label;
+    char key;                              // keyboard shortcut, see below
+    subpage_builder_t builder;             // subpage tile, or NULL
+    void (*set_sub_page)(lv_obj_t *page);  // optional, subpage tiles only
+    const char *app;                       // app-shortcut tile, or NULL
+};
+
+// Keys are mnemonic first letters where free, disambiguated on collision
+// (see the badge on each tile for the exact key). Keep them unique; 'X' is
+// taken by the Power Off tile appended after the table.
+static const SettingsTile kTiles[] = {
+    // Appearance
+    { LV_SYMBOL_IMAGE,     "Display & Backlight", 'D', display_cfg::build_backlight,    NULL, NULL },
+    { LV_SYMBOL_EDIT,      "Fonts",               'F', fonts_cfg::build_subpage,        NULL, NULL },
+    // Time & power
+    { LV_SYMBOL_REFRESH,   "Date & Time",         'T', datetime_cfg::build_subpage,     NULL, NULL },
+    { LV_SYMBOL_CHARGE,    "Charger",             'C', display_cfg::build_otg,          NULL, NULL },
+    // Connectivity & hardware
+    { LV_SYMBOL_WIFI,      "Connectivity",        'N', connectivity_cfg::build_subpage, NULL, NULL }, // Network
+    { LV_SYMBOL_USB,       "Devices",             'V', build_device_probe,              NULL, NULL }, // deVices
+    // Home screen
+    { LV_SYMBOL_HOME,      "Home Apps",           'H', home_apps_cfg::build_subpage,    NULL, NULL },
+    // Online services
+    { LV_SYMBOL_UPLOAD,    "Local Hub",           'L', hub_cfg::build_subpage,          NULL, NULL },
+    { LV_SYMBOL_REFRESH,   "Weather",             'W', weather_cfg::build_subpage,      NULL, NULL },
+    { LV_SYMBOL_ENVELOPE,  "Telegram",            'G', telegram_cfg::build_subpage,     NULL, NULL }, // teleGram
+    // Notes
+    { LV_SYMBOL_REFRESH,   "Notes Sync",          'Y', notes_sync_cfg::build_subpage,   NULL, NULL }, // sYnc
+    { LV_SYMBOL_EYE_CLOSE, "Notes Security",      'E', notes_sec_cfg::build_subpage,    notes_sec_cfg::set_sub_page, NULL }, // sEcurity
+    // Storage & files
+    { LV_SYMBOL_SD_CARD,   "Storage",             'S', storage_cfg::build_subpage,      NULL, NULL },
+    { LV_SYMBOL_DIRECTORY, "Files",               'I', NULL, NULL, "Files" },      // fIles
+    // App shortcuts
+    { LV_SYMBOL_AUDIO,     "Recordings",          'R', NULL, NULL, "Recordings" },
+    { LV_SYMBOL_BLUETOOTH, "Remote",              'M', NULL, NULL, "Remote" },     // reMote
+    // System
+    { LV_SYMBOL_SETTINGS,  "Performance",         'P', display_cfg::build_performance,  NULL, NULL },
+    { LV_SYMBOL_LIST,      "System Info",         'O', info_cfg::build_subpage,         NULL, NULL }, // infO
+    { LV_SYMBOL_EYE_OPEN,  "IMU Debug",           'U', imu_debug_cfg::build_subpage,    NULL, NULL }, // imU
+};
+
+// App-shortcut tiles. Defer the app switch via queueSwitchApp: ui_sys_exit()
+// deletes the settings `menu`, which is an ancestor of the clicked menu item
+// whose CLICKED event is still being dispatched. Freeing it synchronously
+// leaves LVGL walking freed memory and freezes the device. queueSwitchApp
+// runs from AppManager::update() after lv_timer_handler fully unwinds —
+// guaranteed next-main-loop-iteration, unlike lv_async_call (period-0 timer)
+// which races the current event dispatch and could miss the first click.
+static void tile_app_click_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    const SettingsTile *t = (const SettingsTile *)lv_event_get_user_data(e);
     hw_feedback();
-    core::AppManager::getInstance().queueSwitchApp("Files",
+    core::AppManager::getInstance().queueSwitchApp(t->app,
         core::System::getInstance().getAppPanel());
 }
 
-static lv_obj_t *create_files_item(lv_obj_t *main_page)
+static lv_obj_t *create_tile(lv_obj_t *menu, lv_obj_t *main_page, const SettingsTile &t)
 {
     lv_obj_t *cont = lv_menu_cont_create(main_page);
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    style_menu_item_icon(cont, LV_SYMBOL_DIRECTORY, "Files");
-    lv_obj_add_event_cb(cont, files_click_cb, LV_EVENT_CLICKED, NULL);
-    return cont;
-}
-
-static void remote_click_cb(lv_event_t *e)
-{
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    hw_feedback();
-    core::AppManager::getInstance().queueSwitchApp("Remote",
-        core::System::getInstance().getAppPanel());
-}
-
-static lv_obj_t *create_remote_item(lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    style_menu_item_icon(cont, LV_SYMBOL_BLUETOOTH, "Remote");
-    lv_obj_add_event_cb(cont, remote_click_cb, LV_EVENT_CLICKED, NULL);
-    return cont;
-}
-
-static void recordings_click_cb(lv_event_t *e)
-{
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    hw_feedback();
-    core::AppManager::getInstance().queueSwitchApp("Recordings",
-        core::System::getInstance().getAppPanel());
-}
-
-static lv_obj_t *create_recordings_item(lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-    style_menu_item_icon(cont, LV_SYMBOL_AUDIO, "Recordings");
-    lv_obj_add_event_cb(cont, recordings_click_cb, LV_EVENT_CLICKED, NULL);
+    style_menu_item_icon(cont, t.icon, t.label);
+    if (t.builder) {
+        lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
+        lv_obj_set_user_data(sub_page, (void *)t.builder);
+        lv_menu_set_load_page_event(menu, cont, sub_page);
+        if (t.set_sub_page) t.set_sub_page(sub_page);
+    } else {
+        lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+        lv_obj_add_event_cb(cont, tile_app_click_cb, LV_EVENT_CLICKED, (void *)&t);
+    }
     return cont;
 }
 
@@ -432,9 +365,6 @@ static lv_obj_t *create_power_off_item(lv_obj_t *main_page)
     lv_obj_add_event_cb(cont, power_off_click_cb, LV_EVENT_CLICKED, NULL);
     return cont;
 }
-
-
-typedef void (*subpage_builder_t)(lv_obj_t *menu, lv_obj_t *page);
 
 static void settings_page_changed_cb(lv_event_t *e)
 {
@@ -474,32 +404,25 @@ static void settings_exit_cb(lv_event_t *e)
     menu_show();
 }
 
-static lv_obj_t *create_subpage_fonts(lv_obj_t *menu, lv_obj_t *parent)
+// Flips a toggle row's label to match the button's *final* checked state.
+// Registered after the caller's cb, so a cb that rejects the change by
+// clearing LV_STATE_CHECKED (e.g. OTG) is reflected too. The on-text rides
+// as this event's user_data, the off-text as the label's own user_data.
+static void toggle_label_cb(lv_event_t *e)
 {
-    lv_obj_t *cont = lv_menu_cont_create(parent);
-    style_menu_item_icon(cont, LV_SYMBOL_EDIT, "Fonts");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&fonts_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
+    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(btn);
+    if (!label) return;
+    lv_label_set_text(label, lv_obj_has_state(btn, LV_STATE_CHECKED)
+                                 ? (const char *)lv_event_get_user_data(e)
+                                 : (const char *)lv_obj_get_user_data(label));
 }
 
-void toggle_child_focus_cb(lv_event_t * e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * obj = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t * parent = lv_obj_get_parent(obj);
-    if(code == LV_EVENT_FOCUSED) {
-        lv_obj_add_state(parent, LV_STATE_FOCUSED);
-        lv_obj_add_state(parent, LV_STATE_FOCUS_KEY);
-    } else if(code == LV_EVENT_DEFOCUSED) {
-        lv_obj_remove_state(parent, LV_STATE_FOCUSED);
-        lv_obj_remove_state(parent, LV_STATE_FOCUS_KEY);
-    }
-}
-
-lv_obj_t *create_toggle_btn_row(lv_obj_t *parent, const char *txt, bool initial_state, lv_event_cb_t cb)
+lv_obj_t *create_toggle_btn_row(lv_obj_t *page, const char *txt, bool initial_state,
+                                lv_event_cb_t cb, void *user_data,
+                                const char *on_txt, const char *off_txt)
 {
-    lv_obj_t *obj = create_text(parent, NULL, txt, LV_MENU_ITEM_BUILDER_VARIANT_2);
+    lv_obj_t *obj = create_text(page, txt);
 
     lv_obj_t *btn = lv_btn_create(obj);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE); 
@@ -516,135 +439,106 @@ lv_obj_t *create_toggle_btn_row(lv_obj_t *parent, const char *txt, bool initial_
     lv_obj_set_flex_grow(btn, 0);
 
     lv_obj_t *label = lv_label_create(btn);
-    lv_label_set_text(label, initial_state ? " On " : " Off ");
+    lv_label_set_text(label, initial_state ? on_txt : off_txt);
     lv_obj_center(label);
-    
+
     lv_obj_set_user_data(btn, label);
-    
+    lv_obj_set_user_data(label, (void *)off_txt);
+
     lv_obj_add_event_cb(btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
-    lv_obj_add_event_cb(btn, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_VALUE_CHANGED, user_data);
+    lv_obj_add_event_cb(btn, toggle_label_cb, LV_EVENT_VALUE_CHANGED, (void *)on_txt);
+    register_subpage_group_obj(page, btn);
 
     return btn;
 }
 
-static lv_obj_t *create_subpage_storage(lv_obj_t *menu, lv_obj_t *main_page)
+lv_obj_t *settings_kv_row(lv_obj_t *page, const char *key, const char *val,
+                          int32_t pad_ver, int32_t val_max_pct)
 {
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_SD_CARD, "Storage");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&storage_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
+    lv_obj_t *row = lv_menu_cont_create(page);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_ver(row, pad_ver, 0);
+    lv_obj_set_style_pad_hor(row, 8, 0);
+    lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_mix(UI_COLOR_FG, UI_COLOR_BG, LV_OPA_30), 0);
+    lv_obj_set_style_radius(row, 0, 0);
+
+    lv_obj_t *k = lv_label_create(row);
+    lv_label_set_text(k, key);
+    lv_obj_set_style_text_color(k, UI_COLOR_MUTED, 0);
+
+    lv_obj_t *v = lv_label_create(row);
+    lv_label_set_text(v, val);
+    lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_width(v, LV_PCT(val_max_pct), 0);
+
+    register_subpage_group_obj(page, row);
+    return v;
 }
 
-static lv_obj_t *create_subpage_notes_security(lv_obj_t *menu, lv_obj_t *main_page)
+void settings_refresh_token_labels(lv_obj_t *tok_label, lv_obj_t *note_label,
+                                   const std::string &display, bool encrypted,
+                                   const char *disabled_note,
+                                   const char *ready_note)
 {
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_EYE_CLOSE, "Notes Security");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&notes_sec_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    notes_sec_cfg::set_sub_page(sub_page);
-    return cont;
-}
-
-
-
-static lv_obj_t *create_subpage_weather(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_REFRESH, "Weather");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&weather_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    weather_cfg::set_sub_page(sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_hub(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_UPLOAD, "Local Hub");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&hub_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    hub_cfg::set_sub_page(sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_telegram(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_ENVELOPE, "Telegram");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&telegram_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    telegram_cfg::set_sub_page(sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_notes_sync(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_REFRESH, "Notes Sync");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&notes_sync_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    notes_sync_cfg::set_sub_page(sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_connectivity(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_WIFI, "Connectivity");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&connectivity_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_home_apps(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_HOME, "Home Apps");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&home_apps_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-static lv_obj_t *create_subpage_imu_debug(lv_obj_t *menu, lv_obj_t *main_page)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, LV_SYMBOL_EYE_OPEN, "IMU Debug");
-    lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-    lv_obj_set_user_data(sub_page, (void*)&imu_debug_cfg::build_subpage);
-    lv_menu_set_load_page_event(menu, cont, sub_page);
-    return cont;
-}
-
-// Build a grid tile from a registry entry. Subpage entries mirror
-// create_subpage_*() above; action entries mirror create_files_item() etc.
-static lv_obj_t *create_registered_entry(lv_obj_t *menu, lv_obj_t *main_page,
-                                         const core::SettingsEntry &e)
-{
-    lv_obj_t *cont = lv_menu_cont_create(main_page);
-    style_menu_item_icon(cont, e.icon, e.label);
-
-    if (e.build) {
-        lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
-        lv_obj_set_user_data(sub_page, (void *)e.build);
-        lv_menu_set_load_page_event(menu, cont, sub_page);
-        if (e.set_page) e.set_page(sub_page);
-    } else if (e.on_click) {
-        lv_obj_add_flag(cont, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_remove_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_flag(cont, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-        lv_obj_add_event_cb(cont, e.on_click, LV_EVENT_CLICKED, NULL);
+    if (tok_label) {
+        // Tokens are only ever stored encrypted, so a non-encrypted slot
+        // means "no token" — the display string already says "(not set)"
+        // then, and the suffix only marks a stored token.
+        lv_label_set_text_fmt(tok_label, "Token: %s%s", display.c_str(),
+                              encrypted ? "  [encrypted]" : "");
     }
-    return cont;
+#ifdef ARDUINO
+    if (note_label) {
+        const char *note;
+        if (!notes_crypto_is_enabled()) {
+            note = disabled_note;
+        } else if (!notes_crypto_is_unlocked()) {
+            note = "Notes session locked — unlock (open Notes) to "
+                   "save or read the token.";
+        } else {
+            note = ready_note;
+        }
+        lv_label_set_text(note_label, note);
+    }
+#else
+    (void)note_label; (void)disabled_note; (void)ready_note;
+#endif
+}
+
+lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_txt,
+                              lv_event_cb_t cb, int32_t btn_width)
+{
+    lv_obj_t *row = create_text(page, txt);
+
+    lv_obj_t *btn = lv_btn_create(row);
+    lv_obj_set_width(btn, btn_width);
+    lv_obj_set_style_outline_width(btn, 0, 0);
+    lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(btn, 0, 0);
+    lv_obj_set_style_border_width(btn, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_style_border_width(btn, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+    lv_obj_set_style_shadow_width(btn, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_shadow_width(btn, 0, LV_STATE_FOCUS_KEY);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, btn_txt);
+    lv_obj_center(label);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
+    register_subpage_group_obj(page, btn);
+    return btn;
 }
 
 void ui_sys_enter(lv_obj_t *parent)
@@ -657,11 +551,7 @@ void ui_sys_enter(lv_obj_t *parent)
     hw_get_user_setting(local_param);
 
     menu = lv_menu_create(parent);
-#if LVGL_VERSION_MAJOR == 9
     lv_menu_set_mode_root_back_button(menu, LV_MENU_ROOT_BACK_BUTTON_DISABLED);
-#else
-    lv_menu_set_mode_root_back_btn(menu, LV_MENU_ROOT_BACK_BTN_DISABLED);
-#endif
     lv_obj_set_size(menu, LV_PCT(100), LV_PCT(100));
     lv_obj_center(menu);
 
@@ -695,15 +585,8 @@ void ui_sys_enter(lv_obj_t *parent)
     lv_obj_set_style_pad_column(main_page, 6, 0);
     lv_obj_set_style_pad_row(main_page, 6, 0);
 
-    auto add_grid_item = [&](lv_obj_t *c) {
-        if (!c) return;
-        lv_obj_set_width(c, LV_PCT(48));
-        add_main_page_group_item(c);
-    };
-
     // Grid tile with a single-letter keyboard shortcut (badge + key wiring).
-    // Keys are mnemonic first letters where free, disambiguated on collision
-    // (see the badge on each tile for the exact key). Keep them unique.
+    // The keys live in kTiles above.
     auto add_grid_item_sc = [&](lv_obj_t *c, char key) {
         if (!c) return;
         lv_obj_set_width(c, LV_PCT(48));
@@ -723,45 +606,12 @@ void ui_sys_enter(lv_obj_t *parent)
                             LV_EVENT_KEY, NULL);
     }
 
-    // Appearance
-    cont = create_subpage_backlight(menu, main_page);      add_grid_item_sc(cont, 'D'); // Display
-    cont = create_subpage_fonts(menu, main_page);          add_grid_item_sc(cont, 'F'); // Fonts
-    // Time & power
-    cont = create_subpage_datetime(menu, main_page);       add_grid_item_sc(cont, 'T'); // Time
-    cont = create_subpage_otg(menu, main_page);            add_grid_item_sc(cont, 'C'); // Charger
-    // Connectivity & hardware
-    cont = create_subpage_connectivity(menu, main_page);   add_grid_item_sc(cont, 'N'); // Network
-    cont = create_device_probe(menu, main_page);           add_grid_item_sc(cont, 'V'); // deVices
-    // Home screen
-    cont = create_subpage_home_apps(menu, main_page);      add_grid_item_sc(cont, 'H'); // Home apps
-    // Online services
-    cont = create_subpage_hub(menu, main_page);            add_grid_item_sc(cont, 'L'); // Local hub
-    cont = create_subpage_weather(menu, main_page);        add_grid_item_sc(cont, 'W'); // Weather
-    cont = create_subpage_telegram(menu, main_page);       add_grid_item_sc(cont, 'G'); // teleGram
-    // Notes
-    cont = create_subpage_notes_sync(menu, main_page);     add_grid_item_sc(cont, 'Y'); // sYnc
-    cont = create_subpage_notes_security(menu, main_page); add_grid_item_sc(cont, 'E'); // sEcurity
-    // Storage & files
-    cont = create_subpage_storage(menu, main_page);        add_grid_item_sc(cont, 'S'); // Storage
-    cont = create_files_item(main_page);                   add_grid_item_sc(cont, 'I'); // fIles
-    // App shortcuts
-    cont = create_recordings_item(main_page);              add_grid_item_sc(cont, 'R'); // Recordings
-    cont = create_remote_item(main_page);                  add_grid_item_sc(cont, 'M'); // reMote
-    // System
-    cont = create_subpage_performance(menu, main_page);    add_grid_item_sc(cont, 'P'); // Performance
-    cont = create_subpage_info(menu, main_page);           add_grid_item_sc(cont, 'O'); // infO
-    cont = create_subpage_imu_debug(menu, main_page);      add_grid_item_sc(cont, 'U'); // imU
-
-    // Plugged-in entries (see core/settings_registry.h). Rendered between
-    // the hand-wired grid and the Power Off tile so third-party tiles
-    // don't visually out-rank the first-party ones. No fixed shortcut — the
-    // set is dynamic, so a stable key can't be reserved.
-    for (const auto &e : core::settings_entries()) {
-        cont = create_registered_entry(menu, main_page, e);
-        add_grid_item(cont);
+    for (const SettingsTile &t : kTiles) {
+        cont = create_tile(menu, main_page, t);
+        add_grid_item_sc(cont, t.key);
     }
-
-    cont = create_power_off_item(main_page);             add_grid_item_sc(cont, 'X'); // eXit/off
+    cont = create_power_off_item(main_page);
+    add_grid_item_sc(cont, 'X'); // eXit/off
 
     settings_main_page = main_page;
     lv_menu_set_page(menu, main_page);
@@ -808,6 +658,7 @@ void ui_sys_exit(lv_obj_t *parent)
     // screen that gets constructed. Objects already created keep their old
     // font, but the next UI (menu, app, dialog) picks up the new one.
     theme_init();
+    core::System::getInstance().applyChromeStyle();
     settings_main_page = NULL;
     settings_exit_btn = NULL;
     // Drop any in-flight NTP poll timer so it doesn't outlive the page it
@@ -820,7 +671,6 @@ void ui_sys_exit(lv_obj_t *parent)
     telegram_cfg::reset_state();
     notes_sync_cfg::reset_state();
     imu_debug_cfg::reset_state();
-    core::reset_settings_entries();
     main_page_group_count = 0;
     subpage_item_count = 0;
     settings_shortcut_count = 0;

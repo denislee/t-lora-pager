@@ -9,17 +9,12 @@
  */
 #include "../ui_define.h"
 #include "../hal/notes_crypto.h"
-#include "../core/scoped_lock.h"
+#include "../core/one_shot_job.h"
 #include "app_registry.h"
 #include "settings_internal.h"
-#ifdef ARDUINO
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#endif
 
 namespace telegram_cfg {
 
-static lv_obj_t *g_sub_page       = nullptr;
 static lv_obj_t *g_url_label      = nullptr;
 static lv_obj_t *g_tok_label      = nullptr;
 static lv_obj_t *g_note_label     = nullptr;
@@ -29,15 +24,12 @@ static lv_obj_t *g_fav_sub_page   = nullptr;
 // lv_menu_set_page from the button callback.
 static lv_obj_t *g_parent_menu    = nullptr;
 
-void set_sub_page(lv_obj_t *page) { g_sub_page = page; }
-
 #ifdef ARDUINO
 static void fav_async_teardown();   // defined with the async block below
 #endif
 
 void reset_state()
 {
-    g_sub_page = nullptr;
     g_url_label = nullptr;
     g_tok_label = nullptr;
     g_note_label = nullptr;
@@ -57,32 +49,13 @@ static void refresh_labels()
         lv_label_set_text_fmt(g_url_label, "URL: %s",
                               url.empty() ? "(not set)" : url.c_str());
     }
-    if (g_tok_label) {
-        // Single token_is_encrypted() probe shared with the display string —
-        // each call is an NVS open, so collapsing them halves the work the
-        // deferred refresh has to do.
-        bool encrypted = apps::tg_cfg_token_is_encrypted();
-        std::string tok = apps::tg_cfg_get_token_display();
-        lv_label_set_text_fmt(g_tok_label, "Token: %s%s",
-                              tok.c_str(),
-                              encrypted ? "  [encrypted]" : "  [plaintext]");
-    }
-#ifdef ARDUINO
-    if (g_note_label) {
-        const char *note;
-        if (!notes_crypto_is_enabled()) {
-            note = "Enable Notes encryption (Settings » Notes Security) "
-                   "before saving the bearer — the token is persisted "
-                   "only AES-256 wrapped, never plaintext.";
-        } else if (!notes_crypto_is_unlocked()) {
-            note = "Notes session locked — unlock (open Notes) to "
-                   "save or read the token.";
-        } else {
-            note = "Token is AES-256 wrapped with your notes passphrase.";
-        }
-        lv_label_set_text(g_note_label, note);
-    }
-#endif
+    settings_refresh_token_labels(
+        g_tok_label, g_note_label,
+        apps::tg_cfg_get_token_display(), apps::tg_cfg_token_is_encrypted(),
+        "Enable Notes encryption (Settings » Notes Security) "
+        "before saving the bearer — the token is persisted "
+        "only AES-256 wrapped, never plaintext.",
+        "Token is AES-256 wrapped with your notes passphrase.");
 }
 
 static void set_url_cb(const char *text, void *)
@@ -124,16 +97,12 @@ static void btn_set_token_cb(lv_event_t *)
                    "", set_token_cb, nullptr);
 }
 
-// Notification toggles mirror the haptic_enable pattern: the toggle btn
-// holds the " On "/" Off " label as its user_data so the callback can flip
-// the text in place when the user changes it.
+// Notification toggles. create_toggle_btn_row flips the On/Off label.
 static void notif_vibrate_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     apps::tg_cfg_set_notif_vibrate(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
 }
 
 static void notif_banner_cb(lv_event_t *e)
@@ -141,8 +110,6 @@ static void notif_banner_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     apps::tg_cfg_set_notif_banner(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
 }
 
 void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
@@ -190,15 +157,10 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     // total unread count go up. Haptic respects the global Haptic toggle in
     // Connectivity — if that's off, enabling "Vibrate" here still won't
     // buzz.
-    lv_obj_t *b4 = create_toggle_btn_row(sub_page, "Vibrate on new msg",
-                                         apps::tg_cfg_get_notif_vibrate(),
-                                         notif_vibrate_cb);
-    register_subpage_group_obj(sub_page, b4);
-
-    lv_obj_t *b5 = create_toggle_btn_row(sub_page, "Banner on new msg",
-                                         apps::tg_cfg_get_notif_banner(),
-                                         notif_banner_cb);
-    register_subpage_group_obj(sub_page, b5);
+    create_toggle_btn_row(sub_page, "Vibrate on new msg",
+                          apps::tg_cfg_get_notif_vibrate(), notif_vibrate_cb);
+    create_toggle_btn_row(sub_page, "Banner on new msg",
+                          apps::tg_cfg_get_notif_banner(), notif_banner_cb);
 
 #ifdef ARDUINO
     lv_obj_t *note_row = lv_menu_cont_create(sub_page);
@@ -253,8 +215,7 @@ static void fav_build_rows(lv_obj_t *page,
         long long id = c.first;
         const std::string &title = c.second;
 
-        lv_obj_t *row = create_text(page, NULL, title.c_str(),
-                                    LV_MENU_ITEM_BUILDER_VARIANT_2);
+        lv_obj_t *row = create_text(page, title.c_str());
 
         lv_obj_t *btn = lv_btn_create(row);
         lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
@@ -264,7 +225,7 @@ static void fav_build_rows(lv_obj_t *page,
         lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
         lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUS_KEY);
         lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x222222), 0);
+        lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(btn, UI_COLOR_ACCENT, LV_STATE_CHECKED);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_STATE_CHECKED);
@@ -292,76 +253,43 @@ static void fav_build_rows(lv_obj_t *page,
 #ifdef ARDUINO
 // §2.17: the chat-list fetch is a blocking HTTPS GET; running it inline froze
 // the LVGL thread (dead back button) for the request duration. Mirror the
-// Weather/Telegram-app pattern: a one-shot worker runs the fetch and hands a
-// heap result back to a drain timer on the UI thread. The worker only touches
-// heap-backed shared state under the instance lock (never the widget tree), so
-// it is safe to outlive the subpage; fav_async_teardown() kills the drain timer
-// before the menu objects are freed, so a late result never renders into a
-// torn-down page. lv_timer callbacks run under the instance mutex
-// (lvgl_task.cpp), so the drain reads the shared state without extra locking.
+// Weather/Telegram-app pattern: a core::OneShotJob worker runs the fetch and
+// hands a heap result back to its drain timer on the UI thread. The worker only
+// touches its own heap result (never the widget tree), so it is safe to outlive
+// the subpage; fav_async_teardown() kills the drain timer before the menu
+// objects are freed, so a late result never renders into a torn-down page.
 struct FavFetchResult {
     std::vector<std::pair<long long, std::string>> chats;
     bool ok = false;
     std::string err;
 };
-static lv_obj_t       *g_fav_status_lbl = nullptr;  // updated by the drain
-static lv_obj_t       *g_fav_list_page  = nullptr;  // rows appended here
-static TaskHandle_t    g_fav_task   = nullptr;       // single worker slot
-static lv_timer_t     *g_fav_timer  = nullptr;       // result drain ticker
-static volatile bool   g_fav_done   = false;
-static FavFetchResult *g_fav_result = nullptr;       // heap; UI thread frees
+static lv_obj_t *g_fav_status_lbl = nullptr;  // updated by the drain
+static lv_obj_t *g_fav_list_page  = nullptr;  // rows appended here
 
-static void fav_fetch_task(void *arg)
+static void fav_fetch_done(FavFetchResult &res)
 {
-    (void)arg;
-    FavFetchResult *res = new FavFetchResult();
-    res->ok = apps::tg_cfg_fetch_all_chats(res->chats, &res->err);
-    {
-        core::ScopedInstanceLock lock;
-        if (g_fav_result) { delete g_fav_result; g_fav_result = nullptr; }
-        g_fav_result = res;
-        g_fav_done = true;
-        g_fav_task = nullptr;
-    }
-    vTaskDelete(NULL);
-}
-
-static void fav_drain_tick(lv_timer_t *t)
-{
-    (void)t;
-    if (!g_fav_done) return;               // instance mutex held by lv_timer_handler
-    g_fav_done = false;
-    FavFetchResult *res = g_fav_result;
-    g_fav_result = nullptr;
-    if (g_fav_timer) { lv_timer_del(g_fav_timer); g_fav_timer = nullptr; }
-    if (!res) return;
-    if (!res->ok) {
+    if (!res.ok) {
         if (g_fav_status_lbl)
-            lv_label_set_text_fmt(g_fav_status_lbl, "Fetch failed: %s", res->err.c_str());
-    } else if (res->chats.empty()) {
+            lv_label_set_text_fmt(g_fav_status_lbl, "Fetch failed: %s", res.err.c_str());
+    } else if (res.chats.empty()) {
         if (g_fav_status_lbl)
             lv_label_set_text(g_fav_status_lbl, "Bridge returned no chats.");
     } else {
         if (g_fav_status_lbl)
             lv_label_set_text_fmt(g_fav_status_lbl,
-                "%u chat(s) — tap to toggle favorite.", (unsigned)res->chats.size());
-        if (g_fav_list_page) fav_build_rows(g_fav_list_page, res->chats);
+                "%u chat(s) — tap to toggle favorite.", (unsigned)res.chats.size());
+        if (g_fav_list_page) fav_build_rows(g_fav_list_page, res.chats);
     }
-    delete res;
 }
+
+static core::OneShotJob<FavFetchResult> g_fav_job(fav_fetch_done);
 
 static void fav_async_teardown()
 {
     // Kill the drain first: it (and only it) touches the menu widgets, which
-    // ui_sys_exit frees right before calling reset_state. The worker, if still
-    // running, only writes heap state — leave it to self-delete. A completed
-    // result is safe to free (no writer once done); an in-flight one is freed
-    // by the next kick's stale-result sweep.
-    if (g_fav_timer) { lv_timer_del(g_fav_timer); g_fav_timer = nullptr; }
-    if (g_fav_done) {
-        g_fav_done = false;
-        if (g_fav_result) { delete g_fav_result; g_fav_result = nullptr; }
-    }
+    // ui_sys_exit frees right before calling reset_state. A worker still
+    // running is detached and frees its own result.
+    g_fav_job.teardown();
     g_fav_status_lbl = nullptr;
     g_fav_list_page  = nullptr;
 }
@@ -380,26 +308,18 @@ static void build_favorites_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_label_set_text(status_lbl, "Loading chats...");
 
 #ifdef ARDUINO
-    // Fetch off-thread; fav_drain_tick fills in rows/errors on completion.
+    // Fetch off-thread; fav_fetch_done fills in rows/errors on completion.
     g_fav_status_lbl = status_lbl;
     g_fav_list_page  = sub_page;
-    bool spawn;
-    {
-        core::ScopedInstanceLock lock;
-        spawn = (g_fav_task == nullptr);   // else a prior worker is still in flight
-        if (spawn) {
-            g_fav_done = false;
-            if (g_fav_result) { delete g_fav_result; g_fav_result = nullptr; }
-        }
-    }
-    if (spawn && xTaskCreate(fav_fetch_task, "tg_favs", 8192, nullptr, 2,
-                             &g_fav_task) != pdPASS) {
-        g_fav_task = nullptr;
+    // A prior worker still in flight is re-attached, not duplicated.
+    if (g_fav_job.start([]() {
+            FavFetchResult *res = new FavFetchResult();
+            res->ok = apps::tg_cfg_fetch_all_chats(res->chats, &res->err);
+            return res;
+        }, 8192, "tg_favs", 2) == core::OneShotJob<FavFetchResult>::Start::Failed) {
         lv_label_set_text(status_lbl, "task spawn fail");
         return;
     }
-    if (!g_fav_timer)
-        g_fav_timer = lv_timer_create(fav_drain_tick, 100, nullptr);
 #else
     // Emulator: no worker/HTTPS — resolve synchronously (the stub returns fast).
     lv_refr_now(NULL);

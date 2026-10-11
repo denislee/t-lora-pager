@@ -26,38 +26,27 @@
 #include <cstdint>
 #include <string>
 
+// Only values something produces (or a test exercises) are listed; add new
+// ones together with the first producer.
 enum class HalError : uint8_t {
     Ok = 0,
 
     /* Generic */
     InvalidArgument,
-    NotInitialized,
     NotSupported,
-    Timeout,
     InternalError,
 
     /* Storage */
-    PathNotFound,
-    PathTooLong,
-    CannotOpen,
-    ReadFailed,
-    WriteFailed,
-    StorageFull,
-    StorageOffline,    /* SD missing / unmounted */
-    DecodeFailed,      /* decrypt / parse failed */
+    StorageFull,       /* no producer yet; test_hal_result's error sample */
 
     /* Wireless / network */
     WifiOffline,
-    WifiAuthFailed,
-    DnsFailed,
-    NetworkUnreachable,
     HttpError,         /* non-2xx response */
     Unauthorized,      /* 401/403 */
 
     /* Hub */
     HubDisabled,
     HubUnreachable,
-    HubBadResponse,
 };
 
 /* Stable, English, UI-safe message for a HalError. Suitable for ui_msg_pop_up

@@ -23,11 +23,22 @@ bool secret_exists(const char *ns, const char *key);
  * The caller is responsible for scrubbing any copies it holds. */
 std::string secret_load(const char *ns, const char *key);
 
-/* Encrypt `plaintext` and persist. Passing null or "" clears the slot and
- * succeeds without needing the session unlocked. A non-empty write requires
- * notes_crypto enabled AND unlocked; on refusal returns false with *err set. */
+/* Encrypt `plaintext` and persist. With `trim_ws` (the default) leading and
+ * trailing whitespace is stripped first: a pasted token often carries a
+ * trailing newline/space, and stored as-is it breaks every Authorization
+ * header. Pass false for values where whitespace is significant (the SSH
+ * password). Passing null, "" (or, trimmed, all-whitespace) clears the slot
+ * and succeeds without needing the session unlocked. A non-empty write
+ * requires notes_crypto enabled AND unlocked; on refusal returns false with
+ * *err set. Everything is validated before NVS is opened read-write. */
 bool secret_store(const char *ns, const char *key, const char *plaintext,
-                  std::string *err = nullptr);
+                  std::string *err = nullptr, bool trim_ws = true);
+
+/* Masked form of the secret at (ns, key) for Settings labels: "(not set)",
+ * "(locked)" when ciphertext exists but the notes session is locked,
+ * "********" for a value of 8 characters or fewer, otherwise "********"
+ * plus the last four characters. The decrypted copy is scrubbed. */
+std::string secret_mask_display(const char *ns, const char *key);
 
 /* Drop a plaintext predecessor key that pre-dates encryption (e.g. the
  * bare "token" slot that lived next to "token_enc" during migration).

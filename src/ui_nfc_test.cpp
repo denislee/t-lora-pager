@@ -21,18 +21,18 @@
 #include <cstring>
 #include <string>
 
+// Builds without the ST25R3916 reader only show a "no NFC" popup, so the
+// whole self-test machinery is compiled out there.
+#if defined(USING_ST25R3916)
 namespace {
 
 struct NfcTestCtx {
-    lv_obj_t *overlay      = nullptr;
+    ui_overlay_t ov        = {};
     lv_obj_t *state_label  = nullptr;
     lv_obj_t *count_label  = nullptr;
     lv_obj_t *last_label   = nullptr;
     lv_obj_t *hint_label   = nullptr;
     lv_obj_t *reset_btn    = nullptr;
-    lv_group_t *group      = nullptr;
-    lv_group_t *prev_group = nullptr;
-    lv_event_cb_t prev_back_cb = nullptr;
     bool prev_nfc_enabled  = false;
 
     /* Counters (updated inside diag_hook; read by poll_cb). int is atomic on
@@ -194,10 +194,7 @@ static void tear_down()
     }
 
     if (ctx->poll_timer) lv_timer_del(ctx->poll_timer);
-    if (ctx->overlay)    lv_obj_del(ctx->overlay);
-    if (ctx->group)      lv_group_del(ctx->group);
-    if (ctx->prev_group) set_default_group(ctx->prev_group);
-    if (ctx->prev_back_cb) ui_show_back_button(ctx->prev_back_cb);
+    ui_overlay_close(&ctx->ov);
     delete ctx;
 }
 
@@ -219,72 +216,27 @@ static void reset_event_cb(lv_event_t *e)
     hw_feedback();
 }
 
-static lv_obj_t *build_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
-{
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_style_radius(btn, UI_RADIUS, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x151515), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
-    lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a1a00), LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_height(btn, LV_SIZE_CONTENT);
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, text);
-    lv_obj_set_style_text_color(lbl, UI_COLOR_FG, 0);
-    lv_obj_center(lbl);
-    if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, nullptr);
-    return btn;
-}
-
 } /* namespace */
+#endif /* USING_ST25R3916 */
 
 void ui_nfc_test_open()
 {
-    if (g_ctx) return;
-
 #if !defined(USING_ST25R3916)
     ui_msg_pop_up("NFC Test", "This build has no NFC hardware.");
-    return;
 #else
+    if (g_ctx) return;
+
     NfcTestCtx *ctx = new NfcTestCtx();
     g_ctx = ctx;
 
-    ctx->prev_group = lv_group_get_default();
-    ctx->prev_back_cb = ui_get_back_button_cb();
     ctx->prev_nfc_enabled = hw_get_nfc_enable();
-    ctx->group = lv_group_create();
-    lv_group_set_wrap(ctx->group, false);
-    set_default_group(ctx->group);
-    ui_show_back_button(close_event_cb);
-    enable_keyboard();
+    lv_obj_t *overlay = ui_overlay_open(&ctx->ov, close_event_cb, false);
+    lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
     /* Force discovery on regardless of the user's prior setting. tear_down
      * restores the original state. */
     if (!ctx->prev_nfc_enabled) hw_set_nfc_enable(true);
-
-    const lv_font_t *header_font = get_header_font();
-    int32_t bar_h = lv_font_get_line_height(header_font) + 8;
-    if (bar_h < 30) bar_h = 30;
-    int32_t v_res = lv_display_get_vertical_resolution(NULL);
-    if (v_res <= 0) v_res = 222;
-
-    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
-    ctx->overlay = overlay;
-    lv_obj_set_size(overlay, lv_pct(100), v_res - bar_h);
-    lv_obj_align(overlay, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(overlay, UI_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
-    lv_obj_set_style_pad_all(overlay, 8, 0);
-    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(overlay, 6, 0);
 
     lv_obj_t *title = lv_label_create(overlay);
     lv_label_set_text(title, "NFC Self-Test");
@@ -318,10 +270,10 @@ void ui_nfc_test_open()
     lv_label_set_long_mode(ctx->hint_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(ctx->hint_label, lv_pct(100));
 
-    ctx->reset_btn = build_button(overlay, LV_SYMBOL_REFRESH " Reset counters",
-                                  reset_event_cb);
+    ctx->reset_btn = ui_modal_btn_create(overlay, LV_SYMBOL_REFRESH " Reset counters",
+                                         reset_event_cb, nullptr);
     lv_obj_set_width(ctx->reset_btn, lv_pct(100));
-    lv_group_add_obj(ctx->group, ctx->reset_btn);
+    lv_group_add_obj(ctx->ov.group, ctx->reset_btn);
     lv_group_focus_obj(ctx->reset_btn);
 
     /* Install the hook after the labels exist so the first event paints

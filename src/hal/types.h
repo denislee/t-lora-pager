@@ -14,13 +14,6 @@
 #include <vector>
 #include "../event_define.h"
 
-// Debug logging macro - define DEBUG_RADIO to enable verbose radio output
-#ifdef DEBUG_RADIO
-#define RADIO_LOG(fmt, ...) printf(fmt, ##__VA_ARGS__)
-#else
-#define RADIO_LOG(fmt, ...) ((void)0)
-#endif
-
 typedef enum {
     MEDIA_VOLUME_UP,
     MEDIA_VOLUME_DOWN,
@@ -58,23 +51,6 @@ typedef enum {
 #define log_d(fmt, ...) ((void)0)
 #endif
 
-/**
- * @brief Enumeration representing different WiFi statuses.
- *
- * Mirrors the Arduino WiFi Shield library for host-side (emulator) builds.
- */
-typedef enum {
-    WL_NO_SHIELD = 255,
-    WL_STOPPED = 254,
-    WL_IDLE_STATUS = 0,
-    WL_NO_SSID_AVAIL = 1,
-    WL_SCAN_COMPLETED = 2,
-    WL_CONNECTED = 3,
-    WL_CONNECT_FAILED = 4,
-    WL_CONNECTION_LOST = 5,
-    WL_DISCONNECTED = 6
-} wl_status_t;
-
 // Emulator-only fallback constants. The vendor LilyGo_LoRa_Pager.h defines
 // the authoritative hardware values (e.g. DEVICE_MAX_BRIGHTNESS_LEVEL=16 for
 // the AW9364 16-step driver). Wrap each in #ifndef so the vendor header always
@@ -84,12 +60,6 @@ typedef enum {
 #endif
 #ifndef DEVICE_MIN_BRIGHTNESS_LEVEL
 #define DEVICE_MIN_BRIGHTNESS_LEVEL 0
-#endif
-#ifndef DEVICE_MAX_CHARGE_CURRENT
-#define DEVICE_MAX_CHARGE_CURRENT   1000
-#endif
-#ifndef DEVICE_MIN_CHARGE_CURRENT
-#define DEVICE_MIN_CHARGE_CURRENT   100
 #endif
 #ifndef DEVICE_CHARGE_LEVEL_NUMS
 #define DEVICE_CHARGE_LEVEL_NUMS    12
@@ -125,9 +95,8 @@ typedef enum {
 #include <WiFi.h>
 #endif
 
-#define GMT_OFFSET_SECOND       (8*3600)
-
-enum RadioMode {
+// radio_params_t.mode values.
+enum {
     RADIO_DISABLE,
     RADIO_TX,
     RADIO_RX,
@@ -135,7 +104,6 @@ enum RadioMode {
 };
 
 typedef struct {
-    bool isRunning;
     float freq;
     float bandwidth;
     uint16_t cr;
@@ -143,7 +111,6 @@ typedef struct {
     uint8_t sf;
     uint8_t mode;
     uint8_t syncWord;
-    uint32_t interval;
 } radio_params_t;
 
 typedef struct {
@@ -158,40 +125,10 @@ typedef struct {
     std::string password;
 } wifi_conn_params_t;
 
-typedef enum {
-    AUDIO_SOURCE_FATFS,
-    AUDIO_SOURCE_SDCARD,
-} audio_source_type_t;
-
 typedef struct {
-    audio_source_type_t source_type;
-    std::string file_name;
-} AudioParams_t;
-
-typedef enum {
-    MONITOR_PMU,
-    MONITOR_PPM,
-} monitor_params_type_t;
-
-typedef struct {
-    monitor_params_type_t type;
-    std::string charge_state;
-    uint16_t sys_voltage;
     uint16_t battery_voltage;
-    uint16_t usb_voltage;
     int      battery_percent;
-    float    temperature;
-    uint16_t remainingCapacity;
-    uint16_t fullChargeCapacity;
-    uint16_t designCapacity;
-    int16_t  instantaneousCurrent;
-    int16_t  standbyCurrent;
-    int16_t  averagePower;
-    int16_t  maxLoadCurrent;
-    uint16_t timeToEmpty;
-    uint16_t timeToFull;
-    std::string ntc_state;
-    bool is_charging;
+    bool     is_charging;
 } monitor_params_t;
 
 typedef struct {
@@ -215,7 +152,6 @@ typedef struct {
     uint8_t show_mem_usage;
     uint8_t show_file_count;
     uint16_t cpu_freq_mhz;
-    uint8_t storage_prefer_sd;
     uint8_t msc_prefer_sd;
     uint8_t prune_internal;
     uint8_t header_font_size;
@@ -237,22 +173,7 @@ typedef struct {
 typedef struct {
     enum app_event event;
     const char *filename;
-    audio_source_type_t source_type;
 } audio_params_t;
-
-typedef struct {
-    uint8_t *data;
-    size_t  length;
-    int state;
-} radio_tx_params_t;
-
-typedef struct {
-    uint8_t *data;
-    size_t  length;
-    int16_t rssi;
-    int16_t snr;
-    int state;
-} radio_rx_params_t;
 
 typedef struct {
     float roll;

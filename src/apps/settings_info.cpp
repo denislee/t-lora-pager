@@ -172,33 +172,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_pad_all(sub_page, 4, 0);
     lv_obj_set_style_pad_row(sub_page, 0, 0);
 
-    auto add_info_row = [&](const char *key, const char *val) -> lv_obj_t* {
-        lv_obj_t *row = lv_menu_cont_create(sub_page);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
-        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_ver(row, 4, 0);
-        lv_obj_set_style_pad_hor(row, 8, 0);
-        lv_obj_set_style_border_width(row, 0, 0);
-        lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_width(row, 1, 0);
-        lv_obj_set_style_border_color(row, lv_palette_lighten(LV_PALETTE_GREY, 2), 0);
-        lv_obj_set_style_radius(row, 0, 0);
-
-        lv_obj_t *k = lv_label_create(row);
-        lv_label_set_text(k, key);
-        lv_obj_set_style_text_color(k, lv_palette_main(LV_PALETTE_GREY), 0);
-
-        lv_obj_t *v = lv_label_create(row);
-        lv_label_set_text(v, val);
-        lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_max_width(v, LV_PCT(55), 0);
-
-        register_subpage_group_obj(sub_page, row);
-        return v;
+    auto add_info_row = [&](const char *key, const char *val) {
+        return settings_kv_row(sub_page, key, val);
     };
 
     char buffer[128];
@@ -241,8 +216,9 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     add_info_row("Hash", hw_get_firmware_hash_string());
     add_info_row("Chip", hw_get_chip_id_string());
 
-    // Kill any prior timer (e.g. if build_subpage runs a second time on
-    // settings_page_changed_cb rebuild) before starting a new one.
+    // Defensive only: settings_page_changed_cb runs each builder once per
+    // Settings session and reset_state() kills the timer on exit, so a prior
+    // timer should never exist here.
     if (info_timer) lv_timer_del(info_timer);
     info_timer = lv_timer_create(sys_timer_event_cb, 1000, NULL);
 }

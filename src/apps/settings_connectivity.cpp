@@ -13,12 +13,8 @@
  */
 #include "../ui_define.h"
 #include "../hal/wireless.h"
-#include "../core/scoped_lock.h"
+#include "../core/one_shot_job.h"
 #include "settings_internal.h"
-#ifdef ARDUINO
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#endif
 
 namespace connectivity_cfg {
 
@@ -37,55 +33,48 @@ lv_obj_t *g_internet_test_row    = nullptr;
 lv_obj_t *g_internet_test_btn    = nullptr;
 lv_obj_t *g_internet_test_status = nullptr;
 
-void wifi_enable_cb(lv_event_t *e) {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.wifi_enable = en;
-    hw_set_wifi_enable(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
-    if (g_wifi_networks_row) {
-        if (en) {
-            lv_obj_clear_flag(g_wifi_networks_row, LV_OBJ_FLAG_HIDDEN);
-            if (g_wifi_networks_btn) lv_obj_clear_flag(g_wifi_networks_btn, LV_OBJ_FLAG_HIDDEN);
-            if (g_internet_test_row) lv_obj_clear_flag(g_internet_test_row, LV_OBJ_FLAG_HIDDEN);
-            if (g_internet_test_btn) lv_obj_clear_flag(g_internet_test_btn, LV_OBJ_FLAG_HIDDEN);
-            if (g_internet_test_status) lv_obj_clear_flag(g_internet_test_status, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(g_wifi_networks_row, LV_OBJ_FLAG_HIDDEN);
-            if (g_wifi_networks_btn) lv_obj_add_flag(g_wifi_networks_btn, LV_OBJ_FLAG_HIDDEN);
-            if (g_internet_test_row) lv_obj_add_flag(g_internet_test_row, LV_OBJ_FLAG_HIDDEN);
-            if (g_internet_test_btn) lv_obj_add_flag(g_internet_test_btn, LV_OBJ_FLAG_HIDDEN);
-            if (g_internet_test_status) lv_obj_add_flag(g_internet_test_status, LV_OBJ_FLAG_HIDDEN);
-        }
-        // Rebuild the subpage nav group so the row is inserted at its
-        // registered position (between the WiFi toggle and Bluetooth) rather
-        // than tacked onto the end, and so it's actually focusable again.
-        // activate_subpage_group defaults focus to the back button — move it
-        // back to the WiFi toggle the user just interacted with.
-        if (g_connectivity_subpage) {
-            activate_subpage_group(g_connectivity_subpage);
-            lv_group_focus_obj(obj);
-        }
+void set_hidden(lv_obj_t *obj, bool hidden)
+{
+    if (!obj) return;
+    if (hidden) lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    else        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Rebuild the subpage nav group so re-shown rows are inserted at their
+// registered position (right after the toggle) rather than tacked onto the
+// end, and so they're actually focusable again. activate_subpage_group
+// defaults focus to the back button — move it back to the toggle the user
+// just interacted with.
+void refocus_after_visibility_change(lv_obj_t *btn)
+{
+    if (g_connectivity_subpage) {
+        activate_subpage_group(g_connectivity_subpage);
+        lv_group_focus_obj(btn);
     }
 }
 
-void bt_enable_cb(lv_event_t *e) {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.bt_enable = en;
-    hw_set_bt_enable(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
+void wifi_after(lv_obj_t *btn, bool en)
+{
+    if (!g_wifi_networks_row) return;
+    set_hidden(g_wifi_networks_row, !en);
+    set_hidden(g_wifi_networks_btn, !en);
+    set_hidden(g_internet_test_row, !en);
+    set_hidden(g_internet_test_btn, !en);
+    set_hidden(g_internet_test_status, !en);
+    refocus_after_visibility_change(btn);
 }
 
-void radio_enable_cb(lv_event_t *e) {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.radio_enable = en;
+void nfc_after(lv_obj_t *btn, bool en)
+{
+    if (!g_nfc_test_row) return;
+    set_hidden(g_nfc_test_row, !en);
+    set_hidden(g_nfc_test_btn, !en);
+    refocus_after_visibility_change(btn);
+}
+
+void apply_radio(bool en)
+{
     int16_t st = hw_set_radio_enable(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
     if (st != 0) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Radio config failed (err %d)", (int)st);
@@ -93,45 +82,37 @@ void radio_enable_cb(lv_event_t *e) {
     }
 }
 
-void nfc_enable_cb(lv_event_t *e) {
+// The six hardware toggles share one body: mirror the new state into
+// local_param, apply it, then run the optional follow-up (row visibility).
+// create_toggle_btn_row flips the On/Off label itself.
+struct HwToggle {
+    const char *label;
+    bool (*get)();
+    uint8_t *param;                          // &local_param.<x>_enable
+    void (*apply)(bool en);
+    void (*after)(lv_obj_t *btn, bool en);   // may be nullptr
+};
+
+void hw_toggle_cb(lv_event_t *e)
+{
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    const HwToggle *t = (const HwToggle *)lv_event_get_user_data(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.nfc_enable = en;
-    hw_set_nfc_enable(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
-    if (g_nfc_test_row) {
-        if (en) {
-            lv_obj_clear_flag(g_nfc_test_row, LV_OBJ_FLAG_HIDDEN);
-            if (g_nfc_test_btn) lv_obj_clear_flag(g_nfc_test_btn, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(g_nfc_test_row, LV_OBJ_FLAG_HIDDEN);
-            if (g_nfc_test_btn) lv_obj_add_flag(g_nfc_test_btn, LV_OBJ_FLAG_HIDDEN);
-        }
-        // Rebuild nav group so the row reclaims focusability when re-shown.
-        if (g_connectivity_subpage) {
-            activate_subpage_group(g_connectivity_subpage);
-            lv_group_focus_obj(obj);
-        }
-    }
+    *t->param = en;
+    t->apply(en);
+    if (t->after) t->after(obj, en);
 }
 
-void speaker_enable_cb(lv_event_t *e) {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.speaker_enable = en;
-    hw_set_speaker_enable(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
-}
+const HwToggle kWifi    = { "WiFi",      hw_get_wifi_enable,    &local_param.wifi_enable,    hw_set_wifi_enable,    wifi_after };
+const HwToggle kBt      = { "Bluetooth", hw_get_bt_enable,      &local_param.bt_enable,      hw_set_bt_enable,      nullptr };
+const HwToggle kRadio   = { "Radio",     hw_get_radio_enable,   &local_param.radio_enable,   apply_radio,           nullptr };
+const HwToggle kNfc     = { "NFC",       hw_get_nfc_enable,     &local_param.nfc_enable,     hw_set_nfc_enable,     nfc_after };
+const HwToggle kSpeaker = { "Speaker",   hw_get_speaker_enable, &local_param.speaker_enable, hw_set_speaker_enable, nullptr };
+const HwToggle kHaptic  = { "Haptic",    hw_get_haptic_enable,  &local_param.haptic_enable,  hw_set_haptic_enable,  nullptr };
 
-void haptic_enable_cb(lv_event_t *e) {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.haptic_enable = en;
-    hw_set_haptic_enable(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
+lv_obj_t *add_hw_toggle(lv_obj_t *sub_page, const HwToggle &t)
+{
+    return create_toggle_btn_row(sub_page, t.label, t.get(), hw_toggle_cb, (void *)&t);
 }
 
 void wifi_networks_click_cb(lv_event_t *)
@@ -161,63 +142,26 @@ void show_internet_result(bool ok, uint32_t rtt_ms, const std::string &err)
 #ifdef ARDUINO
 // P2.3: hw_ping_internet blocks for up to 3 s; running it inline froze the
 // LVGL thread (dead back button/encoder) for the whole probe — exactly the
-// situation in which a user taps this button. Run it on a one-shot worker
-// and deliver the result via a drain timer, same lifecycle contract as the
-// weather city-search fetch (settings_weather.cpp): the worker touches only
-// heap state under the instance lock (never the widget tree), and
-// internet_test_teardown() kills the drain before the subpage widgets free.
-//
-// TODO(cleanup): this {task, drain-timer, volatile done, heap result*} scaffold
-// is now the ~5th hand-rolled copy of the same idiom (menu_app.cpp,
-// settings_weather.cpp, settings_telegram.cpp, ui_notes_sync.cpp,
-// ui_telegram.cpp). Retire them into one shared core::UiAsyncProbe<T> helper in
-// its own refactor. Kept deliberately verbatim-uniform with the weather twin
-// here so that extraction stays mechanical — do not tidy this copy in isolation.
+// situation in which a user taps this button. Run it on a core::OneShotJob
+// worker and deliver the result via its drain timer: the worker touches only
+// its own heap result (never the widget tree), and internet_test_teardown()
+// kills the drain before the subpage widgets free.
 struct InternetTestResult {
     bool ok = false;
     uint32_t rtt_ms = 0;
     std::string err;
 };
-TaskHandle_t        g_inet_test_task   = nullptr;   // single worker slot
-lv_timer_t         *g_inet_test_timer  = nullptr;
-volatile bool       g_inet_test_done   = false;
-InternetTestResult *g_inet_test_result = nullptr;   // heap; UI thread frees
 
-void internet_test_task(void *arg)
+void internet_test_done(InternetTestResult &res)
 {
-    (void)arg;
-    InternetTestResult *res = new InternetTestResult();
-    res->ok = hw_ping_internet("1.1.1.1", 53, 3000, &res->rtt_ms, &res->err);
-    {
-        core::ScopedInstanceLock lock;
-        if (g_inet_test_result) { delete g_inet_test_result; g_inet_test_result = nullptr; }
-        g_inet_test_result = res;
-        g_inet_test_done = true;
-        g_inet_test_task = nullptr;
-    }
-    vTaskDelete(NULL);
+    show_internet_result(res.ok, res.rtt_ms, res.err);
 }
 
-void internet_test_drain_tick(lv_timer_t *t)
-{
-    (void)t;
-    if (!g_inet_test_done) return;
-    g_inet_test_done = false;
-    InternetTestResult *res = g_inet_test_result;
-    g_inet_test_result = nullptr;
-    if (g_inet_test_timer) { lv_timer_del(g_inet_test_timer); g_inet_test_timer = nullptr; }
-    if (!res) return;
-    show_internet_result(res->ok, res->rtt_ms, res->err);
-    delete res;
-}
+core::OneShotJob<InternetTestResult> g_inet_test_job(internet_test_done);
 
 void internet_test_teardown()
 {
-    if (g_inet_test_timer) { lv_timer_del(g_inet_test_timer); g_inet_test_timer = nullptr; }
-    if (g_inet_test_done) {
-        g_inet_test_done = false;
-        if (g_inet_test_result) { delete g_inet_test_result; g_inet_test_result = nullptr; }
-    }
+    g_inet_test_job.teardown();
 }
 #endif // ARDUINO
 
@@ -225,38 +169,26 @@ void internet_test_click_cb(lv_event_t *)
 {
     if (!g_internet_test_status) return;
 #ifdef ARDUINO
-    bool spawn;
-    {
-        core::ScopedInstanceLock lock;
-        spawn = (g_inet_test_task == nullptr);   // else a prior check is still running
-        if (spawn) g_inet_test_done = false;
-    }
-    if (!spawn) {
-        // A check is already in flight (e.g. page was exited/re-entered mid-
-        // probe, which tore down the old drain timer). Re-attach the drain
-        // so that worker's result still lands rather than stranding it.
-        if (!g_inet_test_timer)
-            g_inet_test_timer = lv_timer_create(internet_test_drain_tick, 100, nullptr);
-        lv_label_set_text(g_internet_test_status, "Still testing...");
-        lv_obj_set_style_text_color(g_internet_test_status, UI_COLOR_ACCENT, 0);
-        return;
-    }
-
-    lv_label_set_text(g_internet_test_status, "Testing 1.1.1.1...");
+    using Job = core::OneShotJob<InternetTestResult>;
+    Job::Start started = g_inet_test_job.start([]() {
+        InternetTestResult *res = new InternetTestResult();
+        res->ok = hw_ping_internet(&res->rtt_ms, &res->err);
+        return res;
+    }, 4096, "inet_tst", 1);
+    // Attached: a check is already in flight (e.g. page was exited/re-entered
+    // mid-probe); the job re-attached its drain so that result still lands.
+    lv_label_set_text(g_internet_test_status, started == Job::Start::Attached
+                                                  ? "Still testing..."
+                                                  : "Testing 1.1.1.1...");
     lv_obj_set_style_text_color(g_internet_test_status, UI_COLOR_ACCENT, 0);
-    if (xTaskCreate(internet_test_task, "inet_tst", 4096, nullptr, 1,
-                    &g_inet_test_task) != pdPASS) {
+    if (started == Job::Start::Failed) {
         // Task slots exhausted — fall back to a synchronous probe so the
         // button still works (pays the old up-to-3 s UI freeze).
-        g_inet_test_task = nullptr;
         uint32_t rtt_ms = 0;
         std::string err;
-        bool ok = hw_ping_internet("1.1.1.1", 53, 3000, &rtt_ms, &err);
+        bool ok = hw_ping_internet(&rtt_ms, &err);
         show_internet_result(ok, rtt_ms, err);
-        return;
     }
-    if (!g_inet_test_timer)
-        g_inet_test_timer = lv_timer_create(internet_test_drain_tick, 100, nullptr);
 #else
     // Emulator: no FreeRTOS task; probe inline.
     lv_label_set_text(g_internet_test_status, "Testing 1.1.1.1...");
@@ -264,7 +196,7 @@ void internet_test_click_cb(lv_event_t *)
     lv_refr_now(NULL);
     uint32_t rtt_ms = 0;
     std::string err;
-    bool ok = hw_ping_internet("1.1.1.1", 53, 3000, &rtt_ms, &err);
+    bool ok = hw_ping_internet(&rtt_ms, &err);
     show_internet_result(ok, rtt_ms, err);
 #endif
 }
@@ -293,8 +225,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 
     lv_obj_t *btn;
 
-    btn = create_toggle_btn_row(sub_page, "WiFi", hw_get_wifi_enable(), wifi_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
+    add_hw_toggle(sub_page, kWifi);
 
     btn = create_button(sub_page, LV_SYMBOL_WIFI, "WiFi Networks", wifi_networks_click_cb);
     g_wifi_networks_btn = btn;
@@ -323,14 +254,9 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     }
     register_subpage_group_obj(sub_page, btn);
 
-    btn = create_toggle_btn_row(sub_page, "Bluetooth", hw_get_bt_enable(), bt_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
-
-    btn = create_toggle_btn_row(sub_page, "Radio", hw_get_radio_enable(), radio_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
-
-    btn = create_toggle_btn_row(sub_page, "NFC", hw_get_nfc_enable(), nfc_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
+    add_hw_toggle(sub_page, kBt);
+    add_hw_toggle(sub_page, kRadio);
+    add_hw_toggle(sub_page, kNfc);
 
 #if defined(USING_ST25R3916)
     btn = create_button(sub_page, LV_SYMBOL_REFRESH, "NFC Test",
@@ -344,11 +270,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     register_subpage_group_obj(sub_page, btn);
 #endif
 
-    btn = create_toggle_btn_row(sub_page, "Speaker", hw_get_speaker_enable(), speaker_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
-
-    btn = create_toggle_btn_row(sub_page, "Haptic", hw_get_haptic_enable(), haptic_enable_cb);
-    register_subpage_group_obj(sub_page, btn);
+    add_hw_toggle(sub_page, kSpeaker);
+    add_hw_toggle(sub_page, kHaptic);
 }
 
 } // namespace connectivity_cfg

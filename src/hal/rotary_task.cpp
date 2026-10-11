@@ -29,48 +29,34 @@
 #include "rotary_task.h"
 
 #ifdef ARDUINO
+#include <Arduino.h>   // pins_arduino.h defines USING_INPUT_DEV_ROTARY
+#endif
 
-#include <Arduino.h>
+#if defined(ARDUINO) && defined(USING_INPUT_DEV_ROTARY)
+
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
 #include <lvgl.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
 
-#include "../core/system_hooks.h"
-#include "system.h"
-
-#ifdef USING_INPUT_DEV_ROTARY
+#include "str_encode.h"
+#include "task_util.h"
 
 namespace {
 
 constexpr UBaseType_t kTaskPriority = configMAX_PRIORITIES - 2;
 constexpr BaseType_t  kTaskCore     = 0;   // Opposite of Arduino loopTask / LVGL task (core 1).
 constexpr UBaseType_t kQueueDepth   = 16;  // Burst of fast clicks while LVGL is briefly blocked.
-// Fallback cadence while the display is off. hw_rotary_task_notify_wake()
-// from ui_resume_timers() is the real wake path; 1 s is a safety net only.
-constexpr uint32_t    kFakeSleepIdleMs = 1000;
 
 QueueHandle_t s_event_queue = nullptr;
 TaskHandle_t  s_task        = nullptr;
 
 void enqueue_event(const RotaryMsg_t &ev)
 {
-    // Drop the oldest pending event when full — better to lose a stale
-    // click than to stall the reader (would back-pressure onto the
-    // vendor rotaryTask, which sends with portMAX_DELAY).
-    if (xQueueSend(s_event_queue, &ev, 0) != pdTRUE) {
-        RotaryMsg_t discard;
-        xQueueReceive(s_event_queue, &discard, 0);
-        xQueueSend(s_event_queue, &ev, 0);
-    }
-    // Wake the LVGL task immediately so scroll/click renders without waiting
-    // for the kMaxTickMs (200 ms) fallback sleep. xTaskNotifyGive is cheap
-    // and idempotent — multiple gives before the task's ulTaskNotifyTake
-    // collapse to one.
-    hw_cpu_boost_for_input();
-    hw_lvgl_task_notify_wake();
+    // Drop the oldest pending event when full — stalling the reader would
+    // back-pressure onto the vendor rotaryTask, which sends with
+    // portMAX_DELAY.
+    hal::queue_send_drop_oldest(s_event_queue, ev);
+    hw_input_event_wake();
 }
 
 void rotary_task_fn(void *)
@@ -84,10 +70,7 @@ void rotary_task_fn(void *)
         // isn't delayed, and the timeout bounds latency if a notify is ever
         // missed. Hold-to-wake is detected by the vendor task, not here, so
         // resuming a little later after wake costs nothing.
-        if (ui_is_fake_sleep()) {
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kFakeSleepIdleMs));
-            continue;
-        }
+        if (hal::park_if_fake_sleep()) continue;
 
         // instance.getRotary() blocks up to 50 ms on the vendor's
         // rotaryMsg queue. That's fine here — this task has no other
@@ -106,21 +89,6 @@ bool is_word_boundary_char(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-uint32_t get_byte_pos(const char *txt, uint32_t char_pos)
-{
-    uint32_t bp = 0;
-    while (char_pos > 0 && txt[bp] != '\0') {
-        uint8_t c = txt[bp];
-        if      ((c & 0x80) == 0x00) bp += 1;
-        else if ((c & 0xE0) == 0xC0) bp += 2;
-        else if ((c & 0xF0) == 0xE0) bp += 3;
-        else if ((c & 0xF8) == 0xF0) bp += 4;
-        else                         bp += 1;
-        char_pos--;
-    }
-    return bp;
-}
-
 // Mirror of LV_Helper_v9.cpp::textarea_jump_word so Alt+scroll still
 // hops by word when our read_cb is in charge.
 void textarea_jump_word(lv_obj_t *ta, int direction)
@@ -134,7 +102,7 @@ void textarea_jump_word(lv_obj_t *ta, int direction)
         while (true) {
             uint32_t pos = lv_textarea_get_cursor_pos(ta);
             if (pos >= len) break;
-            uint32_t bp = get_byte_pos(txt, pos);
+            uint32_t bp = hal::utf8_byte_pos(txt, pos);
             bool is_space = is_word_boundary_char(txt[bp]);
             if (!skipped_word) {
                 if (!is_space) skipped_word = true;
@@ -148,7 +116,7 @@ void textarea_jump_word(lv_obj_t *ta, int direction)
         while (true) {
             uint32_t pos = lv_textarea_get_cursor_pos(ta);
             if (pos == 0) break;
-            uint32_t bp = get_byte_pos(txt, pos - 1);
+            uint32_t bp = hal::utf8_byte_pos(txt, pos - 1);
             bool is_space = is_word_boundary_char(txt[bp]);
             if (!skipped_word) {
                 if (!is_space) skipped_word = true;
@@ -236,12 +204,7 @@ void rotary_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 
 }  // namespace
 
-void hw_rotary_task_notify_wake()
-{
-    // Safe from any task context; a give while the task is running (not
-    // blocked) simply leaves the notification pending for the next take.
-    if (s_task) xTaskNotifyGive(s_task);
-}
+void hw_rotary_task_notify_wake() { hal::notify_task(s_task); }
 
 void hw_rotary_task_start()
 {
@@ -262,25 +225,13 @@ void hw_rotary_task_start()
         log_w("rotary_task: no LVGL encoder indev found; polling will still run");
     }
 
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        rotary_task_fn, "rotary_reader", 3072, nullptr,
-        kTaskPriority, &s_task, kTaskCore);
-    if (ok != pdPASS) {
-        log_e("rotary_task: task create failed");
-        s_task = nullptr;
-    }
+    hal::start_pinned_task(rotary_task_fn, "rotary_reader", 3072,
+                           kTaskPriority, kTaskCore, &s_task, "rotary_task");
 }
 
-#else  // !USING_INPUT_DEV_ROTARY
+#else  // emulator, or a board without the rotary encoder
 
 void hw_rotary_task_start() {}
 void hw_rotary_task_notify_wake() {}
 
-#endif  // USING_INPUT_DEV_ROTARY
-
-#else  // !ARDUINO
-
-void hw_rotary_task_start() {}
-void hw_rotary_task_notify_wake() {}
-
-#endif  // ARDUINO
+#endif  // ARDUINO && USING_INPUT_DEV_ROTARY

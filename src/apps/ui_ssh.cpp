@@ -6,8 +6,9 @@
  * mbedTLS shipped with Arduino-ESP32). The session runs in its own
  * FreeRTOS task on core 0, with a mutex-protected pair of std::string
  * buffers carrying bytes between the LVGL/UI thread and the SSH task.
- * The emulator (non-ARDUINO) build keeps a loopback stub so the UI can
- * be exercised without networking.
+ * The emulator (non-ARDUINO) build, and boards without LibSSH in their
+ * lib_deps (no USING_LIBSSH — the watches), keep a loopback stub so the UI
+ * can be exercised without networking.
  *
  * Layout (480×222 pager): status text + edit (pencil) + connect button on
  * row 1, terminal in the middle, input bar at the bottom. Encoder-click on
@@ -50,6 +51,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#endif
+#if defined(ARDUINO) && defined(USING_LIBSSH)
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
 #endif
@@ -95,11 +98,13 @@ public:
 };
 
 // Loopback backend: fakes a remote shell. Demonstrates the full UI/data path
-// without needing networking. Replace with a real libssh2-backed class.
+// without needing networking. Used on boards built without LibSSH (the
+// watches) and on the emulator; the pager gets LibSshBackend below.
 class LoopbackBackend : public SshBackend {
 public:
     void connect(const SshConfig& cfg) override {
         cfg_ = cfg;
+        hal::secret_scrub(cfg_.password);  // the stub never authenticates
         state_ = State::Connecting;
         ticks_until_connect_ = 5;  // ~500 ms at 100 ms poll
     }
@@ -157,7 +162,7 @@ private:
     int         ticks_until_connect_ = 0;
 };
 
-#ifdef ARDUINO
+#if defined(ARDUINO) && defined(USING_LIBSSH)
 // libssh-backed implementation. The session is owned by a FreeRTOS task
 // pinned to core 0 (the LVGL/UI runs on core 1 in factory.ino). I/O between
 // the UI thread and the session task goes through two std::string buffers
@@ -212,6 +217,7 @@ public:
             task_trampoline, "ssh_app", 32 * 1024, this, 5, &task_, 0);
         if (ok != pdPASS) {
             task_ = nullptr;
+            hal::secret_scrub(cfg_.password);
             set_error("Failed to create SSH task");
             push_output("[!] Failed to spawn SSH task.\n");
             state_.store(State::Error);
@@ -251,16 +257,34 @@ private:
     static void task_trampoline(void* arg) {
         auto* self = static_cast<LibSshBackend*>(arg);
         self->run_session();
+        // Covers every early error return inside run_session().
+        hal::secret_scrub(self->cfg_.password);
         xSemaphoreGive(self->done_sem_);
         vTaskDelete(nullptr);
     }
 
     void run_session() {
-        ssh_session sess = ssh_new();
-        if (!sess) {
-            set_error("ssh_new failed");
-            push_output("[!] ssh_new failed.\n");
+        ssh_session sess      = ssh_new();
+        ssh_channel ch        = nullptr;
+        bool        connected = false;  // ssh_connect succeeded
+        bool        ch_open   = false;  // ssh_channel_open_session succeeded
+
+        // Shared error exit: record the error, echo it to the terminal,
+        // release whatever has been set up so far and park in Error.
+        auto fail = [&](const std::string& err, const std::string& out) {
+            set_error(err);
+            push_output(out);
+            if (ch) {
+                if (ch_open) ssh_channel_close(ch);
+                ssh_channel_free(ch);
+            }
+            if (connected) ssh_disconnect(sess);
+            if (sess) ssh_free(sess);
             state_.store(State::Error);
+        };
+
+        if (!sess) {
+            fail("ssh_new failed", "[!] ssh_new failed.\n");
             return;
         }
 
@@ -276,48 +300,33 @@ private:
         push_output("Connecting...\n");
         if (ssh_connect(sess) != SSH_OK) {
             std::string e = ssh_get_error(sess);
-            set_error("Connect failed: " + e);
-            push_output("[!] " + e + "\n");
-            ssh_free(sess);
-            state_.store(State::Error);
+            fail("Connect failed: " + e, "[!] " + e + "\n");
             return;
         }
+        connected = true;
 
         // TODO: real host key verification. For now the user implicitly
         // trusts the network — same posture as a fresh `ssh -o
         // StrictHostKeyChecking=no` session.
-        if (ssh_userauth_password(sess, nullptr, cfg_.password.c_str())
-            != SSH_AUTH_SUCCESS) {
+        int auth = ssh_userauth_password(sess, nullptr, cfg_.password.c_str());
+        hal::secret_scrub(cfg_.password);  // not needed past auth
+        if (auth != SSH_AUTH_SUCCESS) {
             std::string e = ssh_get_error(sess);
-            set_error("Auth failed: " + e);
-            push_output("[!] Auth failed: " + e + "\n");
-            ssh_disconnect(sess);
-            ssh_free(sess);
-            state_.store(State::Error);
+            fail("Auth failed: " + e, "[!] Auth failed: " + e + "\n");
             return;
         }
 
-        ssh_channel ch = ssh_channel_new(sess);
+        ch = ssh_channel_new(sess);
         if (!ch || ssh_channel_open_session(ch) != SSH_OK) {
-            set_error("Failed to open shell channel");
-            push_output("[!] Failed to open channel.\n");
-            if (ch) ssh_channel_free(ch);
-            ssh_disconnect(sess);
-            ssh_free(sess);
-            state_.store(State::Error);
+            fail("Failed to open shell channel", "[!] Failed to open channel.\n");
             return;
         }
+        ch_open = true;
 
         if (ssh_channel_request_pty(ch) != SSH_OK
             || ssh_channel_change_pty_size(ch, 80, 24) != SSH_OK
             || ssh_channel_request_shell(ch) != SSH_OK) {
-            set_error("Failed to request shell");
-            push_output("[!] Failed to request shell.\n");
-            ssh_channel_close(ch);
-            ssh_channel_free(ch);
-            ssh_disconnect(sess);
-            ssh_free(sess);
-            state_.store(State::Error);
+            fail("Failed to request shell", "[!] Failed to request shell.\n");
             return;
         }
 
@@ -366,7 +375,6 @@ private:
         ssh_channel_free(ch);
         ssh_disconnect(sess);
         ssh_free(sess);
-        hal::secret_scrub(cfg_.password);
         s_ssh_session_active = false;
         state_.store(State::Idle);
     }
@@ -402,10 +410,11 @@ private:
     std::string        err_;
     TaskHandle_t       task_     = nullptr;
 };
-#endif  // ARDUINO
+#endif  // ARDUINO && USING_LIBSSH
 
+// Boards without LibSSH (the watches) and the emulator get the loopback stub.
 std::unique_ptr<SshBackend> make_default_backend() {
-#ifdef ARDUINO
+#if defined(ARDUINO) && defined(USING_LIBSSH)
     return std::unique_ptr<SshBackend>(new LibSshBackend());
 #else
     return std::unique_ptr<SshBackend>(new LoopbackBackend());
@@ -496,23 +505,31 @@ void cfg_save(const SshConfig& cfg) {
 
 // Returns the decrypted password, or empty if the slot is missing or notes
 // crypto is locked. Caller is responsible for scrubbing.
-std::string pw_load() {
-#ifdef ARDUINO
-    return hal::secret_load(SSH_NS, SSH_PW_KEY);
-#else
-    return "";
-#endif
-}
+// The hal stub returns "" on the emulator.
+std::string pw_load() { return hal::secret_load(SSH_NS, SSH_PW_KEY); }
 
 // Returns true on successful save, false (with `*err` populated) when the
 // notes session is not unlocked. Passing "" clears the slot unconditionally.
-bool pw_save(const char* pw, std::string* err) {
+// Hardware-only: the emulator's finish_connect_with_pw skips the save.
+// Whitespace is significant in a password, so no trim.
 #ifdef ARDUINO
-    return hal::secret_store(SSH_NS, SSH_PW_KEY, pw, err);
-#else
-    (void)pw; (void)err;
-    return true;
+bool pw_save(const char* pw, std::string* err) {
+    return hal::secret_store(SSH_NS, SSH_PW_KEY, pw, err, /*trim_ws=*/false);
+}
 #endif
+
+// Shared look of the rounded status-row and special-key buttons.
+void style_pill(lv_obj_t* btn) {
+    lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(btn, 13, 0);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_outline_width(btn, 2, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_color(btn, UI_COLOR_FG, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_pad(btn, 2, LV_STATE_FOCUSED);
 }
 
 // --- App ------------------------------------------------------------------
@@ -528,6 +545,7 @@ public:
     // edit-button click handler.
     void start_connect_flow();           // smart: saved creds → direct connect
     void start_prompt_chain();           // unconditional prompt walk
+    bool try_saved_connect();            // saved host/user/password → connect
     void finish_connect_with_pw(const char* pw);
     void connect_with(const SshConfig& cfg);
 
@@ -539,7 +557,6 @@ private:
     void disconnect();
     void process_and_send_input(const std::string& line);
     void update_ctrl_btn_visual();
-    void update_top_bar();
     static void poll_tick_cb(lv_timer_t* t);
     static void focus_changed_cb(lv_event_t* e);
     static void connect_btn_cb(lv_event_t* e);
@@ -635,19 +652,22 @@ void SshApp::start_connect_flow() {
         return;
     }
     cfg_load(cfg_);
-    // Direct reconnect path: every field saved AND the encrypted password
-    // slot decrypts cleanly (notes session unlocked). No prompts.
+    if (!try_saved_connect()) start_prompt_chain();
+}
+
+// Direct reconnect path: host + user saved AND the encrypted password slot
+// decrypts cleanly (notes session unlocked). No prompts. Returns false
+// (having connected nothing) when any of those is missing.
+bool SshApp::try_saved_connect() {
+    if (cfg_.host.empty() || cfg_.user.empty()) return false;
     std::string saved_pw = pw_load();
-    if (!cfg_.host.empty() && !cfg_.user.empty() && !saved_pw.empty()) {
-        SshConfig cfg = cfg_;
-        cfg.password = saved_pw;
-        connect_with(cfg);
-        hal::secret_scrub(saved_pw);
-        hal::secret_scrub(cfg.password);
-        return;
-    }
+    if (saved_pw.empty()) return false;
+    SshConfig cfg = cfg_;
+    cfg.password = saved_pw;
+    connect_with(cfg);
     hal::secret_scrub(saved_pw);
-    start_prompt_chain();
+    hal::secret_scrub(cfg.password);
+    return true;
 }
 
 void SshApp::start_prompt_chain() {
@@ -682,7 +702,10 @@ void SshApp::finish_connect_with_pw(const char* pw) {
 }
 
 void SshApp::connect_with(const SshConfig& cfg) {
+    // cfg_ only needs host/user/port; the backend keeps its own copy of
+    // the password, so never let it linger in the App.
     cfg_ = cfg;
+    hal::secret_scrub(cfg_.password);
     if (!backend_) return;
     ansi_.reset();
     append_terminal("Connecting to " + cfg.host + "...\n");
@@ -718,16 +741,7 @@ void SshApp::onStart(lv_obj_t* parent) {
     // Auto-connect to the last host when everything we need is on hand:
     // WiFi up, saved host+user, and the encrypted password slot decrypts.
     // Anything missing → stay idle, no prompts on app entry.
-    if (hw_get_wifi_connected() && !cfg_.host.empty() && !cfg_.user.empty()) {
-        std::string saved_pw = pw_load();
-        if (!saved_pw.empty()) {
-            SshConfig cfg = cfg_;
-            cfg.password = saved_pw;
-            connect_with(cfg);
-            hal::secret_scrub(saved_pw);
-            hal::secret_scrub(cfg.password);
-        }
-    }
+    if (hw_get_wifi_connected()) try_saved_connect();
 }
 
 void SshApp::onStop() {
@@ -756,7 +770,7 @@ void SshApp::build_ui() {
 
     // --- Status row: target text + edit + connect/disconnect button -----
     // Auto-collapses to height 0 when neither edit nor connect is focused;
-    // see update_top_bar(). Children stay in the focus group, just clipped.
+    // see focus_changed_cb(). Children stay in the focus group, just clipped.
     top_bar_ = lv_obj_create(parent);
     lv_obj_remove_style_all(top_bar_);
     lv_obj_set_size(top_bar_, LV_PCT(100), 28);
@@ -771,19 +785,6 @@ void SshApp::build_ui() {
     lv_obj_set_style_text_color(status_lbl_, UI_COLOR_FG, 0);
     lv_obj_set_style_text_font(status_lbl_, &lv_font_montserrat_14, 0);
     lv_label_set_long_mode(status_lbl_, LV_LABEL_LONG_DOT);
-
-    auto style_pill = [](lv_obj_t* btn) {
-        lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_radius(btn, 13, 0);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x15171d), 0);
-        lv_obj_set_style_border_width(btn, 1, 0);
-        lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
-        lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_outline_width(btn, 2, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_color(btn, UI_COLOR_FG, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_pad(btn, 2, LV_STATE_FOCUSED);
-    };
 
     // Edit (pencil) — forces a fresh prompt chain even if a saved password
     // exists. Lets the user switch hosts without going into Settings.
@@ -827,7 +828,7 @@ void SshApp::build_ui() {
     lv_textarea_set_text(term_, "");
     term_len_ = 0;
     lv_obj_add_flag(term_, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(term_, lv_color_hex(0x0a0c10), 0);
+    lv_obj_set_style_bg_color(term_, lv_color_hex(0x0a0c10), 0);  // terminal stays dark in every UI style
     lv_obj_set_style_bg_opa(term_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(term_, UI_COLOR_MUTED, 0);
     lv_obj_set_style_border_width(term_, 1, 0);
@@ -869,7 +870,7 @@ void SshApp::build_ui() {
     lv_textarea_set_one_line(input_, true);
     lv_textarea_set_placeholder_text(input_, "Type command, Enter to send");
     lv_obj_set_style_text_font(input_, &lv_font_unscii_8, 0);
-    lv_obj_set_style_bg_color(input_, lv_color_hex(0x15171d), 0);
+    lv_obj_set_style_bg_color(input_, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_border_color(input_, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_width(input_, 1, 0);
     lv_obj_set_style_border_opa(input_, LV_OPA_60, 0);
@@ -1026,19 +1027,8 @@ void SshApp::term_event_cb(lv_event_t* e) {
     // scroll the terminal buffer. The cursor is hidden (LV_OPA_TRANSP), so
     // the default cursor-move behavior is invisible and useless to the user.
     if (editing && lv_group_get_focused(g) == obj) {
-        const int32_t step_px = 30;
-        if (key == LV_KEY_UP || key == LV_KEY_LEFT) {
-            int32_t cur_y = lv_obj_get_scroll_y(obj);
-            int32_t step  = cur_y < step_px ? cur_y : step_px;
-            if (step > 0) lv_obj_scroll_to_y(obj, cur_y - step, LV_ANIM_ON);
+        if (ui_scroll_key_clamped(obj, key, 30, LV_ANIM_ON))
             lv_event_stop_processing(e);
-        } else if (key == LV_KEY_DOWN || key == LV_KEY_RIGHT) {
-            int32_t bottom = lv_obj_get_scroll_bottom(obj);
-            int32_t cur_y  = lv_obj_get_scroll_y(obj);
-            int32_t step   = bottom < step_px ? bottom : step_px;
-            if (step > 0) lv_obj_scroll_to_y(obj, cur_y + step, LV_ANIM_ON);
-            lv_event_stop_processing(e);
-        }
     }
 }
 
@@ -1204,14 +1194,6 @@ void SshApp::input_history_cb(lv_event_t* e) {
     lv_event_stop_processing(e);
 }
 
-void SshApp::update_top_bar() {
-    if (!top_bar_) return;
-    bool show = false;
-    if (conn_btn_ && lv_obj_has_state(conn_btn_, LV_STATE_FOCUSED)) show = true;
-    if (edit_btn_ && lv_obj_has_state(edit_btn_, LV_STATE_FOCUSED)) show = true;
-    lv_obj_set_height(top_bar_, show ? 28 : 0);
-}
-
 void SshApp::focus_changed_cb(lv_event_t* e) {
     SshApp* self = (SshApp*)lv_event_get_user_data(e);
     if (!self) return;
@@ -1232,9 +1214,9 @@ void SshApp::update_ctrl_btn_visual() {
     if (!ctrl_btn_) return;
     if (ctrl_armed_) {
         lv_obj_set_style_bg_color(ctrl_btn_, UI_COLOR_ACCENT, 0);
-        if (ctrl_lbl_) lv_obj_set_style_text_color(ctrl_lbl_, lv_color_hex(0x15171d), 0);
+        if (ctrl_lbl_) lv_obj_set_style_text_color(ctrl_lbl_, UI_COLOR_SURFACE, 0);
     } else {
-        lv_obj_set_style_bg_color(ctrl_btn_, lv_color_hex(0x15171d), 0);
+        lv_obj_set_style_bg_color(ctrl_btn_, UI_COLOR_SURFACE, 0);
         if (ctrl_lbl_) lv_obj_set_style_text_color(ctrl_lbl_, UI_COLOR_ACCENT, 0);
     }
 }
@@ -1293,16 +1275,7 @@ void SshApp::build_special_keys_row(lv_obj_t* parent) {
         lv_obj_t* b = lv_btn_create(row);
         lv_obj_set_flex_grow(b, 1);
         lv_obj_set_height(b, 26);
-        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_radius(b, 13, 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(0x15171d), 0);
-        lv_obj_set_style_border_width(b, 1, 0);
-        lv_obj_set_style_border_color(b, UI_COLOR_ACCENT, 0);
-        lv_obj_set_style_border_opa(b, LV_OPA_COVER, 0);
-        lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_color(b, UI_COLOR_FG, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_opa(b, LV_OPA_COVER, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_pad(b, 2, LV_STATE_FOCUSED);
+        style_pill(b);
         lv_obj_set_style_pad_hor(b, 2, 0);
         lv_obj_set_style_pad_ver(b, 0, 0);
 

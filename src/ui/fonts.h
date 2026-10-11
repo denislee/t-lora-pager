@@ -4,7 +4,7 @@
  *
  * Each app/UI context calls its own getter — the user-configured face/size
  * pair from settings is applied centrally so this header stays declaration-
- * only. Implementations live in src/ui_theme.cpp.
+ * only. Implementations live in src/ui_tools.cpp.
  */
 #pragma once
 

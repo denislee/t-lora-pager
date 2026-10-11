@@ -10,19 +10,16 @@
  */
 #include "../ui_define.h"
 #include "../hal/hub.h"
+#include "../hal/str_encode.h"
 #include "settings_internal.h"
 
 namespace hub_cfg {
 
-static lv_obj_t *g_sub_page    = nullptr;
 static lv_obj_t *g_url_label   = nullptr;
 static lv_obj_t *g_status_label = nullptr;
 
-void set_sub_page(lv_obj_t *page) { g_sub_page = page; }
-
 void reset_state()
 {
-    g_sub_page = nullptr;
     g_url_label = nullptr;
     g_status_label = nullptr;
 }
@@ -47,8 +44,6 @@ static void enable_toggle_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     hal::hub_set_enabled(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
     if (en && hal::hub_get_url_raw().empty()) {
         set_status("Set a URL to start using the hub",
                    lv_palette_main(LV_PALETTE_ORANGE));
@@ -63,10 +58,7 @@ static void url_entered_cb(const char *text, void *ud)
 {
     (void)ud;
     if (!text) { set_status("Cancelled", UI_COLOR_MUTED); return; }
-    std::string s(text);
-    size_t a = s.find_first_not_of(" \t\r\n");
-    size_t b = s.find_last_not_of(" \t\r\n");
-    std::string v = (a == std::string::npos) ? std::string() : s.substr(a, b - a + 1);
+    std::string v = hal::trim(text);
     hal::hub_set_url(v.c_str());
     refresh_url_label();
     if (v.empty()) {
@@ -102,10 +94,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     (void)menu;
     lv_obj_set_style_pad_row(sub_page, 4, 0);
 
-    lv_obj_t *toggle = create_toggle_btn_row(sub_page, "Use local hub",
-                                             hal::hub_get_enabled_pref(),
-                                             enable_toggle_cb);
-    register_subpage_group_obj(sub_page, toggle);
+    create_toggle_btn_row(sub_page, "Use local hub", hal::hub_get_enabled_pref(),
+                          enable_toggle_cb);
 
     lv_obj_t *status = lv_menu_cont_create(sub_page);
     g_url_label = lv_label_create(status);

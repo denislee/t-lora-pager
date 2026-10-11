@@ -1,6 +1,6 @@
 /**
  * @file      audio.cpp
- * @brief     Audio player (MP3 task), microphone recording.
+ * @brief     Audio player (WAV task), microphone recording.
  */
 #include "audio.h"
 #include "internal.h"
@@ -10,9 +10,7 @@
 #ifdef ARDUINO
 #include <LilyGoLib.h>
 #include <SD.h>
-#include <FFat.h>
 #include <Esp.h>
-#include <mp3dec.h>
 #endif
 
 // --- Player task / event group ----------------------------------------
@@ -32,207 +30,12 @@ static SemaphoreHandle_t  recorderDoneSem   = NULL;
 // block for the stop to complete rather than polling hw_player_running().
 #define PLAYER_STOPPED  _BV(3)
 
-// libhelix needs at least one full frame in the buffer to decode. Layer III
-// max frame size is ~1900 bytes; we keep extra headroom for sync search.
-#define MP3_REFILL_BUF       (16 * 1024)
-#define MP3_MIN_FRAME_BYTES  2048
-
-typedef int (*mp3_fill_cb_t)(uint8_t *dst, size_t maxlen, void *ctx);
-
-// Codec init/teardown and per-frame output. Cached `codec_online` is captured
-// once at session start — its bitmask only changes on hotplug and we don't
-// want to cross the device-probe path on every frame.
-static bool play_mp3_with_filler(mp3_fill_cb_t fill_cb, void *ctx)
-{
-    HMP3Decoder decoder = MP3InitDecoder();
-    if (!decoder) {
-        log_e("Could not allocate decoder");
-        return false;
-    }
-
-    uint8_t *bufStart = (uint8_t *)heap_caps_malloc(MP3_REFILL_BUF, MALLOC_CAP_SPIRAM);
-    if (!bufStart) {
-        MP3FreeDecoder(decoder);
-        return false;
-    }
-
-    // One decoded MP3 frame (~4.6 KB). PSRAM like the refill buffer, and
-    // allocated per-session rather than a static so it isn't permanently
-    // resident in internal RAM between playbacks; a stack local would instead
-    // bloat the player task's stack across xEventGroupWaitBits().
-    int16_t *outBuf = (int16_t *)heap_caps_malloc(
-        sizeof(int16_t) * MAX_NCHAN * MAX_NGRAN * MAX_NSAMP, MALLOC_CAP_SPIRAM);
-    if (!outBuf) {
-        free(bufStart);
-        MP3FreeDecoder(decoder);
-        return false;
-    }
-
-    uint8_t *readPtr = bufStart;
-    int bytesAvailable = 0;
-    bool eof = false;
-    bool codec_begin = false;
-#if defined(USING_AUDIO_CODEC)
-    const bool codec_online = (HW_CODEC_ONLINE & hw_get_device_online()) != 0;
-#endif
-
-    auto refill = [&]() {
-        if (eof) return;
-        if (bytesAvailable > 0 && readPtr != bufStart) {
-            memmove(bufStart, readPtr, bytesAvailable);
-        }
-        readPtr = bufStart;
-        size_t want = MP3_REFILL_BUF - bytesAvailable;
-        int got = fill_cb(bufStart + bytesAvailable, want, ctx);
-        if (got <= 0) { eof = true; return; }
-        bytesAvailable += got;
-        if ((size_t)got < want) eof = true;
-    };
-
-    refill();
-    if (bytesAvailable <= 0) {
-        MP3FreeDecoder(decoder);
-        free(bufStart);
-        free(outBuf);
-        return false;
-    }
-
-    xEventGroupSetBits(playerEvent, PLAYER_RUNNING);
-
-    MP3FrameInfo frameInfo;
-    while (true) {
-        if (!eof && bytesAvailable < MP3_MIN_FRAME_BYTES) refill();
-
-        int offset = MP3FindSyncWord(readPtr, bytesAvailable);
-        if (offset < 0) break;
-        readPtr += offset;
-        bytesAvailable -= offset;
-
-        if (!eof && bytesAvailable < MP3_MIN_FRAME_BYTES) refill();
-
-        int err = MP3Decode(decoder, &readPtr, &bytesAvailable, outBuf, 0);
-        if (err) {
-            log_e("Decode ERROR: %d", err);
-            break;
-        }
-        MP3GetLastFrameInfo(decoder, &frameInfo);
-
-#if defined(USING_PCM_AMPLIFIER)
-        if (!codec_begin) {
-            codec_begin = true;
-            instance.powerControl(POWER_SPEAK, true);
-            log_d("Start PCM Play...");
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5,0,0)
-            instance.player.configureTX(frameInfo.samprate, frameInfo.bitsPerSample, (i2s_channel_t)frameInfo.nChans);
-#else
-            instance.player.configureTX(frameInfo.samprate, (i2s_data_bit_width_t)frameInfo.bitsPerSample, (i2s_slot_mode_t)frameInfo.nChans);
-#endif
-        }
-        instance.player.write((uint8_t *)outBuf,
-                              (size_t)((frameInfo.bitsPerSample / 8) * frameInfo.outputSamps));
-#elif defined(USING_AUDIO_CODEC)
-        if (codec_online) {
-            if (!codec_begin) {
-                codec_begin = true;
-                instance.codec.open(frameInfo.bitsPerSample, frameInfo.nChans, frameInfo.samprate);
-            }
-            int ret = instance.codec.write((uint8_t *)outBuf,
-                                           (size_t)((frameInfo.bitsPerSample / 8) * frameInfo.outputSamps));
-            if (ret != 0) {
-                log_e("esp_codec_dev_write:0x%X", ret);
-            }
-        }
-#endif
-
-        EventBits_t eventBits = xEventGroupWaitBits(playerEvent, PLAYER_PLAY | PLAYER_END,
-                                                    pdFALSE, pdFALSE, portMAX_DELAY);
-        if (eventBits & PLAYER_END) break;
-    }
-
-    MP3FreeDecoder(decoder);
-    free(bufStart);
-    free(outBuf);
-    xEventGroupClearBits(playerEvent, PLAYER_RUNNING | PLAYER_PLAY | PLAYER_END);
-    xEventGroupSetBits(playerEvent, PLAYER_STOPPED);
-
-#if defined(USING_PCM_AMPLIFIER)
-    if (codec_begin) instance.powerControl(POWER_SPEAK, false);
-#elif defined(USING_AUDIO_CODEC)
-    if (codec_begin && codec_online) instance.codec.close();
-#endif
-    return true;
-}
-
-// Streams MP3 from an open File. SPI bus is locked around each read on
-// SD-shared buses so the codec/audio path stays uncontended during decode.
-struct mp3_file_ctx { File *f; bool sd_locked; };
-static int mp3_fill_file(uint8_t *dst, size_t maxlen, void *ctx)
-{
-    auto *fc = (mp3_file_ctx *)ctx;
-    core::MaybeSpiLock lock(fc->sd_locked);
-    return (int)fc->f->read(dst, maxlen);
-}
-
-#if defined(USING_AUDIO_CODEC)
-static void playWAV_sd(const char *filename);
-#endif
-
-static void hw_sd_play(audio_source_type_t source, const char *filename)
-{
-    size_t len = strlen(filename);
-    bool isMP3 = (len > 4 && strcasecmp(filename + len - 4, ".mp3") == 0);
-    bool isWAV = (len > 4 && strcasecmp(filename + len - 4, ".wav") == 0);
-
-#if defined(USING_AUDIO_CODEC)
-    if (isWAV && source == AUDIO_SOURCE_SDCARD) {
-        playWAV_sd(filename);
-        return;
-    }
-#endif
-    if (!isMP3) return;
-
-    char path[128];
-    snprintf(path, sizeof(path), "/%s", filename);
-
-    bool sd_locked = (source == AUDIO_SOURCE_SDCARD);
-    File f;
-
-    if (sd_locked) {
-        core::ScopedSpiLock lock;
-        f = SD.open(path);
-        if (!f) {
-            log_e("SD Open %s failed!", filename);
-            return;
-        }
-    } else {
-        f = FFat.open(path);
-        if (!f) {
-            log_e("FFat Open %s failed!", filename);
-            return;
-        }
-    }
-
-    if (f.size() == 0) {
-        log_e("File %s size is 0!", filename);
-        core::MaybeSpiLock lock(sd_locked);
-        f.close();
-        return;
-    }
-
-    log_i("Streaming %s", filename);
-    mp3_file_ctx ctx{&f, sd_locked};
-    play_mp3_with_filler(mp3_fill_file, &ctx);
-
-    {
-        core::MaybeSpiLock lock(sd_locked);
-        f.close();
-    }
-}
-
-#if defined(USING_AUDIO_CODEC)
 // Stream-plays a 16 kHz / 16-bit / mono WAV file from SD without loading it
 // all into PSRAM (a 5-minute note is ~10 MB). Header is a fixed-size 44-byte
-// RIFF/WAVE/fmt/data layout — we trust it because we write it ourselves.
+// RIFF/WAVE/fmt/data layout — we trust it because we write it ourselves
+// (wav_write_header below). Output goes to the audio codec on the
+// pager and to the I2S PCM amplifier on the watches.
+#if defined(USING_AUDIO_CODEC) || defined(USING_PCM_AMPLIFIER)
 static void playWAV_sd(const char *filename)
 {
     char path[128];
@@ -241,9 +44,15 @@ static void playWAV_sd(const char *filename)
     {
         core::ScopedSpiLock lock;
         f = SD.open(path);
-        if (!f) return;
-        if (f.size() < 44) { f.close(); return; }
-        if (!f.seek(44))   { f.close(); return; }
+        if (!f) {
+            log_e("SD open %s failed", path);
+            return;
+        }
+        if (f.size() < 44 || !f.seek(44)) {
+            log_e("%s is not a playable WAV", path);
+            f.close();
+            return;
+        }
     }
 
     auto close_with_lock = [&] {
@@ -251,22 +60,42 @@ static void playWAV_sd(const char *filename)
         f.close();
     };
 
+#if defined(USING_AUDIO_CODEC)
     if (!(HW_CODEC_ONLINE & hw_get_device_online())) {
+        log_e("Audio codec not online");
         close_with_lock();
         return;
     }
     int ret = instance.codec.open(16, 1, HW_REC_SAMPLE_RATE);
     if (ret < 0) {
+        log_e("codec.open failed 0x%X", ret);
         close_with_lock();
         return;
     }
+#else // USING_PCM_AMPLIFIER
+    instance.powerControl(POWER_SPEAK, true);
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5,0,0)
+    instance.player.configureTX(HW_REC_SAMPLE_RATE, 16, (i2s_channel_t)1);
+#else
+    instance.player.configureTX(HW_REC_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+#endif
+#endif
+
+    auto close_output = [] {
+#if defined(USING_AUDIO_CODEC)
+        instance.codec.close();
+#else
+        // Back to the user's speaker setting rather than forcing it off.
+        instance.powerControl(POWER_SPEAK, user_setting.speaker_enable);
+#endif
+    };
 
     xEventGroupSetBits(playerEvent, PLAYER_RUNNING);
 
     const size_t CHUNK = 4096;
     uint8_t *buf = (uint8_t *)heap_caps_malloc(CHUNK, MALLOC_CAP_SPIRAM);
     if (!buf) {
-        instance.codec.close();
+        close_output();
         close_with_lock();
         xEventGroupClearBits(playerEvent, PLAYER_RUNNING | PLAYER_PLAY | PLAYER_END);
         xEventGroupSetBits(playerEvent, PLAYER_STOPPED);
@@ -285,16 +114,37 @@ static void playWAV_sd(const char *filename)
         }
         if (n <= 0) break;
 
+#if defined(USING_AUDIO_CODEC)
         instance.codec.write(buf, (size_t)n);
+#else
+        instance.player.write(buf, (size_t)n);
+#endif
     }
 
     free(buf);
-    instance.codec.close();
+    close_output();
     close_with_lock();
     xEventGroupClearBits(playerEvent, PLAYER_RUNNING | PLAYER_PLAY | PLAYER_END);
     xEventGroupSetBits(playerEvent, PLAYER_STOPPED);
 }
-#endif /*USING_AUDIO_CODEC*/
+#endif
+
+// Only WAV is supported: it is the only format the firmware records, and the
+// only thing hw_set_sd_music_play() is ever asked to play.
+static void hw_sd_play(const char *filename)
+{
+    size_t len = strlen(filename);
+    bool isWAV = (len > 4 && strcasecmp(filename + len - 4, ".wav") == 0);
+    if (!isWAV) {
+        log_e("Cannot play %s: only .wav is supported", filename);
+        return;
+    }
+#if defined(USING_AUDIO_CODEC) || defined(USING_PCM_AMPLIFIER)
+    playWAV_sd(filename);
+#else
+    log_e("Cannot play %s: this board has no audio output", filename);
+#endif
+}
 
 static void playerTask(void *args)
 {
@@ -303,15 +153,9 @@ static void playerTask(void *args)
         if (xQueueReceive(playerQueue, &params, portMAX_DELAY) != pdPASS) {
             continue;
         }
-        switch (params.event) {
-        case APP_EVENT_PLAY:
-            log_d("Event: filename:%s source:%d", params.filename, params.source_type);
-            hw_sd_play(params.source_type, params.filename);
-            break;
-        case APP_EVENT_RECOVER:
-            break;
-        default:
-            break;
+        if (params.event == APP_EVENT_PLAY) {
+            log_d("Event: filename:%s", params.filename);
+            hw_sd_play(params.filename);
         }
     }
     playerTaskHandler = NULL;
@@ -642,28 +486,27 @@ uint8_t hw_get_volume()
 
 // --- Playback control -------------------------------------------------
 
-void hw_set_sd_music_play(audio_source_type_t source_type, const char *filename)
+void hw_set_sd_music_play(const char *filename)
 {
+    log_d("hw_set_sd_music_play: %s", filename);
+#ifdef ARDUINO
     audio_params_t params = {
         .event = APP_EVENT_PLAY,
         .filename = filename,
-        .source_type = source_type
     };
-    log_d("hw_set_sd_music_play : %s source_type:%d", filename, source_type);
-#ifdef ARDUINO
     xEventGroupClearBits(playerEvent, PLAYER_PLAY | PLAYER_END | PLAYER_STOPPED);
     if (hw_player_running()) {
         xEventGroupSetBits(playerEvent, PLAYER_END);
-        Serial.println("Wait hw_player_running stop...");
+        log_d("waiting for the player to stop");
         // Block on PLAYER_STOPPED rather than busy-polling; bounded so a wedged
         // player task can't freeze the UI thread.
         xEventGroupWaitBits(playerEvent, PLAYER_STOPPED, pdFALSE, pdTRUE,
                             pdMS_TO_TICKS(2000));
-        Serial.println("hw_player_running stopped.");
+        log_d("player stopped");
     }
     xEventGroupSetBits(playerEvent, PLAYER_PLAY);
     xQueueSend(playerQueue, &params, portMAX_DELAY);
-    Serial.println("hw_set_sd_music_play send done\n");
+    log_d("hw_set_sd_music_play: queued");
 #endif
 }
 

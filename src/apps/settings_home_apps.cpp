@@ -22,8 +22,6 @@ void toggle_cb(lv_event_t *e)
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
     apps::home_apps_set_visible(idx, en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
 }
 
 } // anonymous namespace
@@ -37,13 +35,9 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     for (int i = 0; i < n; i++) {
         const char *label = apps::home_apps_label(i);
         bool on = apps::home_apps_is_visible(i);
-        lv_obj_t *btn = create_toggle_btn_row(sub_page, label, on, toggle_cb);
-        // Stash the index so the single callback can route back to the
-        // right entry — cheaper than wrapping a struct per row.
-        lv_obj_remove_event_cb(btn, toggle_cb);
-        lv_obj_add_event_cb(btn, toggle_cb, LV_EVENT_VALUE_CHANGED,
-                            (void *)(intptr_t)i);
-        register_subpage_group_obj(sub_page, btn);
+        // The index rides as user_data so the single callback can route
+        // back to the right entry.
+        create_toggle_btn_row(sub_page, label, on, toggle_cb, (void *)(intptr_t)i);
     }
 }
 

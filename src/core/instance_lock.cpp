@@ -1,6 +1,6 @@
 /**
  * @file      instance_lock.cpp
- * @brief     Backing store for the shared-SPI instance mutex.
+ * @brief     Backing store for the instance (task-coordination) mutex.
  *
  * Lives here (not in factory.ino) so the .ino file stays a thin Arduino
  * shell and the mutex — real, production-grade state — sits in a regular
@@ -52,7 +52,7 @@ void instanceLockGive()
     }
 }
 
-#else  // !ARDUINO — emulator: no shared SPI bus, take/give are no-ops.
+#else  // !ARDUINO — emulator: take/give are no-ops.
 
 namespace core {
 void instance_lock_init() {}

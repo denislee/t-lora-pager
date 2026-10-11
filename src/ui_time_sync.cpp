@@ -183,26 +183,19 @@ const char *timezone_get_user_posix()
     return tz_find_posix(TZ_DEFAULT);
 }
 
-bool timezone_fetch_list(std::vector<std::string> &out, std::string &err)
+void timezone_fetch_list(std::vector<std::string> &out)
 {
-    (void)err;
     out.clear();
     out.reserve(sizeof(TZ_TABLE) / sizeof(TZ_TABLE[0]));
     for (const TzEntry &e : TZ_TABLE) out.emplace_back(e.name);
-    return true;
 }
 
-// Compute the UTC offset for `tz` using newlib's TZ machinery, so DST is
-// applied correctly for the zone (at the current wall time). Restores the
-// previous TZ env var before returning so we don't perturb anyone else's
-// view of time.
-bool timezone_fetch_offset(const char *tz,
-                           int &raw_offset_sec,
-                           int &dst_offset_sec,
-                           std::string &err)
+// Compute the total UTC offset (DST included) for `tz` using newlib's TZ
+// machinery, at the current wall time. Restores the previous TZ env var
+// before returning so we don't perturb anyone else's view of time.
+bool timezone_fetch_offset(const char *tz, int &offset_sec, std::string &err)
 {
-    raw_offset_sec = 0;
-    dst_offset_sec = 0;
+    offset_sec = 0;
 
     const char *posix = tz_find_posix(tz);
     if (!posix) {
@@ -228,23 +221,13 @@ bool timezone_fetch_offset(const char *tz,
     localtime_r(&now, &lt);
     gmtime_r(&now, &gm);
     gm.tm_isdst = 0;
-    int is_dst = lt.tm_isdst > 0 ? 1 : 0;
     long gmtoff = (long)difftime(mktime(&lt), mktime(&gm));
 
     if (prev) setenv("TZ", saved.c_str(), 1);
     else      unsetenv("TZ");
     tzset();
 
-    if (is_dst) {
-        // Split so the caller can pass raw to configTime(raw, dst, ...).
-        // Approximate DST shift as +1h — good enough for the legacy
-        // configTime path; the modern configTzTime path ignores these.
-        raw_offset_sec = (int)gmtoff - 3600;
-        dst_offset_sec = 3600;
-    } else {
-        raw_offset_sec = (int)gmtoff;
-        dst_offset_sec = 0;
-    }
+    offset_sec = (int)gmtoff;
     return true;
 #else
     (void)err;

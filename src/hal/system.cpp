@@ -38,12 +38,14 @@ static uint32_t s_cpu_freq_mhz = 0;
 // the aging — it is the only thing still ticking in fake sleep — by calling
 // hw_fake_sleep_tick() on each of its iterations.
 // s_fake_sleep_entry_ms == 0 means "not in fake sleep / already locked this cycle".
+#ifdef ARDUINO
 static constexpr uint32_t NOTES_LOCK_GRACE_MS = 5u * 60u * 1000u; // 5 minutes
 static uint32_t s_fake_sleep_entry_ms = 0;
 
 // P4.22 — save the IMU registration state across a fake-sleep/wake cycle so
 // hw_power_up_all() can restore it if the IMU debug page was open before sleep.
 static bool s_imu_was_registered = false;
+#endif
 
 void hw_set_cpu_freq(uint32_t mhz)
 {
@@ -70,11 +72,6 @@ void hw_set_cpu_freq(uint32_t mhz)
     if (mhz == s_cpu_freq_mhz) return;
     s_cpu_freq_mhz = mhz;
 #endif
-}
-
-uint32_t hw_get_cpu_freq()
-{
-    return s_cpu_freq_mhz;
 }
 
 static volatile uint32_t s_last_input_ms = 0;
@@ -128,7 +125,8 @@ uint32_t hw_fake_sleep_target_freq()
     return link_up ? 80 : FAKE_SLEEP_IDLE_FREQ_MHZ;
 }
 
-// Settings blob schema guard.
+#ifdef ARDUINO
+// Settings blob schema guard (hardware NVS only).
 //
 // The stored NVS blob is a `SettingsHeader` followed by a raw
 // `user_setting_params_t`. The header lets us reject bytes left over from a
@@ -151,15 +149,16 @@ static constexpr uint32_t SETTINGS_MAGIC   = 0x50414752u; // "PAGR"
 // clamp), so the PB auto-sleep and dim-stage savings actually activate out of
 // the box.  The header-mismatch path wholesale-resets to defaults, which is
 // the correct behaviour for both fields.
-static constexpr uint16_t SETTINGS_VERSION = 13;
+// v14: dropped user_setting_params_t.storage_prefer_sd — the "prefer SD"
+// storage toggle had no setter and no live reader (note writes always go to
+// internal and mirror to SD). Struct-layout change; resets to defaults.
+static constexpr uint16_t SETTINGS_VERSION = 14;
 
 struct SettingsHeader {
     uint32_t magic;
     uint16_t version;
     uint16_t payload_size;
 };
-
-#ifdef ARDUINO
 
 #include "Esp.h"
 #include <LilyGoLib.h>
@@ -187,8 +186,6 @@ void save_user_setting_nvs()
 device_const_var_t dev_conts_var = {
     .max_brightness = DEVICE_MAX_BRIGHTNESS_LEVEL,
     .min_brightness = DEVICE_MIN_BRIGHTNESS_LEVEL,
-    .max_charge_current = DEVICE_MAX_CHARGE_CURRENT,
-    .min_charge_current = DEVICE_MIN_CHARGE_CURRENT,
     .charge_level_nums = DEVICE_CHARGE_LEVEL_NUMS,
     .charge_steps = DEVICE_CHARGE_STEPS,
 };
@@ -315,17 +312,9 @@ size_t getArduinoLoopTaskStackSize(void)
 
 #endif
 
-
-
-
-
-
-#ifdef ARDUINO_T_LORA_PAGER
-const uint8_t mic_gain = 10;
-#else
+#if defined(ARDUINO) && defined(USING_AUDIO_CODEC)
 const uint8_t mic_gain = 10;
 #endif
-
 
 void hw_init()
 {
@@ -488,7 +477,6 @@ void hw_load_setting()
     user_setting.show_mem_usage = 0;
     user_setting.show_file_count = 0;
     user_setting.cpu_freq_mhz = 240;
-    user_setting.storage_prefer_sd = 0;
     user_setting.msc_prefer_sd = 1;
     user_setting.prune_internal = 0;
 
@@ -682,7 +670,10 @@ void hw_set_date_time(struct tm &timeinfo)
 // a successful update.
 static volatile bool g_ntp_sync_completed = false;
 
-bool hw_start_time_sync_ntp(int gmt_offset_sec)
+// Defined in ui_time_sync.cpp: the POSIX TZ rule for the user's zone.
+const char *timezone_get_user_posix();
+
+bool hw_start_time_sync_ntp()
 {
 #ifdef ARDUINO
     if (!hw_get_wifi_connected()) return false;
@@ -690,17 +681,14 @@ bool hw_start_time_sync_ntp(int gmt_offset_sec)
     // Force a fresh sync cycle: if SNTP was already COMPLETED from boot,
     // reset it so the callback fires again on the next successful update.
     sntp_stop();
-    configTime(gmt_offset_sec, 0, "pool.ntp.org", "time.nist.gov");
+    // configTzTime() keeps the zone's full POSIX rule (DST transitions
+    // included). configTime(offset, ...) would overwrite TZ with a fixed
+    // offset and lose the DST rule.
+    configTzTime(timezone_get_user_posix(), "pool.ntp.org", "time.nist.gov");
     return true;
 #else
-    (void)gmt_offset_sec;
     return false;
 #endif
-}
-
-bool hw_start_time_sync_ntp()
-{
-    return hw_start_time_sync_ntp((int)GMT_OFFSET_SECOND);
 }
 
 void hw_notify_time_sync_completed()
@@ -883,12 +871,11 @@ void hw_fake_sleep_tick(uint32_t now_ms)
 #endif
 }
 
+// Only reached through hw_low_power_loop(), which has already dropped the
+// notes passphrase.
 void hw_sleep()
 {
 #ifdef ARDUINO
-    /* Drop the in-RAM passphrase before suspending — a device found asleep
-     * should be indistinguishable from one that's been off. */
-    notes_crypto_lock();
     hw_audio_deinit_task();
 
 #ifdef USING_PDM_MICROPHONE
@@ -914,6 +901,9 @@ void hw_feedback()
 void hw_low_power_loop()
 {
 #ifdef ARDUINO
+    /* Drop the in-RAM passphrase before suspending, on both the deep-sleep and
+     * the light-sleep path — a device found asleep should be
+     * indistinguishable from one that's been off. */
     notes_crypto_lock();
     if (user_setting.sleep_mode == 1) {
         hw_sleep();

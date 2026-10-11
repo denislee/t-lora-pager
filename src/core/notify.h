@@ -47,9 +47,6 @@ struct Notification {
     // Auto-dismiss timer in ms. 0 means sticky — stays until evicted by newer
     // banners (the renderer caps the visible stack).
     uint32_t duration_ms = 3000;
-    // Free-form origin tag, e.g. "telegram", "weather". Subscribers may
-    // filter on this.
-    std::string source;
     // If true, the default renderer fires `hw_feedback()` once when the
     // banner appears. Centralizes the "ding + toast" pattern so posters
     // don't each reach for the haptic themselves.

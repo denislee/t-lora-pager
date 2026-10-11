@@ -28,6 +28,7 @@ public:
 
     lv_obj_t* showBackButton(lv_event_cb_t cb);
     void hideBackButton();
+    void applyChromeStyle();
     lv_obj_t* getBackButton() const { return _statBackBtn; }
     lv_event_cb_t getBackButtonCb() const { return _backBtnCb; }
 
@@ -54,7 +55,6 @@ private:
     lv_obj_t* _usbWarningBox = nullptr;
 
     lv_group_t* _menuGroup = nullptr;
-    lv_group_t* _appGroup = nullptr;
     
     void setupGlobalUI();
 };

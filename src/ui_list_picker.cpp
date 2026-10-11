@@ -2,8 +2,8 @@
  * @file      ui_list_picker.cpp
  * @brief     Modal list-picker overlay.
  *
- * Mirrors the look/feel of ui_wifi.cpp's overlay: sits on lv_layer_top below
- * the status bar, takes over the back button to close, and focuses the first
+ * Built on ui_overlay_open (same look/feel as ui_wifi.cpp): sits on
+ * lv_layer_top below the status bar, takes over the back button to close, and focuses the first
  * item so keyboard/encoder navigation Just Works. Only one picker can be
  * open at a time — subsequent opens are ignored while one is live.
  */
@@ -15,11 +15,8 @@
 namespace {
 
 struct PickerCtx {
-    lv_obj_t   *overlay    = nullptr;
+    ui_overlay_t ov        = {};
     lv_obj_t   *list       = nullptr;
-    lv_group_t *group      = nullptr;
-    lv_group_t *prev_group = nullptr;
-    lv_event_cb_t prev_back_cb = nullptr;
     ui_list_picker_cb cb = nullptr;
     void *ud = nullptr;
     bool fired = false;
@@ -39,10 +36,7 @@ static void tear_down(int picked_index)
     bool will_fire = !ctx->fired && cb;
     ctx->fired = true;
 
-    if (ctx->overlay) lv_obj_del(ctx->overlay);
-    if (ctx->group)   lv_group_del(ctx->group);
-    if (ctx->prev_group) set_default_group(ctx->prev_group);
-    if (ctx->prev_back_cb) ui_show_back_button(ctx->prev_back_cb);
+    ui_overlay_close(&ctx->ov);
     ctx.reset();
 
     if (will_fire) cb(picked_index, ud);
@@ -75,34 +69,7 @@ void ui_list_picker_open(const char *title,
     ctx->cb = cb;
     ctx->ud = ud;
 
-    ctx->prev_group = lv_group_get_default();
-    ctx->prev_back_cb = ui_get_back_button_cb();
-    ctx->group = lv_group_create();
-    lv_group_set_wrap(ctx->group, false);
-    set_default_group(ctx->group);
-
-    ui_show_back_button(close_cb);
-    enable_keyboard();
-
-    // Match the status-bar height, same math as ui_wifi.
-    const lv_font_t *header_font = get_header_font();
-    int32_t bar_h = lv_font_get_line_height(header_font) + 8;
-    if (bar_h < 30) bar_h = 30;
-    int32_t v_res = lv_display_get_vertical_resolution(NULL);
-    if (v_res <= 0) v_res = 222;
-
-    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
-    ctx->overlay = overlay;
-    lv_obj_set_size(overlay, lv_pct(100), v_res - bar_h);
-    lv_obj_align(overlay, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(overlay, UI_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
-    lv_obj_set_style_pad_all(overlay, 8, 0);
-    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(overlay, 6, 0);
+    lv_obj_t *overlay = ui_overlay_open(&ctx->ov, close_cb, false);
 
     if (title && *title) {
         lv_obj_t *t = lv_label_create(overlay);
@@ -132,7 +99,7 @@ void ui_list_picker_open(const char *title,
         lv_obj_t *btn = lv_list_add_btn(ctx->list, LV_SYMBOL_RIGHT, items[i].c_str());
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, item_clicked_cb, LV_EVENT_CLICKED, nullptr);
-        lv_group_add_obj(ctx->group, btn);
+        lv_group_add_obj(ctx->ov.group, btn);
         if (!first) first = btn;
     }
     if (first) lv_group_focus_obj(first);

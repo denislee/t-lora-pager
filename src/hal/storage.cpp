@@ -7,6 +7,7 @@
 #include "internal.h"
 #include "notes_crypto.h"
 #include "notes_path.h"
+#include "fs_util.h"
 #include "hub.h"
 #include "../core/spi_lock.h"
 
@@ -28,11 +29,10 @@
  * `notes_crypto_path_is_protected()` matches. On a locked session, a read
  * that hits encrypted content fails so callers don't show ciphertext. */
 
-/* Notes app .txt files live under "/notes" on both internal FFat and the SD
- * card root. tasks.txt and journal_idx.bin remain at the FFat root because
- * they are bookkeeping files, not user notes. */
-static const char *NOTES_DIR    = "/notes";
-static const char *NOTES_PREFIX = "notes/";
+/* Notes app .txt files live under hal::NOTES_DIR on both internal FFat and
+ * the SD card root (see notes_path.h). */
+using hal::NOTES_DIR;
+using hal::NOTES_PREFIX;
 
 #ifdef ARDUINO
 /* Cheap on every save — FFat.mkdir is a no-op when the entry exists. The SD
@@ -45,18 +45,6 @@ static void ensure_notes_dir()
         core::ScopedSpiLock lock;
         if (!SD.exists(NOTES_DIR)) SD.mkdir(NOTES_DIR);
     }
-}
-#endif
-
-/* Build a normalized "/path" into a fixed stack buffer. Avoids the heap
- * allocs of Arduino's `String("/") + String(path)` pattern in fs hot paths
- * (save/delete/read called per UI op, sometimes in directory loops). */
-static void normalize_path(const char *in, char *out, size_t cap)
-{
-    if (cap == 0) return;
-    if (!in || !in[0]) { out[0] = '\0'; return; }
-    if (in[0] == '/') snprintf(out, cap, "%s", in);
-    else snprintf(out, cap, "/%s", in);
 }
 
 /* Returns true if the encoded bytes were written into `out`. Either a
@@ -98,6 +86,7 @@ static bool decode_after_read(std::string &content)
     content = std::move(plain);
     return true;
 }
+#endif
 
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free)
 {
@@ -149,41 +138,18 @@ extern bool is_usb_msc_reading();
 extern bool is_usb_msc_writing();
 extern bool is_usb_msc_mounted();
 
-bool hw_is_usb_msc_reading() {
-#ifdef ARDUINO
-#if !ARDUINO_USB_MODE
-    return is_usb_msc_reading();
+// MSC state only exists on hardware builds using the TinyUSB (OTG) stack,
+// i.e. ARDUINO_USB_MODE=0 (what env_arduino sets); otherwise there is no
+// USB mass-storage device and nothing is ever mounted.
+#if defined(ARDUINO) && !ARDUINO_USB_MODE
+bool hw_is_usb_msc_reading() { return is_usb_msc_reading(); }
+bool hw_is_usb_msc_writing() { return is_usb_msc_writing(); }
+bool hw_is_usb_msc_mounted() { return is_usb_msc_mounted(); }
 #else
-    return false;
+bool hw_is_usb_msc_reading() { return false; }
+bool hw_is_usb_msc_writing() { return false; }
+bool hw_is_usb_msc_mounted() { return false; }
 #endif
-#else
-    return false;
-#endif
-}
-
-bool hw_is_usb_msc_writing() {
-#ifdef ARDUINO
-#if !ARDUINO_USB_MODE
-    return is_usb_msc_writing();
-#else
-    return false;
-#endif
-#else
-    return false;
-#endif
-}
-
-bool hw_is_usb_msc_mounted() {
-#ifdef ARDUINO
-#if !ARDUINO_USB_MODE
-    return is_usb_msc_mounted();
-#else
-    return false;
-#endif
-#else
-    return false;
-#endif
-}
 
 // Persisted across boots so consumers (e.g. the journal index) can trust a
 // cached snapshot when nothing has been written since the last refresh. The
@@ -329,13 +295,8 @@ bool hw_read_file(const char *path, std::string &content)
         return false;
     }
 
-    size_t size = f.size();
-    content.resize(size);
-    if (size > 0) {
-        f.read((uint8_t *)&content[0], size);
-    }
-    f.close();
-    log_d("Read %u bytes from %s (%s)", (unsigned int)size, str, lock.held() ? "SD" : "Internal");
+    hal::fs_read_all(f, content);
+    log_d("Read %u bytes from %s (%s)", (unsigned int)content.size(), str, lock.held() ? "SD" : "Internal");
     if (!decode_after_read(content)) {
         content.clear();
         return false;
@@ -384,13 +345,7 @@ bool hw_read_internal_bytes_raw(const char *path, std::vector<uint8_t> &buf)
 #ifdef ARDUINO
     char str[256];
     normalize_path(path, str, sizeof(str));
-    File f = FFat.open(str, FILE_READ);
-    if (!f) return false;
-    size_t size = f.size();
-    buf.resize(size);
-    if (size > 0) f.read(buf.data(), size);
-    f.close();
-    return true;
+    return hal::fs_read_all(FFat, str, buf);
 #else
     (void)path;
     return false;
@@ -405,13 +360,7 @@ bool hw_read_sd_bytes_raw(const char *path, std::vector<uint8_t> &buf)
     char str[256];
     normalize_path(path, str, sizeof(str));
     core::ScopedSpiLock lock;
-    File f = SD.open(str, FILE_READ);
-    if (!f) return false;
-    size_t size = f.size();
-    buf.resize(size);
-    if (size > 0) f.read(buf.data(), size);
-    f.close();
-    return true;
+    return hal::fs_read_all(SD, str, buf);
 #else
     (void)path;
     return false;
@@ -602,7 +551,7 @@ void hw_list_internal_entries(std::vector<HwDirEntry> &list, const char *filter_
             list.push_back({"readme.md", false, 1714000000, 1536u});
             list.push_back({"data.bin",  false, 1715000000, 1572864u});
         }
-    } else if (strcmp(dirname, "/notes") == 0) {
+    } else if (strcmp(dirname, NOTES_DIR) == 0) {
         list.push_back({"hello.txt",  false, 1712100000, 42u});
         list.push_back({"ideas.txt",  false, 1712200000, 812u});
     } else if (strcmp(dirname, "/drafts") == 0) {
@@ -673,19 +622,6 @@ void hw_set_msc_prefer_sd(bool prefer_sd)
 #endif
 }
 
-// Effective storage pick: honour the user preference, but fall back to internal
-// when the SD card is not present/mounted — writes silently landing on a
-// missing card would be surprising.
-static bool storage_should_use_sd()
-{
-#ifdef ARDUINO
-    if (!user_setting.storage_prefer_sd) return false;
-    return (HW_SD_ONLINE & hw_get_device_online()) != 0;
-#else
-    return false;
-#endif
-}
-
 void hw_prune_internal_storage(void (*cb)(int, int, const char *))
 {
 #ifdef ARDUINO
@@ -741,22 +677,14 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
 
         if (cb) cb((int)i, (int)total_to_move, ("Moving to SD: " + path).c_str());
 
-        File src = FFat.open(path);
-        if (!src) continue;
-        size_t sz = src.size();
-        std::vector<uint8_t> buf(sz);
-        if (sz) src.read(buf.data(), sz);
-        src.close();
+        std::vector<uint8_t> buf;
+        if (!hal::fs_read_all(FFat, path.c_str(), buf)) continue;
+        size_t sz = buf.size();
 
         bool copied = false;
         {
             core::ScopedSpiLock lock;
-            File dst = SD.open(path, "w");
-            if (dst) {
-                size_t w = sz ? dst.write(buf.data(), sz) : 0;
-                dst.close();
-                copied = (w == sz);
-            }
+            copied = hal::fs_write_all(SD, path.c_str(), buf.data(), sz);
         }
 
         bool hub_ok = false;
@@ -809,11 +737,9 @@ static void prune_task(void *arg)
     s_prune_task_running = false;
     vTaskDelete(nullptr);
 }
-#endif
 
 static void prune_internal_storage()
 {
-#ifdef ARDUINO
     if (!user_setting.prune_internal) return;
 
     // FFat directory scan is O(N) and slow, so only evaluate every 10 saves.
@@ -835,8 +761,8 @@ static void prune_internal_storage()
         s_prune_task_running = false;
         hw_prune_internal_storage(nullptr);
     }
-#endif
 }
+#endif
 
 bool hw_save_preferred_file(const char *path, const char *content, std::string *error,
                             bool allow_prune)
@@ -849,33 +775,23 @@ bool hw_save_preferred_file(const char *path, const char *content, std::string *
     std::vector<uint8_t> payload;
     if (!encode_for_write(path, content, payload, error)) return false;
 
-    String str = (path[0] == '/') ? String(path) : ("/" + String(path));
+    char str[256];
+    normalize_path(path, str, sizeof(str));
     /* Notes app saves land under /notes/ on both filesystems; create the
      * directory lazily so the editor never has to. tasks.txt and the journal
      * index are at the root and don't need it. */
-    if (str.startsWith(NOTES_DIR) && str.charAt(strlen(NOTES_DIR)) == '/') {
+    const size_t dlen = strlen(NOTES_DIR);
+    if (strncmp(str, NOTES_DIR, dlen) == 0 && str[dlen] == '/') {
         ensure_notes_dir();
     }
-    bool ok_int = false;
-    {
-        File f = FFat.open(str, "w");
-        if (f) {
-            size_t w = payload.empty() ? 0 : f.write(payload.data(), payload.size());
-            f.close();
-            ok_int = (w == payload.size());
-        }
-        if (!ok_int && error) {
-            *error = "Cannot write to Internal.";
-        }
+    bool ok_int = hal::fs_write_all(FFat, str, payload.data(), payload.size());
+    if (!ok_int && error) {
+        *error = "Cannot write to Internal.";
     }
 
     if (HW_SD_ONLINE & hw_get_device_online()) {
         core::ScopedSpiLock lock;
-        File f = SD.open(str, "w");
-        if (f) {
-            if (!payload.empty()) f.write(payload.data(), payload.size());
-            f.close();
-        }
+        hal::fs_write_all(SD, str, payload.data(), payload.size());
     }
 
     if (allow_prune) prune_internal_storage();
@@ -888,17 +804,13 @@ bool hw_save_preferred_file(const char *path, const char *content, std::string *
 #endif
 }
 
-bool hw_read_preferred_file(const char *path, std::string &content)
-{
-    return hw_read_file(path, content);
-}
-
 bool hw_read_preferred_file_snippet(const char *path, std::string &content, size_t max_bytes, bool *truncated)
 {
     content.clear();
     if (truncated) *truncated = false;
 #ifdef ARDUINO
-    String str = (path[0] == '/') ? String(path) : ("/" + String(path));
+    char str[256];
+    normalize_path(path, str, sizeof(str));
 
     File f = FFat.open(str, FILE_READ);
     core::MaybeSpiLock lock;
@@ -1003,26 +915,18 @@ bool hw_save_preferred_bytes(const char *path, const uint8_t *buf, size_t len, s
     }
 
 #ifdef ARDUINO
-    String str = (path[0] == '/') ? String(path) : ("/" + String(path));
+    char str[256];
+    normalize_path(path, str, sizeof(str));
 
-    // Save to Internal
-    File f = FFat.open(str, "w");
-    if (!f) {
-        if (error) *error = "Cannot open Internal file for writing.";
-        return false;
-    }
-    size_t written = f.write(buf, len);
-    f.close();
-    bool ok = (written == len);
+    // Save to Internal. A failure still falls through to the SD copy and the
+    // prune check (which may free the space that made it fail).
+    bool ok = hal::fs_write_all(FFat, str, buf, len);
+    if (!ok && error) *error = "Cannot write to Internal.";
 
     // Redundant save to SD if available
     if (HW_SD_ONLINE & hw_get_device_online()) {
         core::ScopedSpiLock lock;
-        File fsd = SD.open(str, "w");
-        if (fsd) {
-            fsd.write(buf, len);
-            fsd.close();
-        }
+        hal::fs_write_all(SD, str, buf, len);
     }
 
     // Only prune if it was a data file (not the index)
@@ -1041,7 +945,8 @@ bool hw_read_preferred_bytes(const char *path, std::vector<uint8_t> &buf)
 {
     buf.clear();
 #ifdef ARDUINO
-    String str = (path[0] == '/') ? String(path) : ("/" + String(path));
+    char str[256];
+    normalize_path(path, str, sizeof(str));
     File f;
     core::MaybeSpiLock lock;
 
@@ -1056,38 +961,11 @@ bool hw_read_preferred_bytes(const char *path, std::vector<uint8_t> &buf)
     }
 
     if (!f) return false;
-
-    size_t size = f.size();
-    buf.resize(size);
-    if (size > 0) {
-        f.read(buf.data(), size);
-    }
-    f.close();
+    hal::fs_read_all(f, buf);
     return true;
 #else
     (void)path;
     return false;
-#endif
-}
-
-bool hw_delete_preferred_file(const char *path)
-{
-    hw_set_filesystem_dirty(true);
-#ifdef ARDUINO
-    String str = (path[0] == '/') ? String(path) : ("/" + String(path));
-    bool ok = false;
-    
-    // Always try to delete from both to be sure
-    if (FFat.remove(str)) ok = true;
-    
-    if (HW_SD_ONLINE & hw_get_device_online()) {
-        core::ScopedSpiLock lock;
-        if (SD.remove(str)) ok = true;
-    }
-    return ok;
-#else
-    (void)path;
-    return true;
 #endif
 }
 

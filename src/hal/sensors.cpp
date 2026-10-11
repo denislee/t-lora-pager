@@ -17,12 +17,8 @@
 // continuously consume a fix, latching the rail on 24/7 only burned tens of
 // mA for nothing. hw_start_time_sync_gps() (gps_time_sync.cpp) is now the
 // sole owner of GPS power, asserting it only transiently for the duration
-// of a sync attempt; these two functions just drive/track that rail state.
-static bool s_gps_powered = false;
-
-bool hw_get_gps_powered() { return s_gps_powered; }
+// of a sync attempt; this just drives the rail and the UART behind it.
 void hw_set_gps_powered(bool on) {
-    s_gps_powered = on;
 #ifdef ARDUINO
     instance.powerControl(POWER_GPS, on);
     delay(10);
@@ -31,12 +27,17 @@ void hw_set_gps_powered(bool on) {
     } else {
         Serial1.begin(38400, SERIAL_8N1, GPS_RX, GPS_TX);
     }
+#else
+    (void)on;
 #endif
 }
 
 // --- IMU ---------------------------------------------------------------
 
+// Fed by the BHI260 callbacks; the emulator just reports the zeroed state.
+#if !defined(ARDUINO) || defined(USING_BHI260_SENSOR)
 static imu_params_t imu_params = {0, 0, 0, 0};
+#endif
 
 void hw_get_imu_params(imu_params_t &params)
 {

@@ -14,10 +14,10 @@
  * clean error and does nothing else.
  *
  * State reset on onStop (exit_cb):
- *   widgets: s_root, s_log_scroll, s_log_label, s_input_ta, s_mic_btn,
+ *   widgets: s_log_scroll, s_log_label, s_input_ta, s_mic_btn,
  *            s_status_lbl                  — nulled (deleted with parent)
  *   timers:  s_poll_timer                  — lv_timer_del + null
- *   tasks:   s_send_task                   — abandoned via s_ctx handoff
+ *   tasks:   send_task (no handle kept)    — abandoned via s_ctx handoff
  *   hw:      mic recording                 — stopped via hw_rec_stop()
  *   ctx:     s_ctx (SendCtx*)              — abandoned + freed if worker done
  * If you add new cached state, list it here AND extend exit_cb() — a
@@ -56,11 +56,12 @@ extern "C" {
 
 namespace {
 
+#ifdef ARDUINO
 static const char *CHAT_DIR        = "/chat";
 static const char *DEFAULT_DEVICE  = "pager-01";
+#endif
 
 // LVGL widgets — single-instance, lifetime tied to enter()/exit_cb().
-static lv_obj_t *s_root        = nullptr;
 static lv_obj_t *s_log_scroll  = nullptr;
 static lv_obj_t *s_log_label   = nullptr;
 static lv_obj_t *s_input_ta    = nullptr;
@@ -107,15 +108,13 @@ struct SendCtx {
 };
 static SendCtx *s_ctx = nullptr;
 
-// Watchdog: if the worker task hasn't flipped done within this window, the
-// HTTP call is almost certainly stuck (Arduino HTTPClient.getString() has
-// been seen hanging on certain server response shapes). We surface it as
-// a visible error and abandon the task so the UI doesn't sit on
-// "thinking..." forever.
-static const uint32_t SEND_WATCHDOG_MS = 20000;
-
+// Watchdog: if the worker task hasn't flipped done within this window, give
+// up on it. chat_post's raw WiFiClient already bounds itself (5 s connect +
+// 15 s read budget), so this is a UI-side backstop just past that budget:
+// it surfaces a visible error and abandons the task so the UI doesn't sit
+// on "thinking..." forever if the worker overruns.
 #ifdef ARDUINO
-static TaskHandle_t s_send_task = nullptr;
+static const uint32_t SEND_WATCHDOG_MS = 20000;
 #endif
 
 static void log_append(const char *prefix, const std::string &text)
@@ -224,6 +223,7 @@ static void status_click_cb(lv_event_t *)
     set_status("");
 }
 
+#ifdef ARDUINO
 static std::string current_device_id()
 {
     // A pager is single-user; one fixed ID is sufficient for the hub to
@@ -232,7 +232,6 @@ static std::string current_device_id()
     return DEFAULT_DEVICE;
 }
 
-#ifdef ARDUINO
 // Self-contained POST over raw WiFiClient. We avoid hw_http_request /
 // Arduino HTTPClient because their getString() has been observed to
 // hang indefinitely on this device, even when the server clearly sent
@@ -251,23 +250,21 @@ static bool chat_post(const std::string &url,
 {
     status_code = 0;
 
-    // Tiny URL parser — we only support http://host[:port]/path. The hub
-    // is on the LAN; if anyone ever points the device at https we'll
-    // route through a TLS path then.
+    // We only support http://host[:port]/path. The hub is on the LAN; if
+    // anyone ever points the device at https we'll route through a TLS
+    // path then.
     if (url.compare(0, 7, "http://") != 0) {
         error = "only http:// supported (got: " + url.substr(0, 16) + ")";
         return false;
     }
-    std::string rest = url.substr(7);
-    size_t slash = rest.find('/');
-    std::string hostport = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-    std::string path     = (slash == std::string::npos) ? "/"  : rest.substr(slash);
-    size_t colon = hostport.find(':');
-    std::string host = (colon == std::string::npos) ? hostport : hostport.substr(0, colon);
-    int port = 80;
-    if (colon != std::string::npos) {
-        port = atoi(hostport.substr(colon + 1).c_str());
+    hal::UrlParts u;
+    if (!hal::parse_url(url, u)) {
+        error = "no host in hub URL";
+        return false;
     }
+    const std::string &host = u.host;
+    const std::string &path = u.path;
+    const int port = u.port;
     Serial.printf("[chat] connect %s:%d path=%s\n",
                   host.c_str(), port, path.c_str());
 
@@ -396,6 +393,18 @@ static bool chat_b64_sink(void *user, const uint8_t *data, size_t len)
     return true;
 }
 
+// Single worker exit: publish the result (release pairs with
+// poll_timer_cb's acquire), free ctx if the UI already abandoned it, and
+// self-delete.
+static void send_task_exit(SendCtx *ctx)
+{
+    ctx->done.store(true, std::memory_order_release);
+    if (ctx->abandoned.load() && !ctx->claimed.exchange(true)) {
+        delete ctx;
+    }
+    vTaskDelete(NULL);
+}
+
 static void send_task(void *arg)
 {
     SendCtx *ctx = (SendCtx *)arg;
@@ -415,12 +424,7 @@ static void send_task(void *arg)
             ctx->error = "audio read failed";
             ctx->body.clear();
             ctx->body.shrink_to_fit();
-            ctx->done.store(true, std::memory_order_release);
-            if (ctx->abandoned.load() && !ctx->claimed.exchange(true)) {
-                delete ctx;
-            }
-            s_send_task = nullptr;
-            vTaskDelete(NULL);
+            send_task_exit(ctx);
             return;
         }
         // Restart the watchdog clock now that the (potentially multi-second)
@@ -479,15 +483,9 @@ static void send_task(void *arg)
         }
     }
 
-    // Publish all result fields before flipping `done`. Release/acquire
-    // pairs with poll_timer_cb's load(done) so the UI sees a consistent
-    // ctx (reply/transcript/ok all populated) once it observes done=true.
-    ctx->done.store(true, std::memory_order_release);
-    if (ctx->abandoned.load() && !ctx->claimed.exchange(true)) {
-        delete ctx;
-    }
-    s_send_task = nullptr;
-    vTaskDelete(NULL);
+    // All result fields are set; send_task_exit publishes them via `done`
+    // so the UI sees a consistent ctx (reply/transcript/ok all populated).
+    send_task_exit(ctx);
 }
 #endif
 
@@ -599,16 +597,14 @@ static void kick_off_send(const std::string &user_text,
     }
 
     s_ctx = ctx;
-#ifdef ARDUINO
     ctx->start_ms = millis();
-#endif
     set_status("thinking... (tap to cancel)");
     // Pin to core 0 — LVGL runs on core 1, so the HTTP read loop and
     // the UI redraws never compete for the same scheduler slot. Priority
     // 1 keeps it well below the LVGL task (priority 8); even on a single
     // core that would be fine, but cross-core is safer.
     if (xTaskCreatePinnedToCore(send_task, "chat_send", 8192, ctx, 1,
-                                &s_send_task, 0) != pdPASS) {
+                                nullptr, 0) != pdPASS) {
         s_ctx = nullptr;
         delete ctx;
         log_append("err: ", "task spawn failed");
@@ -632,11 +628,7 @@ static void send_btn_cb(lv_event_t *)
     }
 
     const char *raw = lv_textarea_get_text(s_input_ta);
-    std::string txt = raw ? raw : "";
-    size_t a = txt.find_first_not_of(" \t\r\n");
-    size_t b = txt.find_last_not_of(" \t\r\n");
-    txt = (a == std::string::npos) ? std::string()
-                                   : txt.substr(a, b - a + 1);
+    std::string txt = hal::trim(raw ? raw : "");
     if (txt.empty()) return;
     set_busy(true);
     log_append("you: ", txt);
@@ -727,13 +719,8 @@ static void back_btn_cb(lv_event_t *) { menu_show(); }
 static void log_key_cb(lv_event_t *e)
 {
     if (!s_log_scroll) return;
-    uint32_t key = lv_event_get_key(e);
-    int32_t step = 0;
-    if (key == LV_KEY_UP || key == LV_KEY_LEFT) step = -24;
-    else if (key == LV_KEY_DOWN || key == LV_KEY_RIGHT) step = 24;
-    else return;
-    lv_obj_scroll_by(s_log_scroll, 0, -step, LV_ANIM_OFF);
-    lv_event_stop_processing(e);
+    if (ui_scroll_key_clamped(s_log_scroll, lv_event_get_key(e), 24, LV_ANIM_OFF))
+        lv_event_stop_processing(e);
 }
 
 // Encoder click on the focused log container exits scroll mode by handing
@@ -746,7 +733,6 @@ static void log_click_cb(lv_event_t *)
 
 static void enter(lv_obj_t *parent)
 {
-    s_root = parent;
     s_log_text.clear();
     s_busy = false;
     s_recording = false;
@@ -767,7 +753,7 @@ static void enter(lv_obj_t *parent)
     s_log_scroll = lv_obj_create(parent);
     lv_obj_set_width(s_log_scroll, lv_pct(100));
     lv_obj_set_flex_grow(s_log_scroll, 1);
-    lv_obj_set_style_bg_color(s_log_scroll, lv_color_hex(0x101010), 0);
+    lv_obj_set_style_bg_color(s_log_scroll, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(s_log_scroll, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(s_log_scroll, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_width(s_log_scroll, 1, 0);
@@ -827,7 +813,7 @@ static void enter(lv_obj_t *parent)
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *l = lv_label_create(b);
         lv_label_set_text(l, icon);
-        lv_obj_set_style_text_color(l, UI_COLOR_FG, 0);
+        lv_obj_set_style_text_color(l, UI_COLOR_ON_ACCENT, 0);
         lv_obj_center(l);
         lv_group_add_obj(lv_group_get_default(), b);
         return b;
@@ -871,19 +857,10 @@ static void exit_cb()
 #endif
     s_recording = false;
 
-    // Same handoff dance as cancel_inflight: mark abandoned, then claim
-    // the deletion if the worker has already finished. Otherwise the
-    // worker will claim and free on its way out.
-    if (s_ctx) {
-        SendCtx *c = s_ctx;
-        s_ctx = nullptr;
-        c->abandoned.store(true);
-        if (c->done.load() && !c->claimed.exchange(true)) {
-            delete c;
-        }
-    }
+    // Abandon any in-flight request; the worker frees it on its way out.
+    cancel_inflight();
 
-    s_root = s_log_scroll = s_log_label = nullptr;
+    s_log_scroll = s_log_label = nullptr;
     s_input_ta = s_mic_btn = s_status_lbl = nullptr;
     s_log_text.clear();
     s_pending_audio_path.clear();

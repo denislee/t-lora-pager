@@ -3,7 +3,7 @@
  * @brief     Settings » Fonts subpage. Extracted from ui_settings.cpp; see
  *            settings_internal.h for the cross-TU contract.
  *
- * 14 dropdowns (7 UI contexts × face/size) all mutating fields on
+ * 18 dropdowns (9 UI contexts × face/size) all mutating fields on
  * `local_param` and committing via `hw_set_user_setting` so a crash/power-
  * loss between clicks can't strand the user with a half-applied font
  * change.
@@ -33,144 +33,23 @@ static void commit_font_change()
     hw_set_user_setting(local_param);
 }
 
-static void editor_font_face_cb(lv_event_t *e)
+// Both callbacks get a pointer to the `local_param` field they own as
+// user_data. Both end with lv_event_stop_processing, as every per-field
+// callback did before (the Telegram pair was the one exception).
+static void font_face_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.editor_font_index = lv_dropdown_get_selected(obj);
+    uint8_t *field = (uint8_t *)lv_event_get_user_data(e);
+    *field = lv_dropdown_get_selected(obj);
     commit_font_change();
     lv_event_stop_processing(e);
 }
 
-static void editor_font_size_cb(lv_event_t *e)
+static void font_size_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.editor_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void journal_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.journal_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void journal_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.journal_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void header_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.header_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void header_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.header_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void home_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.home_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void home_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.home_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void weather_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.weather_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void weather_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.weather_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void telegram_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.telegram_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-}
-
-static void telegram_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.telegram_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-}
-
-static void ssh_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.ssh_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void ssh_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.ssh_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void chat_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.chat_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void chat_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.chat_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void system_font_face_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.system_font_index = lv_dropdown_get_selected(obj);
-    commit_font_change();
-    lv_event_stop_processing(e);
-}
-
-static void system_font_size_cb(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    local_param.system_font_size = 10 + lv_dropdown_get_selected(obj) * 2;
+    uint8_t *field = (uint8_t *)lv_event_get_user_data(e);
+    *field = 10 + lv_dropdown_get_selected(obj) * 2;
     commit_font_change();
     lv_event_stop_processing(e);
 }
@@ -180,8 +59,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     (void)menu;
     lv_obj_set_style_pad_row(sub_page, 4, 0);
 
-    auto add_font_section = [&](const char *title, uint8_t face_idx, uint8_t size,
-                                lv_event_cb_t face_cb, lv_event_cb_t size_cb) {
+    auto add_font_section = [&](const char *title, uint8_t &face_idx, uint8_t &size) {
         lv_obj_t *row = lv_obj_create(sub_page);
         lv_obj_remove_style_all(row);
         lv_obj_set_width(row, LV_PCT(100));
@@ -202,9 +80,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
         lv_dropdown_set_selected(dd_face, face_idx);
         lv_obj_set_width(dd_face, 0);
         lv_obj_set_flex_grow(dd_face, 2);
-        if (face_cb) {
-            lv_obj_add_event_cb(dd_face, face_cb, LV_EVENT_VALUE_CHANGED, NULL);
-        }
+        lv_obj_add_event_cb(dd_face, font_face_cb, LV_EVENT_VALUE_CHANGED, &face_idx);
         register_subpage_group_obj(sub_page, dd_face);
 
         lv_obj_t *dd_size = lv_dropdown_create(row);
@@ -212,30 +88,19 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
         lv_dropdown_set_selected(dd_size, size_to_idx(size));
         lv_obj_set_width(dd_size, 0);
         lv_obj_set_flex_grow(dd_size, 1);
-        if (size_cb) {
-            lv_obj_add_event_cb(dd_size, size_cb, LV_EVENT_VALUE_CHANGED, NULL);
-        }
+        lv_obj_add_event_cb(dd_size, font_size_cb, LV_EVENT_VALUE_CHANGED, &size);
         register_subpage_group_obj(sub_page, dd_size);
     };
 
-    add_font_section("System",   local_param.system_font_index,  local_param.system_font_size,
-                     system_font_face_cb,  system_font_size_cb);
-    add_font_section("Home",     local_param.home_font_index,    local_param.home_font_size,
-                     home_font_face_cb,    home_font_size_cb);
-    add_font_section("Notes",    local_param.editor_font_index,  local_param.editor_font_size,
-                     editor_font_face_cb,  editor_font_size_cb);
-    add_font_section("Journal",  local_param.journal_font_index, local_param.journal_font_size,
-                     journal_font_face_cb, journal_font_size_cb);
-    add_font_section("Weather",  local_param.weather_font_index, local_param.weather_font_size,
-                     weather_font_face_cb, weather_font_size_cb);
-    add_font_section("Telegram", local_param.telegram_font_index, local_param.telegram_font_size,
-                     telegram_font_face_cb, telegram_font_size_cb);
-    add_font_section("SSH",      local_param.ssh_font_index,     local_param.ssh_font_size,
-                     ssh_font_face_cb,     ssh_font_size_cb);
-    add_font_section("Chat",     local_param.chat_font_index,    local_param.chat_font_size,
-                     chat_font_face_cb,    chat_font_size_cb);
-    add_font_section("Header",   local_param.header_font_index,  local_param.header_font_size,
-                     header_font_face_cb,  header_font_size_cb);
+    add_font_section("System",   local_param.system_font_index,   local_param.system_font_size);
+    add_font_section("Home",     local_param.home_font_index,     local_param.home_font_size);
+    add_font_section("Notes",    local_param.editor_font_index,   local_param.editor_font_size);
+    add_font_section("Journal",  local_param.journal_font_index,  local_param.journal_font_size);
+    add_font_section("Weather",  local_param.weather_font_index,  local_param.weather_font_size);
+    add_font_section("Telegram", local_param.telegram_font_index, local_param.telegram_font_size);
+    add_font_section("SSH",      local_param.ssh_font_index,      local_param.ssh_font_size);
+    add_font_section("Chat",     local_param.chat_font_index,     local_param.chat_font_size);
+    add_font_section("Header",   local_param.header_font_index,   local_param.header_font_size);
 }
 
 } // namespace fonts_cfg

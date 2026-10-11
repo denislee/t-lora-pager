@@ -17,5 +17,3 @@ void hw_enable_keyboard();
 void hw_disable_keyboard();
 bool hw_has_keyboard();
 void hw_set_keyboard_read_callback(void(*read)(int state, char &c));
-
-bool is_screen_small();

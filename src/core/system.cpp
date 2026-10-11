@@ -46,8 +46,6 @@ void System::setupGlobalUI() {
 
     _menuGroup = lv_group_create();
     lv_group_set_wrap(_menuGroup, false);
-    _appGroup = lv_group_create();
-    lv_group_set_wrap(_appGroup, false);
     
     // Set legacy global
     menu_g = _menuGroup;
@@ -59,14 +57,13 @@ void System::setupGlobalUI() {
     if (v_res <= 0) v_res = 222;
 
     const lv_font_t *header_font = get_header_font();
-    int32_t bar_h = lv_font_get_line_height(header_font) + 8;
-    if (bar_h < 30) bar_h = 30;
+    int32_t bar_h = ui_status_bar_height();
 
     // Create Main Screen (TileView)
     _mainScreen = lv_tileview_create(lv_screen_active());
     lv_obj_set_size(_mainScreen, LV_PCT(100), v_res - bar_h);
     lv_obj_align(_mainScreen, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(_mainScreen, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(_mainScreen, UI_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(_mainScreen, LV_OPA_COVER, 0);
     lv_obj_set_scrollbar_mode(_mainScreen, LV_SCROLLBAR_MODE_OFF);
 
@@ -77,7 +74,7 @@ void System::setupGlobalUI() {
     _statusBar = lv_obj_create(lv_screen_active());
     lv_obj_set_size(_statusBar, LV_PCT(100), bar_h);
     lv_obj_align(_statusBar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(_statusBar, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(_statusBar, ui_color_titlebar(), 0);
     lv_obj_set_style_bg_opa(_statusBar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(_statusBar, 0, 0);
     lv_obj_set_style_radius(_statusBar, 0, 0);
@@ -85,7 +82,7 @@ void System::setupGlobalUI() {
 
     _statTimeLabel = lv_label_create(_statusBar);
     lv_obj_center(_statTimeLabel);
-    lv_obj_set_style_text_color(_statTimeLabel, lv_color_white(), 0);
+    lv_obj_set_style_text_color(_statTimeLabel, ui_color_title_fg(), 0);
     lv_obj_set_style_text_font(_statTimeLabel, header_font, 0);
     /* Avoid LVGL's default "Text" leaking through any modal (e.g. the
      * passphrase prompt) that opens before the 1Hz timer below has fired. */
@@ -108,31 +105,31 @@ void System::setupGlobalUI() {
     // File-count indicator — added first so it sits at the leftmost position
     // inside the right-side cluster; styled gray per spec.
     _statFileCountLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statFileCountLabel, UI_COLOR_MUTED, 0);
+    lv_obj_set_style_text_color(_statFileCountLabel, ui_color_title_muted(), 0);
     lv_obj_set_style_text_font(_statFileCountLabel, header_font, 0);
     lv_label_set_text(_statFileCountLabel, "");
     lv_obj_add_flag(_statFileCountLabel, LV_OBJ_FLAG_HIDDEN);
 
     _statSDLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statSDLabel, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_text_color(_statSDLabel, ui_color_title_icon(), 0);
     lv_obj_set_style_text_font(_statSDLabel, header_font, 0);
     lv_label_set_text(_statSDLabel, LV_SYMBOL_SD_CARD);
     lv_obj_add_flag(_statSDLabel, LV_OBJ_FLAG_HIDDEN);
 
     _statUSBLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statUSBLabel, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_text_color(_statUSBLabel, ui_color_title_icon(), 0);
     lv_obj_set_style_text_font(_statUSBLabel, header_font, 0);
     lv_label_set_text(_statUSBLabel, LV_SYMBOL_USB);
     lv_obj_add_flag(_statUSBLabel, LV_OBJ_FLAG_HIDDEN);
 
     _statBTLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statBTLabel, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_text_color(_statBTLabel, ui_color_title_icon(), 0);
     lv_obj_set_style_text_font(_statBTLabel, header_font, 0);
     lv_label_set_text(_statBTLabel, LV_SYMBOL_BLUETOOTH);
     lv_obj_add_flag(_statBTLabel, LV_OBJ_FLAG_HIDDEN);
 
     _statWifiLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statWifiLabel, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_text_color(_statWifiLabel, ui_color_title_icon(), 0);
     lv_obj_set_style_text_font(_statWifiLabel, header_font, 0);
     lv_label_set_text(_statWifiLabel, LV_SYMBOL_WIFI);
     lv_obj_add_flag(_statWifiLabel, LV_OBJ_FLAG_HIDDEN);
@@ -142,19 +139,19 @@ void System::setupGlobalUI() {
     // answered our last TCP probe. The probe runs from the status timer
     // below at a much slower cadence than the 1Hz refresh.
     _statHubLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statHubLabel, UI_COLOR_MUTED, 0);
+    lv_obj_set_style_text_color(_statHubLabel, ui_color_title_muted(), 0);
     lv_obj_set_style_text_font(_statHubLabel, header_font, 0);
     lv_label_set_text(_statHubLabel, LV_SYMBOL_HOME);
     lv_obj_add_flag(_statHubLabel, LV_OBJ_FLAG_HIDDEN);
 
     _statBattLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statBattLabel, lv_color_white(), 0);
+    lv_obj_set_style_text_color(_statBattLabel, ui_color_title_fg(), 0);
     lv_obj_set_style_text_font(_statBattLabel, header_font, 0);
     lv_label_set_text(_statBattLabel, "");
 
     _statMemLabel = lv_label_create(_statusBar);
     lv_obj_align(_statMemLabel, LV_ALIGN_LEFT_MID, 5, 0);
-    lv_obj_set_style_text_color(_statMemLabel, lv_color_white(), 0);
+    lv_obj_set_style_text_color(_statMemLabel, ui_color_title_fg(), 0);
     lv_obj_set_style_text_font(_statMemLabel, header_font, 0);
     lv_obj_add_flag(_statMemLabel, LV_OBJ_FLAG_HIDDEN);
 
@@ -174,7 +171,7 @@ void System::setupGlobalUI() {
     lv_obj_t *back_lbl = lv_label_create(_statBackBtn);
     lv_label_set_text(back_lbl, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_font(back_lbl, header_font, 0);
-    lv_obj_set_style_text_color(back_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_color(back_lbl, ui_color_title_fg(), 0);
     lv_obj_add_flag(_statBackBtn, LV_OBJ_FLAG_HIDDEN);
 
     lv_timer_create([](lv_timer_t *t) {
@@ -203,8 +200,7 @@ void System::setupGlobalUI() {
         if (applied_header_font == nullptr) applied_header_font = cur_font;
         if (self._statusBar && cur_font != applied_header_font) {
             applied_header_font = cur_font;
-            int32_t new_bar_h = lv_font_get_line_height(cur_font) + 8;
-            if (new_bar_h < 30) new_bar_h = 30;
+            int32_t new_bar_h = ui_status_bar_height();  // from cur_font
             lv_obj_set_style_text_font(self._statTimeLabel, cur_font, 0);
             lv_obj_set_style_text_font(self._statBattLabel, cur_font, 0);
             lv_obj_set_style_text_font(self._statMemLabel, cur_font, 0);
@@ -300,7 +296,7 @@ void System::setupGlobalUI() {
             if (hw_get_bt_enable()) {
                 lv_obj_clear_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_set_style_text_color(self._statBTLabel,
-                    hw_get_ble_kb_connected() ? UI_COLOR_ACCENT : UI_COLOR_MUTED, 0);
+                    hw_get_ble_kb_connected() ? ui_color_title_icon() : ui_color_title_muted(), 0);
             } else {
                 lv_obj_add_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
             }
@@ -310,7 +306,7 @@ void System::setupGlobalUI() {
             if (hw_get_wifi_enable()) {
                 lv_obj_clear_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_set_style_text_color(self._statWifiLabel,
-                    hw_get_wifi_connected() ? UI_COLOR_ACCENT : UI_COLOR_MUTED, 0);
+                    hw_get_wifi_connected() ? ui_color_title_icon() : ui_color_title_muted(), 0);
             } else {
                 lv_obj_add_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
             }
@@ -362,7 +358,7 @@ void System::setupGlobalUI() {
                 }
                 lv_obj_clear_flag(self._statHubLabel, LV_OBJ_FLAG_HIDDEN);
                 lv_obj_set_style_text_color(self._statHubLabel,
-                    hub_reachable ? UI_COLOR_ACCENT : UI_COLOR_MUTED, 0);
+                    hub_reachable ? ui_color_title_icon() : ui_color_title_muted(), 0);
             } else {
                 lv_obj_add_flag(self._statHubLabel, LV_OBJ_FLAG_HIDDEN);
             }
@@ -378,7 +374,7 @@ void System::setupGlobalUI() {
                 } else if (hw_is_usb_msc_reading()) {
                     lv_obj_set_style_text_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_BLUE), 0);
                 } else {
-                    lv_obj_set_style_text_color(self._statUSBLabel, UI_COLOR_ACCENT, 0);
+                    lv_obj_set_style_text_color(self._statUSBLabel, ui_color_title_icon(), 0);
                 }
             } else {
                 lv_obj_add_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
@@ -390,20 +386,11 @@ void System::setupGlobalUI() {
         // app is currently running, and tears itself down once the host
         // ejects the volume.
         if (usb_mounted && self._usbWarningBox == nullptr) {
-            lv_obj_t *box = lv_obj_create(lv_layer_top());
-            lv_obj_set_size(box, lv_pct(100), lv_pct(100));
-            lv_obj_center(box);
-            lv_obj_set_style_bg_color(box, UI_COLOR_BG, 0);
-            lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+            // Untitled ui_popup_create plus a red frame.
+            lv_obj_t *box = ui_popup_create(NULL);
             lv_obj_set_style_border_color(box, lv_palette_main(LV_PALETTE_RED), 0);
             lv_obj_set_style_border_width(box, UI_BORDER_W, 0);
             lv_obj_set_style_radius(box, 0, 0);
-            lv_obj_set_style_pad_all(box, 12, 0);
-            lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
-            lv_obj_set_flex_align(box, LV_FLEX_ALIGN_CENTER,
-                                  LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-            lv_obj_set_style_pad_row(box, 8, 0);
-            lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
 
             lv_obj_t *icon = lv_label_create(box);
             lv_label_set_text(icon, LV_SYMBOL_WARNING);
@@ -491,6 +478,47 @@ void System::setupGlobalUI() {
                               ui_battery_icon(params.battery_percent, params.is_charging),
                               params.battery_percent);
     }
+
+    applyChromeStyle();
+}
+
+void System::applyChromeStyle() {
+    // Re-tint the persistent chrome to the current palette. Called after a
+    // style switch and once at the end of setupGlobalUI.
+    if (_mainScreen) {
+        lv_obj_set_style_bg_color(_mainScreen, UI_COLOR_BG, 0);
+    }
+    // Apps paint their panel with a local UI_COLOR_BG (chat, ssh, weather,
+    // ...) that outlives them; re-tint it so a page without its own fill
+    // (Settings) doesn't show the previous palette.
+    if (_appPanel)  lv_obj_set_style_bg_color(_appPanel, UI_COLOR_BG, 0);
+    if (_menuPanel) lv_obj_set_style_bg_color(_menuPanel, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_color(lv_screen_active(), UI_COLOR_BG, 0);
+    if (_statusBar) {
+        lv_obj_set_style_bg_color(_statusBar, ui_color_titlebar(), 0);
+        // A seam under the bar: Pixel Iso's accent rule, a darker blue under
+        // the Habbo title bar, a thin gold one under the BeOS tab; Classic none.
+        const ui_palette_t &pal = ui_palette();
+        lv_obj_set_style_border_width(_statusBar, pal.seam_w, 0);
+        if (pal.seam_w) {
+            lv_obj_set_style_border_side(_statusBar, LV_BORDER_SIDE_BOTTOM, 0);
+            lv_obj_set_style_border_color(_statusBar, pal.title_seam, 0);
+            lv_obj_set_style_border_opa(_statusBar, LV_OPA_COVER, 0);
+        }
+    }
+    // Re-color the status-bar members to sit on the title bar.
+    if (_statTimeLabel)     lv_obj_set_style_text_color(_statTimeLabel, ui_color_title_fg(), 0);
+    if (_statBattLabel)     lv_obj_set_style_text_color(_statBattLabel, ui_color_title_fg(), 0);
+    if (_statMemLabel)      lv_obj_set_style_text_color(_statMemLabel, ui_color_title_fg(), 0);
+    if (_statBackBtn) {
+        lv_obj_t *lbl = lv_obj_get_child(_statBackBtn, 0);
+        if (lbl) lv_obj_set_style_text_color(lbl, ui_color_title_fg(), 0);
+    }
+    if (_statSDLabel)       lv_obj_set_style_text_color(_statSDLabel, ui_color_title_icon(), 0);
+    if (_statUSBLabel)      lv_obj_set_style_text_color(_statUSBLabel, ui_color_title_icon(), 0);
+    if (_statBTLabel)       lv_obj_set_style_text_color(_statBTLabel, ui_color_title_icon(), 0);
+    if (_statWifiLabel)     lv_obj_set_style_text_color(_statWifiLabel, ui_color_title_icon(), 0);
+    if (_statFileCountLabel) lv_obj_set_style_text_color(_statFileCountLabel, ui_color_title_muted(), 0);
 }
 
 void System::showMenu() {
@@ -597,7 +625,7 @@ void System::hideBackButton() {
 
 } // namespace core
 
-// Free-function wrappers exposed via ui_define.h so ui_*.cpp files don't need
+// Free-function wrappers declared in ui/back_button.h so ui_*.cpp files don't need
 // to pull in the core::System singleton directly.
 lv_obj_t *ui_show_back_button(lv_event_cb_t cb)
 {

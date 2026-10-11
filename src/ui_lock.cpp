@@ -17,14 +17,10 @@
 namespace {
 
 struct LockCtx {
-    lv_obj_t *overlay      = nullptr;
+    ui_overlay_t ov        = {};   // no back button: ov.prev_back_cb stays NULL
     lv_obj_t *ta1          = nullptr;
     lv_obj_t *ta2          = nullptr;
     lv_obj_t *err_label    = nullptr;
-    lv_obj_t *ok_btn       = nullptr;
-    lv_obj_t *cancel_btn   = nullptr;
-    lv_group_t *group      = nullptr;
-    lv_group_t *prev_group = nullptr;
     bool confirm           = false;
     bool verify_unlock     = false;
     bool password          = true;
@@ -53,9 +49,7 @@ static void tear_down(LockCtx *ctx)
      * fires deletion events — they re-enter our callbacks and the null
      * g_ctx check guards against double-fire. */
     std::unique_ptr<LockCtx> owned = std::move(g_ctx);
-    if (owned->overlay) lv_obj_del(owned->overlay);
-    if (owned->group)   lv_group_del(owned->group);
-    if (owned->prev_group) set_default_group(owned->prev_group);
+    ui_overlay_close(&owned->ov);
 }
 
 static void cancel_event_cb(lv_event_t *e)
@@ -133,8 +127,7 @@ static void build(const char *title, const char *subtitle,
                   bool password = true,
                   const char *initial = nullptr,
                   bool allow_empty = false,
-                  bool hide_cancel = false,
-                  bool hide_ok = false)
+                  bool hide_buttons = false)
 {
     if (g_ctx) {
         /* Already showing a prompt; drop the new request. */
@@ -153,25 +146,18 @@ static void build(const char *title, const char *subtitle,
     ctx->cb_unlock     = cb_unlock;
     ctx->ud            = ud;
 
-    ctx->prev_group = lv_group_get_default();
-    ctx->group = lv_group_create();
-    lv_group_set_wrap(ctx->group, true);
-    set_default_group(ctx->group);
+    /* No back-button takeover: the modal is dismissed by its own buttons
+     * (or, for the device lock, only by the right passphrase). */
+    lv_obj_t *overlay = ui_overlay_open(&ctx->ov, /*back_cb=*/nullptr, /*wrap=*/true);
 
-    enable_keyboard();
-
-    /* Dimmed backdrop — the card below sits on top. Using a semi-transparent
-     * overlay keeps whatever screen was visible as a faint background so the
-     * prompt feels like a dialog, not a context switch. */
-    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
-    ctx->overlay = overlay;
+    /* Dimmed full-screen backdrop instead of the below-status-bar panel —
+     * the card below sits on top. Using a semi-transparent overlay keeps
+     * whatever screen was visible as a faint background so the prompt feels
+     * like a dialog, not a context switch. */
     lv_obj_set_size(overlay, lv_pct(100), lv_pct(100));
     lv_obj_center(overlay);
-    lv_obj_set_style_bg_color(overlay, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(overlay, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(overlay, 0, 0);
     lv_obj_set_style_pad_all(overlay, 6, 0);
-    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
@@ -179,7 +165,7 @@ static void build(const char *title, const char *subtitle,
     lv_obj_t *card = lv_obj_create(overlay);
     lv_obj_set_width(card, lv_pct(96));
     lv_obj_set_height(card, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x101010), 0);
+    lv_obj_set_style_bg_color(card, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(card, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_width(card, 1, 0);
@@ -220,7 +206,7 @@ static void build(const char *title, const char *subtitle,
     }
 
     auto style_ta = [](lv_obj_t *ta) {
-        lv_obj_set_style_bg_color(ta, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_color(ta, UI_COLOR_SURFACE, 0);
         lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(ta, UI_COLOR_FG, 0);
         lv_obj_set_style_text_align(ta, LV_TEXT_ALIGN_CENTER, 0);
@@ -246,7 +232,7 @@ static void build(const char *title, const char *subtitle,
     }
     lv_obj_set_width(ctx->ta1, lv_pct(100));
     style_ta(ctx->ta1);
-    lv_group_add_obj(ctx->group, ctx->ta1);
+    lv_group_add_obj(ctx->ov.group, ctx->ta1);
     lv_obj_add_event_cb(ctx->ta1, ta_key_event_cb, LV_EVENT_KEY, ctx);
 
     if (confirm) {
@@ -256,7 +242,7 @@ static void build(const char *title, const char *subtitle,
         lv_textarea_set_placeholder_text(ctx->ta2, "confirm");
         lv_obj_set_width(ctx->ta2, lv_pct(100));
         style_ta(ctx->ta2);
-        lv_group_add_obj(ctx->group, ctx->ta2);
+        lv_group_add_obj(ctx->ov.group, ctx->ta2);
         lv_obj_add_event_cb(ctx->ta2, ta_key_event_cb, LV_EVENT_KEY, ctx);
     }
 
@@ -270,7 +256,7 @@ static void build(const char *title, const char *subtitle,
     lv_obj_set_style_text_align(ctx->err_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_min_height(ctx->err_label, 18, 0);
 
-    if (!hide_cancel || !hide_ok) {
+    if (!hide_buttons) {
         lv_obj_t *btn_row = lv_obj_create(card);
         lv_obj_set_width(btn_row, lv_pct(100));
         lv_obj_set_height(btn_row, 40);
@@ -283,45 +269,19 @@ static void build(const char *title, const char *subtitle,
         lv_obj_set_style_pad_column(btn_row, 8, 0);
         lv_obj_clear_flag(btn_row, LV_OBJ_FLAG_SCROLLABLE);
 
-        /* Matches the remote screen's button styling (see make_key_button in
-         * ui_media_remote.cpp). */
-        auto style_btn = [](lv_obj_t *btn) {
-            lv_obj_set_flex_grow(btn, 1);
-            lv_obj_set_height(btn, lv_pct(100));
-            lv_obj_set_style_radius(btn, UI_RADIUS, 0);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x151515), 0);
-            lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-            lv_obj_set_style_text_color(btn, UI_COLOR_FG, 0);
-            lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
-            lv_obj_set_style_border_width(btn, 1, 0);
-            lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
-            lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUSED);
-            lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-            lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a1a00), LV_STATE_FOCUSED);
-            lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
-        };
+        /* Shared modal-button look (ui_modal_btn_create), stretched to
+         * split the row. */
+        lv_obj_t *cancel_btn = ui_modal_btn_create(btn_row, LV_SYMBOL_CLOSE "  Cancel",
+                                                   cancel_event_cb, ctx);
+        lv_obj_set_flex_grow(cancel_btn, 1);
+        lv_obj_set_height(cancel_btn, lv_pct(100));
+        lv_group_add_obj(ctx->ov.group, cancel_btn);
 
-        if (!hide_cancel) {
-            ctx->cancel_btn = lv_btn_create(btn_row);
-            style_btn(ctx->cancel_btn);
-            lv_obj_t *lbl = lv_label_create(ctx->cancel_btn);
-            lv_label_set_text(lbl, LV_SYMBOL_CLOSE "  Cancel");
-            lv_obj_set_style_text_color(lbl, UI_COLOR_FG, 0);
-            lv_obj_center(lbl);
-            lv_obj_add_event_cb(ctx->cancel_btn, cancel_event_cb, LV_EVENT_CLICKED, ctx);
-            lv_group_add_obj(ctx->group, ctx->cancel_btn);
-        }
-
-        if (!hide_ok) {
-            ctx->ok_btn = lv_btn_create(btn_row);
-            style_btn(ctx->ok_btn);
-            lv_obj_t *lbl = lv_label_create(ctx->ok_btn);
-            lv_label_set_text(lbl, LV_SYMBOL_OK "  OK");
-            lv_obj_set_style_text_color(lbl, UI_COLOR_FG, 0);
-            lv_obj_center(lbl);
-            lv_obj_add_event_cb(ctx->ok_btn, ok_event_cb, LV_EVENT_CLICKED, ctx);
-            lv_group_add_obj(ctx->group, ctx->ok_btn);
-        }
+        lv_obj_t *ok_btn = ui_modal_btn_create(btn_row, LV_SYMBOL_OK "  OK",
+                                               ok_event_cb, ctx);
+        lv_obj_set_flex_grow(ok_btn, 1);
+        lv_obj_set_height(ok_btn, lv_pct(100));
+        lv_group_add_obj(ctx->ov.group, ok_btn);
     }
 
     lv_group_focus_obj(ctx->ta1);
@@ -329,7 +289,7 @@ static void build(const char *title, const char *subtitle,
 
 } /* namespace */
 
-/* Public API (see ui_define.h). */
+/* Public API (see ui/modals.h). */
 
 bool ui_passphrase_is_active()
 {
@@ -379,5 +339,5 @@ void ui_device_lock_enforce()
           /*confirm=*/false, /*verify_unlock=*/true,
           /*cb_pw=*/nullptr, /*cb_unlock=*/nullptr, /*ud=*/nullptr,
           /*password=*/true, /*initial=*/nullptr, /*allow_empty=*/false,
-          /*hide_cancel=*/true, /*hide_ok=*/true);
+          /*hide_buttons=*/true);
 }

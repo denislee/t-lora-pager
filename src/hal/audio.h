@@ -6,7 +6,10 @@
 
 #include "types.h"
 
-void hw_set_sd_music_play(audio_source_type_t source_type, const char *filename);
+// Queue `filename` (an SD-card path without the leading '/') for playback.
+// Only 16 kHz / 16-bit / mono WAV — the format hw_rec_start() writes — is
+// supported; anything else is rejected with a log line.
+void hw_set_sd_music_play(const char *filename);
 void hw_set_play_stop();
 bool hw_player_running();
 

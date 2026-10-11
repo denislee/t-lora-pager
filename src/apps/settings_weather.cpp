@@ -5,21 +5,15 @@
  */
 #include "../ui_define.h"
 #include "../ui_list_picker.h"
-#include "../core/scoped_lock.h"
+#include "../hal/str_encode.h"
+#include "../core/one_shot_job.h"
 #include "settings_internal.h"
-#ifdef ARDUINO
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#endif
 
 namespace weather_cfg {
 
-static lv_obj_t *g_sub_page = nullptr;
 static lv_obj_t *g_city_label = nullptr;
 static lv_obj_t *g_status_label = nullptr;
 static std::vector<weather_city_match> g_search_results;
-
-void set_sub_page(lv_obj_t *page) { g_sub_page = page; }
 
 #ifdef ARDUINO
 static void city_search_teardown();   // defined with the async block below
@@ -27,7 +21,6 @@ static void city_search_teardown();   // defined with the async block below
 
 void reset_state()
 {
-    g_sub_page = nullptr;
     g_city_label = nullptr;
     g_status_label = nullptr;
     g_search_results.clear();
@@ -81,66 +74,32 @@ static void open_city_picker()
 #ifdef ARDUINO
 // §2.17: the geocoding lookup is a blocking HTTPS call; running it inline froze
 // the LVGL thread (dead back button) for the request duration. Run it on a
-// one-shot worker and deliver the result via a drain timer — same lifecycle
-// contract as the Telegram-favorites fetch: the worker touches only heap state
-// under the instance lock (never the widget tree), and city_search_teardown()
-// kills the drain before the subpage widgets are freed. lv_timer callbacks run
-// under the instance mutex (lvgl_task.cpp), so the drain needs no extra lock.
+// core::OneShotJob worker and deliver the result via its drain timer — same
+// lifecycle contract as the Telegram-favorites fetch: the worker touches only
+// its own heap result (never the widget tree), and city_search_teardown()
+// kills the drain before the subpage widgets are freed.
 struct CitySearchResult {
     std::vector<weather_city_match> matches;
     bool ok = false;
     std::string err;
 };
-static TaskHandle_t      g_search_task   = nullptr;   // single worker slot
-static lv_timer_t       *g_search_timer  = nullptr;
-static volatile bool     g_search_done   = false;
-static CitySearchResult *g_search_result = nullptr;   // heap; UI thread frees
-static std::string       g_search_query;              // handed to the worker
 
-static void city_search_task(void *arg)
+static void city_search_done(CitySearchResult &res)
 {
-    (void)arg;
-    std::string q;
-    { core::ScopedInstanceLock lock; q = g_search_query; }
-    CitySearchResult *res = new CitySearchResult();
-    res->ok = weather_search_cities(q.c_str(), res->matches, res->err);
-    {
-        core::ScopedInstanceLock lock;
-        if (g_search_result) { delete g_search_result; g_search_result = nullptr; }
-        g_search_result = res;
-        g_search_done = true;
-        g_search_task = nullptr;
-    }
-    vTaskDelete(NULL);
-}
-
-static void city_search_drain_tick(lv_timer_t *t)
-{
-    (void)t;
-    if (!g_search_done) return;
-    g_search_done = false;
-    CitySearchResult *res = g_search_result;
-    g_search_result = nullptr;
-    if (g_search_timer) { lv_timer_del(g_search_timer); g_search_timer = nullptr; }
-    if (!res) return;
-    if (!res->ok) {
-        set_status(("Search failed: " + (res->err.empty() ? std::string("err") : res->err)).c_str(),
+    if (!res.ok) {
+        set_status(("Search failed: " + (res.err.empty() ? std::string("err") : res.err)).c_str(),
                    lv_palette_main(LV_PALETTE_RED));
-        delete res;
         return;
     }
-    g_search_results = res->matches;       // city_picked_cb indexes into this
-    delete res;
+    g_search_results = std::move(res.matches);   // city_picked_cb indexes into this
     open_city_picker();
 }
 
+static core::OneShotJob<CitySearchResult> g_search_job(city_search_done);
+
 static void city_search_teardown()
 {
-    if (g_search_timer) { lv_timer_del(g_search_timer); g_search_timer = nullptr; }
-    if (g_search_done) {
-        g_search_done = false;
-        if (g_search_result) { delete g_search_result; g_search_result = nullptr; }
-    }
+    g_search_job.teardown();
 }
 #endif // ARDUINO
 
@@ -151,10 +110,7 @@ static void search_entered_cb(const char *text, void *ud)
 {
     (void)ud;
     if (!text) { set_status("Cancelled", UI_COLOR_MUTED); return; }
-    std::string s(text);
-    size_t a = s.find_first_not_of(" \t\r\n");
-    size_t b = s.find_last_not_of(" \t\r\n");
-    std::string q = (a == std::string::npos) ? std::string() : s.substr(a, b - a + 1);
+    std::string q = hal::trim(text);
     if (q.empty()) {
         // Empty submission clears the override and returns to auto.
         weather_set_user_city("");
@@ -165,36 +121,22 @@ static void search_entered_cb(const char *text, void *ud)
 
     set_status("Searching...", UI_COLOR_ACCENT);
 #ifdef ARDUINO
-    // Geocode off-thread so the back button stays live; city_search_drain_tick
+    // Geocode off-thread so the back button stays live; city_search_done
     // opens the picker (or shows the error) once the worker finishes.
-    bool spawn;
-    {
-        core::ScopedInstanceLock lock;
-        spawn = (g_search_task == nullptr);   // else a prior search is still running
-        if (spawn) {
-            g_search_query = q;
-            g_search_done = false;
-            if (g_search_result) { delete g_search_result; g_search_result = nullptr; }
-        }
-    }
-    if (!spawn) {
+    using Job = core::OneShotJob<CitySearchResult>;
+    Job::Start started = g_search_job.start([q]() {
+        CitySearchResult *res = new CitySearchResult();
+        res->ok = weather_search_cities(q.c_str(), res->matches, res->err);
+        return res;
+    }, 8192, "wx_city", 2);
+    if (started == Job::Start::Attached) {
         // A prior search is still in flight (e.g. the page was exited and
-        // re-entered mid-fetch, which tore down the old drain timer). Re-attach
-        // the drain so that worker's result still lands rather than stranding
-        // it; its picker reflects the earlier query. Mirrors ui_weather.cpp.
-        if (!g_search_timer)
-            g_search_timer = lv_timer_create(city_search_drain_tick, 100, nullptr);
+        // re-entered mid-fetch); its result still lands, and its picker
+        // reflects the earlier query.
         set_status("Still searching...", UI_COLOR_ACCENT);
-        return;
-    }
-    if (xTaskCreate(city_search_task, "wx_city", 8192, nullptr, 2,
-                    &g_search_task) != pdPASS) {
-        g_search_task = nullptr;
+    } else if (started == Job::Start::Failed) {
         set_status("task spawn fail", lv_palette_main(LV_PALETTE_RED));
-        return;
     }
-    if (!g_search_timer)
-        g_search_timer = lv_timer_create(city_search_drain_tick, 100, nullptr);
 #else
     // Emulator: no worker/HTTPS — resolve synchronously (the stub returns fast).
     lv_refr_now(NULL);

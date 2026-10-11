@@ -24,8 +24,8 @@ void hw_get_date_time(std::string &param);
 void hw_get_date_time(struct tm &timeinfo);
 void hw_set_date_time(struct tm &timeinfo);
 
-// Cheap wall-clock read for frequently-polled *display* use (status bar,
-// glance overlay — once per second). Reads the ESP32 system clock via
+// Cheap wall-clock read for frequently-polled *display* use (the status-bar
+// clock, once per second). Reads the ESP32 system clock via
 // time()/localtime_r instead of hitting the external RTC over I2C, so it
 // does not contend the instance mutex with the 10 ms keyboard task. The
 // system clock is the correct source of truth here: hw_init() seeds it from
@@ -41,12 +41,9 @@ void hw_get_wall_clock(struct tm &timeinfo);
 // follow-up work is required from the caller beyond refreshing any UI that
 // reflects the current time.
 //
-// `gmt_offset_sec` overrides the compile-time GMT_OFFSET_SECOND constant —
-// pass INT_MIN (or call the no-arg overload) to use the default. Settings
-// flows that let the user pick a timezone should pass the resolved offset
-// here so the synced wall-clock time matches the user's chosen city.
+// The local-time rule is always the user's chosen zone
+// (timezone_get_user_posix()), applied via configTzTime() so DST is kept.
 bool hw_start_time_sync_ntp();
-bool hw_start_time_sync_ntp(int gmt_offset_sec);
 // 1 = synced since last start, 0 = not yet (in progress or reset).
 int  hw_get_time_sync_status();
 // Called from the SNTP notification callback (factory.ino) to mark the
@@ -82,7 +79,6 @@ void hw_get_heap_info(uint32_t &total, uint32_t &free);
 // No-op when mhz == 0.  On the emulator the tracker advances without calling
 // the Arduino API (which doesn't exist there).
 void     hw_set_cpu_freq(uint32_t mhz);
-uint32_t hw_get_cpu_freq();
 
 // P6.11 — called from the keyboard/rotary reader tasks on every input event.
 // Restores the user's active CPU frequency immediately (loop() drops to 80 MHz

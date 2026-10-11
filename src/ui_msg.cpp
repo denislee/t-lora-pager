@@ -10,9 +10,8 @@
 
 static lv_obj_t *msgbox = NULL;
 
-static void msgbox_event(lv_event_t *e)
+static void msgbox_event(lv_event_t *)
 {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_current_target(e);
     printf("msgbox event destroy\n");
     destroy_msgbox(msgbox);
     msgbox = NULL;

@@ -23,21 +23,19 @@
 #include "keyboard_task.h"
 
 #ifdef ARDUINO
+#include <Arduino.h>   // pins_arduino.h defines USING_INPUT_DEV_KEYBOARD
+#endif
 
-#include <Arduino.h>
+#if defined(ARDUINO) && defined(USING_INPUT_DEV_KEYBOARD)
+
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
 #include <lvgl.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/queue.h>
 
 #include "display.h"
-#include "system.h"
+#include "str_encode.h"
+#include "task_util.h"
 #include "../core/scoped_lock.h"
-#include "../core/system_hooks.h"
-
-#ifdef USING_INPUT_DEV_KEYBOARD
 
 namespace {
 
@@ -59,9 +57,6 @@ constexpr uint32_t    kFallbackMs       = 100; // ~10 Hz safety-net poll
 constexpr UBaseType_t kQueueDepth       = 32;
 constexpr uint32_t    kRepeatDelayMs    = 500; // Hold time before auto-repeat kicks in.
 constexpr uint32_t    kRepeatIntervalMs = 90;  // ~11 Hz repeat rate once engaged.
-// Fallback re-check while display off. hw_keyboard_task_notify_wake() from
-// ui_resume_timers() is the real wake path; 1 s here is a safety net only.
-constexpr uint32_t    kFakeSleepIdleMs  = 1000;
 
 QueueHandle_t s_event_queue = nullptr;
 TaskHandle_t  s_task        = nullptr;
@@ -87,20 +82,11 @@ inline bool is_no_repeat_key(char c) { return c == '\n'; }
 
 void enqueue_event(const KeyEvent &ev)
 {
-    // Drop oldest if the UI somehow falls behind the queue depth —
-    // better to lose a stale key than to stall the reader.
-    if (xQueueSend(s_event_queue, &ev, 0) != pdTRUE) {
-        KeyEvent discard;
-        xQueueReceive(s_event_queue, &discard, 0);
-        xQueueSend(s_event_queue, &ev, 0);
-    }
-    // Wake the LVGL task immediately so input renders without waiting for
-    // the kMaxTickMs (200 ms) fallback sleep. xTaskNotifyGive is cheap and
-    // idempotent — multiple gives before the task's ulTaskNotifyTake
-    // collapse to one. Safe here even though the drain loop holds the
-    // instance mutex: the LVGL task will simply block on it until we release.
-    hw_cpu_boost_for_input();
-    hw_lvgl_task_notify_wake();
+    // Drop oldest if the UI somehow falls behind the queue depth. Called
+    // with the instance mutex held by the drain loop — see
+    // hw_input_event_wake() for why the wake is still safe.
+    hal::queue_send_drop_oldest(s_event_queue, ev);
+    hw_input_event_wake();
 }
 
 void keyboard_task_fn(void *)
@@ -115,9 +101,8 @@ void keyboard_task_fn(void *)
         // isn't delayed, and the timeout bounds latency if a notify is missed.
         // Drop any held-key state so a key held before sleep can't fire a
         // stale auto-repeat on wake.
-        if (ui_is_fake_sleep()) {
+        if (hal::park_if_fake_sleep()) {
             s_held_char = '\0';
-            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kFakeSleepIdleMs));
             continue;
         }
 
@@ -206,21 +191,6 @@ void keyboard_task_fn(void *)
     }
 }
 
-uint32_t get_byte_pos(const char *txt, uint32_t char_pos)
-{
-    uint32_t bp = 0;
-    while (char_pos > 0 && txt[bp] != '\0') {
-        uint8_t c = txt[bp];
-        if      ((c & 0x80) == 0x00) bp += 1;
-        else if ((c & 0xE0) == 0xC0) bp += 2;
-        else if ((c & 0xF0) == 0xE0) bp += 3;
-        else if ((c & 0xF8) == 0xF0) bp += 4;
-        else                         bp += 1;
-        char_pos--;
-    }
-    return bp;
-}
-
 // Handle Alt+Backspace word delete inline (same behaviour as the stock
 // LVGL keypad_read in LV_Helper_v9.cpp).
 void handle_alt_backspace(lv_indev_t *drv)
@@ -235,7 +205,7 @@ void handle_alt_backspace(lv_indev_t *drv)
         const char *txt = lv_textarea_get_text(focused);
         uint32_t cursor_pos = lv_textarea_get_cursor_pos(focused);
         if (cursor_pos == 0 || !txt) break;
-        uint32_t bp = get_byte_pos(txt, cursor_pos - 1);
+        uint32_t bp = hal::utf8_byte_pos(txt, cursor_pos - 1);
         bool is_space = (txt[bp] == ' ');
         if (deleting_spaces) {
             if (!is_space) deleting_spaces = false;
@@ -279,12 +249,7 @@ void kb_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 
 }  // namespace
 
-void hw_keyboard_task_notify_wake()
-{
-    // Safe from any task context; a give while the task is running (not
-    // blocked) simply leaves the notification pending for the next take.
-    if (s_task) xTaskNotifyGive(s_task);
-}
+void hw_keyboard_task_notify_wake() { hal::notify_task(s_task); }
 
 void hw_keyboard_task_start()
 {
@@ -305,21 +270,17 @@ void hw_keyboard_task_start()
         log_w("kb_reader: no LVGL keypad indev found; polling will still run");
     }
 
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        keyboard_task_fn, "kb_reader", 4096, nullptr,
-        kTaskPriority, &s_task, kTaskCore);
-    if (ok != pdPASS) {
-        log_e("kb_reader: task create failed");
-        s_task = nullptr;
+    if (!hal::start_pinned_task(keyboard_task_fn, "kb_reader", 4096,
+                                kTaskPriority, kTaskCore, &s_task,
+                                "kb_reader")) {
         return;
     }
 
     // [P4.12] Register our task handle with the vendor driver so keyboard_isr
     // can vTaskNotifyGiveFromISR us on every TCA8418 interrupt edge.  This
     // replaces the 50 Hz vTaskDelayUntil poll with an ISR-driven wake + 100 ms
-    // fallback timeout.  Cleared in hw_keyboard_task_stop() (if added later)
-    // or implicitly when the task is deleted and the handle becomes stale —
-    // vendor's begin()/end() cycle re-attaches/detaches the ISR so no spurious
+    // fallback timeout.  The task is never stopped; should it be deleted, the
+    // handle goes stale, and the vendor's begin()/end() cycle re-attaches/detaches the ISR so no spurious
     // notifies can reach a dead handle between end() and the next begin().
     {
         core::ScopedInstanceLock lock;
@@ -327,16 +288,9 @@ void hw_keyboard_task_start()
     }
 }
 
-#else  // !USING_INPUT_DEV_KEYBOARD
+#else  // emulator, or a board without the keyboard
 
 void hw_keyboard_task_start() {}
 void hw_keyboard_task_notify_wake() {}
 
-#endif  // USING_INPUT_DEV_KEYBOARD
-
-#else  // !ARDUINO
-
-void hw_keyboard_task_start() {}
-void hw_keyboard_task_notify_wake() {}
-
-#endif  // ARDUINO
+#endif  // ARDUINO && USING_INPUT_DEV_KEYBOARD

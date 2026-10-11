@@ -11,8 +11,6 @@
 typedef struct _device_const_var {
     uint16_t max_brightness;
     uint16_t min_brightness;
-    uint16_t max_charge_current;
-    uint16_t min_charge_current;
     uint8_t  charge_level_nums;
     uint8_t  charge_steps;
 } device_const_var_t;

@@ -3,15 +3,19 @@
  * @brief     Audio "mental notes" app — record voice memos to SD, play them
  *            back, delete. All files live in /mental_notes/ on the SD card.
  *
+ * Two entry points share this file: "Recorder" (home shortcut, quick mode)
+ * starts a recording at once and exits when it stops; "Recordings"
+ * (Settings) opens the list of notes, with playback one level below it.
+ *
  * State reset on onStop (ui_notes_exit):
  *   - lv_obj_t*   menu, quit_btn   — destroyed via lv_obj_del / del_async
  *   - lv_obj_t*   main_page        — nulled (was child of menu, destroyed above)
  *   - lv_timer_t* tick_timer       — killed via kill_tick_timer()
- *   - lv_timer_t* s_notes_scan_timer — killed; s_notes_scan_result freed if
- *                                      a scan finished but wasn't drained
- *   - task        s_notes_scan_task — left to finish on its own (touches
- *                                      only a heap-local vector, never the
- *                                      UI tree) — mirrors ui_weather.cpp
+ *   - s_notes_scan_job (SD scan worker + drain timer, core::OneShotJob)
+ *                                    — teardown(): drain killed, an undrained
+ *                                      result freed, a running worker left to
+ *                                      finish and free its own result (it
+ *                                      touches only a heap-local vector)
  *   - active recording             — flushed via finalize_recording()
  *   - active playback              — stopped via hw_set_play_stop()
  *   - notes / selected_* / pending_rec_path — cleared
@@ -23,7 +27,7 @@
 #include "../ui_define.h"
 #include "app_registry.h"
 #include "../core/app_manager.h"
-#include "../core/scoped_lock.h"
+#include "../core/one_shot_job.h"
 #include "../core/spi_lock.h"
 #include "../hal/system.h"
 #include "../hal/storage.h"
@@ -44,7 +48,6 @@ namespace {
 static const char *NOTES_DIR = "/mental_notes";
 
 enum ViewMode {
-    VIEW_MAIN,
     VIEW_LIST,
     VIEW_RECORD,
     VIEW_PLAYBACK,
@@ -58,12 +61,11 @@ struct Note {
 };
 
 static lv_obj_t *menu = NULL;
-static lv_obj_t *parent_obj = NULL;
 static lv_obj_t *main_page = NULL;
 static lv_obj_t *quit_btn = NULL;
 static lv_timer_t *tick_timer = NULL;
 
-static ViewMode current_view = VIEW_MAIN;
+static ViewMode current_view = VIEW_LIST;
 static std::vector<Note> notes;
 static std::string selected_path;   // for playback view
 static std::string selected_name;
@@ -71,16 +73,14 @@ static uint32_t    selected_bytes = 0;
 static uint32_t    selected_mtime = 0;
 static std::string pending_rec_path; // set while recording
 // Quick-record mode: home-screen shortcut launches us straight into a
-// recording. Stop / back / auto-cap exits the app instead of falling back
-// to the Record/Browse menu (which lives under Settings → Recordings).
+// recording. Stop / back / auto-cap exits the app. VIEW_RECORD is only ever
+// entered in this mode.
 static bool        s_quick_record = false;
 
 static void ui_notes_enter(lv_obj_t *parent);
 static void ui_notes_exit(lv_obj_t *parent);
 static void render_view();
-static void enter_main();
 static void enter_list();
-static void enter_record();
 static void enter_playback(const Note &n);
 
 // --- helpers -----------------------------------------------------------
@@ -175,93 +175,49 @@ static void reload_notes()
     scan_notes(notes);
 }
 
-#ifdef ARDUINO
-static TaskHandle_t       s_notes_scan_task = nullptr;
-static lv_timer_t        *s_notes_scan_timer = nullptr;
-static volatile bool      s_notes_scan_done = false;
-static std::vector<Note> *s_notes_scan_result = nullptr; // heap-owned; UI thread frees it
-#endif
 static bool                s_notes_scan_pending = false;  // gates the list view's "Loading..." row
 
 #ifdef ARDUINO
-// Background worker: walks the SD card off the LVGL thread. Touches only a
-// heap-local vector, never the `notes` global or any widget — mirrors
-// weather_bg_task / ui_weather.cpp.
-static void notes_scan_task(void *arg)
+// Drain callback (LVGL thread, instance mutex held by lv_timer_handler): swap
+// the freshly scanned list in and, if the list view is still on screen,
+// re-render it.
+static void notes_scan_done(std::vector<Note> &result)
 {
-    (void)arg;
-    auto *result = new std::vector<Note>();
-    scan_notes(*result);
-    core::ScopedInstanceLock lock;
-    if (s_notes_scan_result) delete s_notes_scan_result;
-    s_notes_scan_result = result;
-    s_notes_scan_done = true;
-    s_notes_scan_task = nullptr;
-    vTaskDelete(NULL);
-}
-
-// LVGL timer: runs inside lv_timer_handler(), already holding the instance
-// mutex. Swaps the freshly scanned list in and, if the list view is still
-// on screen, re-renders it.
-static void notes_scan_drain_tick(lv_timer_t *t)
-{
-    (void)t;
-    if (!s_notes_scan_done) return;
-    s_notes_scan_done = false;
-    std::vector<Note> *result = s_notes_scan_result;
-    s_notes_scan_result = nullptr;
-    if (result) {
-        notes.swap(*result);
-        delete result;
-    }
+    notes.swap(result);
     s_notes_scan_pending = false;
-    if (s_notes_scan_timer) {
-        lv_timer_del(s_notes_scan_timer);
-        s_notes_scan_timer = nullptr;
-    }
     if (current_view == VIEW_LIST) render_view();
 }
-#endif
 
-// Kick a rescan of the notes directory off the LVGL thread, mirroring
-// ui_weather.cpp's weather_bg_task/weather_drain_tick pattern. If a scan is
-// already in flight, just make sure its drain timer is running. On the
-// emulator there's no real SD and no background-task infra, so this just
-// runs the scan inline.
+// Background SD walk off the LVGL thread. The worker fills a heap-local
+// vector, never the `notes` global or any widget.
+static core::OneShotJob<std::vector<Note>> s_notes_scan_job(notes_scan_done);
+
+// Kick a rescan of the notes directory off the LVGL thread. If a scan is
+// already in flight the job just re-attaches its drain. Hardware only — the
+// emulator scans synchronously in show_list_view().
 static void kick_notes_reload()
 {
-#ifdef ARDUINO
-    if (s_notes_scan_task != nullptr) {
-        if (!s_notes_scan_timer) {
-            s_notes_scan_timer = lv_timer_create(notes_scan_drain_tick, 100, nullptr);
-        }
-        return;
-    }
-    s_notes_scan_done = false;
-    s_notes_scan_pending = true;
+    using Job = core::OneShotJob<std::vector<Note>>;
     // 4 KB stack: a plain single-directory SD walk, no TLS/HTTP involved.
-    if (xTaskCreate(notes_scan_task, "notes_scan", 4096, nullptr, 1,
-                    &s_notes_scan_task) != pdPASS) {
-        s_notes_scan_task = nullptr;
+    Job::Start started = s_notes_scan_job.start([]() {
+        auto *result = new std::vector<Note>();
+        scan_notes(*result);
+        return result;
+    }, 4096, "notes_scan", 1);
+    if (started == Job::Start::Started) {
+        s_notes_scan_pending = true;
+    } else if (started == Job::Start::Failed) {
         s_notes_scan_pending = false;
         reload_notes(); // fall back to a synchronous scan so the list isn't stuck empty
-        return;
     }
-    if (!s_notes_scan_timer) {
-        s_notes_scan_timer = lv_timer_create(notes_scan_drain_tick, 100, nullptr);
-    }
-#else
-    reload_notes();
-#endif
 }
+#endif
 
 // Switch to VIEW_LIST and (re)populate `notes`. On ARDUINO this paints the
 // list immediately with whatever `notes` already holds, then refreshes
 // asynchronously once the background SD scan completes (kick_notes_reload()
 // above). The emulator has no real SD or background-task infra, so it scans
-// synchronously *before* the single render — same order as the pre-P3.3
-// code — rather than racing a render against kick_notes_reload()'s inline
-// scan.
+// synchronously *before* the single render.
 static void show_list_view()
 {
     current_view = VIEW_LIST;
@@ -272,124 +228,6 @@ static void show_list_view()
     reload_notes();
     render_view();
 #endif
-}
-
-// --- main view ---------------------------------------------------------
-
-static void record_btn_cb(lv_event_t *e) { enter_record(); }
-
-static void browse_btn_cb(lv_event_t *e) { enter_list(); }
-
-struct MainTile {
-    const char *label;
-    const char *symbol;
-    lv_palette_t palette;
-    lv_event_cb_t cb;
-};
-
-static const MainTile kMainTiles[] = {
-    {"Record", LV_SYMBOL_AUDIO, LV_PALETTE_RED,    record_btn_cb},
-    {"Browse", LV_SYMBOL_LIST,  LV_PALETTE_ORANGE, browse_btn_cb},
-};
-constexpr int kMainTileCount = sizeof(kMainTiles) / sizeof(kMainTiles[0]);
-
-static void build_main_view()
-{
-    bool mic_ok = hw_mic_available();
-
-    // Horizontal tile row matching the "Notes" launcher app.
-    lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(main_page, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(main_page, 8, 0);
-    lv_obj_set_style_pad_row(main_page, 8, 0);
-    lv_obj_set_style_pad_column(main_page, 8, 0);
-    lv_obj_remove_flag(main_page, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_update_layout(main_page);
-    int32_t panel_w = lv_obj_get_content_width(main_page);
-    int32_t panel_h = lv_obj_get_content_height(main_page);
-    if (panel_w <= 0) panel_w = 460;
-    if (panel_h <= 0) panel_h = 180;
-
-    const int gap = 8;
-    int32_t tile_w = (panel_w - (kMainTileCount - 1) * gap) / kMainTileCount;
-    int32_t tile_h = panel_h;
-    if (tile_w < 50) tile_w = 50;
-    if (tile_h < 50) tile_h = 50;
-
-    const lv_font_t *icon_font =
-        (tile_h >= 140) ? &lv_font_montserrat_48 :
-        (tile_h >= 90)  ? &lv_font_montserrat_32 :
-        (tile_h >= 70)  ? &lv_font_montserrat_28 :
-                          &lv_font_montserrat_24;
-    const lv_font_t *label_font = get_home_font();
-    lv_group_t *grp = lv_group_get_default();
-
-    lv_obj_t *first_enabled = NULL;
-
-    for (int i = 0; i < kMainTileCount; ++i) {
-        const MainTile &item = kMainTiles[i];
-        lv_color_t accent = lv_palette_main(item.palette);
-
-        lv_obj_t *tile = lv_btn_create(main_page);
-        lv_obj_set_size(tile, tile_w, tile_h);
-        lv_obj_remove_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_radius(tile, 12, 0);
-        lv_obj_set_style_bg_color(tile, lv_color_hex(0x151515), 0);
-        lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(tile, accent, 0);
-        lv_obj_set_style_border_width(tile, 1, 0);
-        lv_obj_set_style_border_opa(tile, LV_OPA_40, 0);
-        lv_obj_set_style_shadow_width(tile, 0, 0);
-        lv_obj_set_style_outline_width(tile, 0, 0);
-        lv_obj_set_style_pad_all(tile, 6, 0);
-        lv_obj_set_style_border_color(tile, accent, LV_STATE_FOCUSED);
-        lv_obj_set_style_border_width(tile, 2, LV_STATE_FOCUSED);
-        lv_obj_set_style_border_opa(tile, LV_OPA_COVER, LV_STATE_FOCUSED);
-        lv_obj_set_style_bg_color(tile, lv_palette_darken(item.palette, 4),
-                                  LV_STATE_FOCUSED);
-        lv_obj_set_style_bg_color(tile, lv_palette_darken(item.palette, 3),
-                                  LV_STATE_PRESSED);
-
-        lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER,
-                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_row(tile, 4, 0);
-
-        // The Record tile is disabled if no microphone is present.
-        bool disabled = (item.cb == record_btn_cb && !mic_ok);
-        const char *symbol_text = disabled ? LV_SYMBOL_WARNING : item.symbol;
-        const char *label_text  = disabled ? "No mic"          : item.label;
-        if (disabled) lv_obj_add_state(tile, LV_STATE_DISABLED);
-
-        lv_obj_t *icon = lv_label_create(tile);
-        lv_label_set_text(icon, symbol_text);
-        lv_obj_set_style_text_font(icon, icon_font, 0);
-        lv_obj_set_style_text_color(icon, accent, 0);
-
-        lv_obj_t *label = lv_label_create(tile);
-        lv_label_set_text(label, label_text);
-        lv_obj_set_style_text_color(label, UI_COLOR_FG, 0);
-        lv_obj_set_style_text_font(label, label_font, 0);
-        lv_obj_set_width(label, tile_w - 12);
-        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-
-        if (!disabled) {
-            lv_obj_add_event_cb(tile, item.cb, LV_EVENT_CLICKED, NULL);
-            if (!first_enabled) first_enabled = tile;
-        }
-        if (grp) lv_group_add_obj(grp, tile);
-    }
-
-    if (grp) {
-        if (first_enabled) {
-            lv_group_focus_obj(first_enabled);
-        } else if (lv_obj_get_child_count(main_page) > 0) {
-            lv_group_focus_obj(lv_obj_get_child(main_page, 0));
-        }
-    }
 }
 
 // --- list view ---------------------------------------------------------
@@ -425,29 +263,13 @@ static void build_list_view()
     } else {
         for (size_t i = 0; i < notes.size(); ++i) {
             const Note &n = notes[i];
-            lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_AUDIO, n.filename.c_str());
+            // Trailing: duration.
+            std::string txt = format_duration_s(bytes_to_seconds(n.data_bytes));
+            lv_obj_t *btn = ui_list_add_meta_row(list, LV_SYMBOL_AUDIO, n.filename.c_str(),
+                                                 txt.c_str(), get_small_font());
             lv_obj_set_user_data(btn, (void *)(intptr_t)i);
             lv_obj_add_event_cb(btn, note_click_cb, LV_EVENT_CLICKED, NULL);
             lv_group_add_obj(lv_group_get_default(), btn);
-
-            lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
-            lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-            lv_obj_t *icon_obj = lv_obj_get_child(btn, 0);
-            lv_obj_t *lbl      = lv_obj_get_child(btn, 1);
-            if (icon_obj) lv_obj_set_width(icon_obj, 20);
-            if (lbl) {
-                lv_obj_set_width(lbl, 0);
-                lv_obj_set_flex_grow(lbl, 1);
-                lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-            }
-
-            // Trailing: duration.
-            lv_obj_t *meta = lv_label_create(btn);
-            std::string txt = format_duration_s(bytes_to_seconds(n.data_bytes));
-            lv_label_set_text(meta, txt.c_str());
-            lv_obj_set_style_text_color(meta, UI_COLOR_MUTED, 0);
-            lv_obj_set_style_text_font(meta, get_small_font(), 0);
-            lv_obj_set_style_pad_left(meta, 8, 0);
         }
     }
 
@@ -459,9 +281,7 @@ static void build_list_view()
 // --- record view -------------------------------------------------------
 
 static lv_obj_t *rec_time_lbl = NULL;
-static lv_obj_t *rec_status_lbl = NULL;
 static lv_obj_t *rec_size_lbl = NULL;
-static lv_obj_t *rec_dot = NULL;
 static lv_obj_t *rec_bar = NULL;
 
 // Stop the active recording and discard the file if it's too short to be
@@ -491,14 +311,10 @@ static void exit_to_menu()
     menu_show();
 }
 
+// Record view only exists in quick mode, so stopping always exits the app.
 static void stop_rec_and_return(lv_event_t *e)
 {
-    finalize_recording();
-    if (s_quick_record) {
-        exit_to_menu();
-        return;
-    }
-    enter_main();
+    exit_to_menu();
 }
 
 static void rec_tick_cb(lv_timer_t *t)
@@ -526,13 +342,8 @@ static void rec_tick_cb(lv_timer_t *t)
     }
 
     if (!hw_rec_running()) {
-        // Auto-stop (cap hit). Quick-record exits the app; the full app
-        // returns to its Record/Browse menu.
-        if (s_quick_record) {
-            exit_to_menu();
-            return;
-        }
-        enter_main();
+        // Auto-stop (cap hit) — quick mode exits the app.
+        exit_to_menu();
     }
 }
 
@@ -558,7 +369,7 @@ static void build_record_view()
     lv_obj_set_style_pad_column(hdr, 8, 0);
     lv_obj_remove_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
 
-    rec_dot = lv_obj_create(hdr);
+    lv_obj_t *rec_dot = lv_obj_create(hdr);
     lv_obj_remove_style_all(rec_dot);
     lv_obj_set_size(rec_dot, 14, 14);
     lv_obj_set_style_radius(rec_dot, LV_RADIUS_CIRCLE, 0);
@@ -578,7 +389,7 @@ static void build_record_view()
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
     lv_anim_start(&a);
 
-    rec_status_lbl = lv_label_create(hdr);
+    lv_obj_t *rec_status_lbl = lv_label_create(hdr);
     lv_label_set_text(rec_status_lbl, "REC");
     lv_obj_set_style_text_color(rec_status_lbl, lv_palette_main(LV_PALETTE_RED), 0);
     lv_obj_set_style_text_font(rec_status_lbl, &lv_font_montserrat_20, 0);
@@ -625,7 +436,7 @@ static void build_record_view()
     lv_obj_add_event_cb(stop_btn, stop_rec_and_return, LV_EVENT_CLICKED, NULL);
     lv_obj_t *stop_lbl = lv_label_create(stop_btn);
     lv_label_set_text(stop_lbl, LV_SYMBOL_STOP "  Stop");
-    lv_obj_set_style_text_color(stop_lbl, UI_COLOR_FG, 0);
+    lv_obj_set_style_text_color(stop_lbl, UI_COLOR_ON_ACCENT, 0);
     lv_obj_set_style_text_font(stop_lbl, &lv_font_montserrat_20, 0);
     lv_obj_center(stop_lbl);
     lv_group_add_obj(lv_group_get_default(), stop_btn);
@@ -657,7 +468,7 @@ static void pb_play_cb(lv_event_t *e)
     // Filename without leading '/', matching hw_set_sd_music_play's convention.
     const char *fn = selected_path.c_str();
     if (*fn == '/') ++fn;
-    hw_set_sd_music_play(AUDIO_SOURCE_SDCARD, fn);
+    hw_set_sd_music_play(fn);
     if (pb_status_lbl) lv_label_set_text(pb_status_lbl, LV_SYMBOL_PLAY "  Playing...");
     pb_was_playing = true;
     if (!tick_timer) {
@@ -672,7 +483,6 @@ static void pb_stop_cb(lv_event_t *e)
     pb_was_playing = false;
 }
 
-static lv_obj_t *pb_vol_slider = NULL;
 static lv_obj_t *pb_vol_pct_lbl = NULL;
 
 static void pb_update_vol_label(int v)
@@ -756,7 +566,7 @@ static void build_playback_view()
 
     uint8_t cur_vol = hw_get_volume();
 
-    pb_vol_slider = lv_slider_create(vol_row);
+    lv_obj_t *pb_vol_slider = lv_slider_create(vol_row);
     lv_obj_set_flex_grow(pb_vol_slider, 1);
     lv_slider_set_range(pb_vol_slider, 0, 100);
     lv_slider_set_value(pb_vol_slider, cur_vol, LV_ANIM_OFF);
@@ -804,7 +614,7 @@ static void build_playback_view()
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
         lv_obj_t *lbl = lv_label_create(btn);
         lv_label_set_text_fmt(lbl, "%s %s", icon, txt);
-        lv_obj_set_style_text_color(lbl, UI_COLOR_FG, 0);
+        lv_obj_set_style_text_color(lbl, UI_COLOR_ON_ACCENT, 0);
         lv_obj_center(lbl);
         lv_group_add_obj(lv_group_get_default(), btn);
         return btn;
@@ -831,12 +641,9 @@ static void kill_tick_timer()
 static void clear_view_refs()
 {
     rec_time_lbl = NULL;
-    rec_status_lbl = NULL;
     rec_size_lbl = NULL;
-    rec_dot = NULL;
     rec_bar = NULL;
     pb_status_lbl = NULL;
-    pb_vol_slider = NULL;
     pb_vol_pct_lbl = NULL;
 }
 
@@ -848,37 +655,15 @@ static void render_view()
     kill_tick_timer();
 
     switch (current_view) {
-    case VIEW_MAIN:     build_main_view(); break;
     case VIEW_LIST:     build_list_view(); break;
     case VIEW_RECORD:   build_record_view(); break;
     case VIEW_PLAYBACK: build_playback_view(); break;
     }
 }
 
-static void enter_main()
-{
-    current_view = VIEW_MAIN;
-    render_view();
-}
-
 static void enter_list()
 {
     show_list_view();
-}
-
-static void enter_record()
-{
-    if (!hw_mic_available()) return;
-    if (hw_player_running()) hw_set_play_stop();
-    if (hw_rec_running()) return;
-
-    pending_rec_path = build_new_note_path();
-    if (!hw_rec_start(pending_rec_path.c_str())) {
-        // Silent failure — remain on list view. Could show a toast here.
-        return;
-    }
-    current_view = VIEW_RECORD;
-    render_view();
 }
 
 static void enter_playback(const Note &n)
@@ -895,21 +680,9 @@ static void enter_playback(const Note &n)
 
 // In quick-record (home shortcut) every back press exits the app. In the
 // browse-only flow (Settings → Recordings) the list view is the root, so
-// VIEW_PLAYBACK pops back to it and VIEW_LIST exits.
-static void back_event_handler(lv_event_t *e)
-{
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    if (lv_menu_back_btn_is_root(menu, obj)) {
-        if (!s_quick_record && current_view == VIEW_PLAYBACK) {
-            hw_set_play_stop();
-            enter_list();
-            return;
-        }
-        exit_to_menu();
-    }
-}
-
-static void exit_btn_cb(lv_event_t *e)
+// VIEW_PLAYBACK pops back to it and VIEW_LIST exits. Shared by the status-bar
+// back button and the touch quit button.
+static void do_back()
 {
     if (!s_quick_record && current_view == VIEW_PLAYBACK) {
         hw_set_play_stop();
@@ -919,10 +692,14 @@ static void exit_btn_cb(lv_event_t *e)
     exit_to_menu();
 }
 
+static void exit_btn_cb(lv_event_t *e)
+{
+    do_back();
+}
+
 static void ui_notes_enter(lv_obj_t *parent)
 {
     if (menu != NULL) return;
-    parent_obj = parent;
     enable_keyboard();
 
     ensure_notes_dir();
@@ -951,7 +728,7 @@ static void ui_notes_enter(lv_obj_t *parent)
         current_view = VIEW_LIST;
     }
 
-    menu = create_menu(parent, back_event_handler);
+    menu = create_menu(parent, nullptr);
     main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_style_pad_all(main_page, 0, 0);
     lv_obj_set_style_pad_row(main_page, 6, 0);
@@ -968,12 +745,7 @@ static void ui_notes_enter(lv_obj_t *parent)
 
 #ifdef USING_TOUCHPAD
     quit_btn = create_floating_button([](lv_event_t *e) {
-        if (!s_quick_record && current_view == VIEW_PLAYBACK) {
-            hw_set_play_stop();
-            enter_list();
-            return;
-        }
-        exit_to_menu();
+        do_back();
     }, NULL);
 #endif
 }
@@ -986,19 +758,11 @@ static void ui_notes_exit(lv_obj_t *parent)
     finalize_recording();
     hw_set_play_stop();
 #ifdef ARDUINO
-    // Stop draining the bg scan, if any. The task is left to finish on its
-    // own — it only writes to a heap-local vector, never the UI tree, so
-    // it's safe to outlive the app instance (kick_notes_reload() adopts it
-    // on a later re-entry). Drop any pending result so a re-entry doesn't
-    // render stale data into a fresh list.
-    if (s_notes_scan_timer) {
-        lv_timer_del(s_notes_scan_timer);
-        s_notes_scan_timer = nullptr;
-    }
-    if (s_notes_scan_done) {
-        s_notes_scan_done = false;
-        if (s_notes_scan_result) { delete s_notes_scan_result; s_notes_scan_result = nullptr; }
-    }
+    // Stop draining the bg scan, if any. A running worker is left to finish
+    // on its own (it never touches the UI tree) and frees its own result
+    // unless kick_notes_reload() re-attaches it on a later re-entry; an
+    // undrained result is dropped so a re-entry doesn't render stale data.
+    s_notes_scan_job.teardown();
 #endif
     s_notes_scan_pending = false;
     if (menu) {
@@ -1041,7 +805,7 @@ std::shared_ptr<core::App> make_audio_notes_app() {
     return std::make_shared<AudioNotesApp>("Recorder", true);
 }
 std::shared_ptr<core::App> make_audio_recordings_app() {
-    // Settings → Recordings — opens the Record/Browse menu.
+    // Settings → Recordings — opens the notes list.
     return std::make_shared<AudioNotesApp>("Recordings", false);
 }
 } // namespace apps

@@ -4,6 +4,7 @@
  */
 #include "secrets.h"
 #include "notes_crypto.h"
+#include "str_encode.h"
 
 #include <cstring>
 #include <vector>
@@ -52,47 +53,61 @@ std::string secret_load(const char *ns, const char *key)
 }
 
 bool secret_store(const char *ns, const char *key, const char *plaintext,
-                  std::string *err)
+                  std::string *err, bool trim_ws)
 {
 #ifdef ARDUINO
     if (!ns || !key) { if (err) *err = "Bad slot."; return false; }
+    std::string value = plaintext ? plaintext : "";
+    if (trim_ws) {
+        std::string raw;
+        raw.swap(value);
+        value = trim(raw);
+        secret_scrub(raw);
+    }
+    /* Validate and encrypt first, so NVS is only opened read-write for a
+     * write that is going to happen. An empty value clears the slot
+     * unconditionally. */
+    const bool clear = value.empty();
+    std::vector<uint8_t> ct;
+    const char *refusal = nullptr;
+    if (!clear) {
+        if (!notes_crypto_is_enabled()) {
+            refusal = "Enable Notes encryption first "
+                      "(Settings \xC2\xBB Notes Security).";
+        } else if (!notes_crypto_is_unlocked()) {
+            refusal = "Notes session locked \xE2\x80\x94 unlock first.";
+        } else if (!notes_crypto_encrypt_buffer((const uint8_t *)value.data(),
+                                                value.size(), ct)) {
+            refusal = "Encryption failed.";
+        }
+    }
+    secret_scrub(value);
+    if (refusal) { if (err) *err = refusal; return false; }
+
     Preferences p;
     if (!p.begin(ns, false)) {
         if (err) *err = "NVS open failed.";
         return false;
     }
-    /* Empty value clears the slot unconditionally. */
-    if (!plaintext || !*plaintext) {
-        p.remove(key);
-        p.end();
-        return true;
-    }
-    if (!notes_crypto_is_enabled()) {
-        p.end();
-        if (err) *err = "Enable Notes encryption first "
-                        "(Settings \xC2\xBB Notes Security).";
-        return false;
-    }
-    if (!notes_crypto_is_unlocked()) {
-        p.end();
-        if (err) *err = "Notes session locked \xE2\x80\x94 unlock first.";
-        return false;
-    }
-    std::vector<uint8_t> ct;
-    if (!notes_crypto_encrypt_buffer((const uint8_t *)plaintext,
-                                     strlen(plaintext), ct)) {
-        p.end();
-        if (err) *err = "Encryption failed.";
-        return false;
-    }
-    p.putBytes(key, ct.data(), ct.size());
+    if (clear) p.remove(key);
+    else       p.putBytes(key, ct.data(), ct.size());
     p.end();
     return true;
 #else
-    (void)ns; (void)key; (void)plaintext;
+    (void)ns; (void)key; (void)plaintext; (void)trim_ws;
     if (err) *err = "Not supported on emulator.";
     return false;
 #endif
+}
+
+std::string secret_mask_display(const char *ns, const char *key)
+{
+    std::string tok = secret_load(ns, key);
+    if (tok.empty()) return secret_exists(ns, key) ? "(locked)" : "(not set)";
+    std::string out = "********";
+    if (tok.size() > 8) out += tok.substr(tok.size() - 4);
+    secret_scrub(tok);
+    return out;
 }
 
 void secret_purge_legacy(const char *ns, const char *legacy_key)

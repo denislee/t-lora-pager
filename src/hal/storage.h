@@ -10,6 +10,8 @@ void hw_mount_sd();
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
 void hw_get_local_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
 
+// Delete `path` from both internal FFat and (when mounted) the SD card.
+// True if either copy was removed.
 bool hw_delete_file(const char *path);
 
 // Delete a file or directory (recursive for directories) on the chosen
@@ -73,14 +75,14 @@ bool hw_is_usb_msc_mounted();
 bool hw_get_filesystem_dirty();
 void hw_set_filesystem_dirty(bool dirty);
 
-// Preference-aware variants used by apps that want to honour the toggle.
+// Note writes: the encoded payload goes to internal FFat and is mirrored to
+// the SD card when it is mounted; the result reflects the internal write.
 // `allow_prune` gates the periodic internal-storage eviction sweep that a save
 // may trigger. Latency-sensitive callers (e.g. the editor's exit teardown) pass
 // false so returning to the caller is never delayed by housekeeping; the sweep
 // still fires on the next ordinary save.
 bool hw_save_preferred_file(const char *path, const char *content, std::string *error = nullptr,
                             bool allow_prune = true);
-bool hw_read_preferred_file(const char *path, std::string &content);
 
 // Partial read: stops after `max_bytes` so callers can build previews cheaply.
 // `truncated` (if non-null) is set to true when the file was longer than max_bytes.
@@ -104,18 +106,16 @@ bool hw_read_preferred_bytes(const char *path, std::vector<uint8_t> &buf);
 // Optional callback: (current_count, total_count, current_filename)
 void hw_prune_internal_storage(void (*cb)(int, int, const char *) = nullptr);
 
-// Delete from the preferred storage (honours the internal/SD toggle).
-bool hw_delete_preferred_file(const char *path);
-
-// One-shot migration: copies every file under FFat's root to SD's root.
+// One-shot migration: copies the files in FFat's root plus the notes in
+// NOTES_DIR to the same paths on SD.
 // `copied` / `failed` receive the counts (pass nullptr to ignore). On failure
 // of the whole operation (e.g. SD unavailable) returns false and sets *error.
 // Optional callback: (current_count, total_count_if_known, current_filename)
 bool hw_copy_internal_to_sd(int *copied, int *failed, std::string *error = nullptr,
                              void (*cb)(int, int, const char *) = nullptr);
 
-// One-shot mirror: uploads every .txt note from internal FFat *and* the SD
-// card root to the hub via /api/notes/upload. Same name on both sides → the
+// One-shot mirror: uploads every .txt note under /notes on internal FFat *and*
+// the SD card to the hub via /api/notes/upload. Same name on both sides → the
 // internal copy wins (a just-edited internal note is what gets uploaded even
 // if a stale SD copy exists). `copied` / `failed` receive the counts. Returns
 // false when the hub is disabled, WiFi is down, or no notes were uploaded

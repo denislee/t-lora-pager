@@ -4,7 +4,7 @@
  *            see settings_internal.h for the cross-TU contract.
  *
  * Three sections: manual spinbox entry, IANA timezone picker (via
- * timezone_fetch_list / timezone_fetch_offset in ui_time_sync.cpp), and
+ * timezone_fetch_list in ui_time_sync.cpp), and
  * "Sync from Internet" which kicks SNTP and polls status.
  */
 #include "../ui_define.h"
@@ -31,7 +31,7 @@ typedef struct {
 
 static datetime_setup_t dt_setup;
 
-// worldtimeapi timezone list held between the "Set timezone" button and the
+// Bundled timezone list held between the "Set timezone" button and the
 // picker callback — cleared once the user picks one (or cancels).
 static std::vector<std::string> g_tz_candidates;
 
@@ -102,9 +102,8 @@ static void spinbox_event_cb(lv_event_t *e)
 static void refresh_tz_label()
 {
     if (!dt_setup.tz_label) return;
-    std::string tz = timezone_get_user_tz();
-    lv_label_set_text(dt_setup.tz_label,
-                      tz.empty() ? "(device default)" : tz.c_str());
+    // Never empty: timezone_get_user_tz() falls back to America/Sao_Paulo.
+    lv_label_set_text(dt_setup.tz_label, timezone_get_user_tz().c_str());
 }
 
 static void save_datetime_cb(lv_event_t *e)
@@ -172,32 +171,9 @@ static void sync_time_cb(lv_event_t *)
         return;
     }
 
-    // If the user has picked a city, resolve its current offset via
-    // worldtimeapi first so the wall-clock time that lands in the RTC is
-    // correct for that city (including DST). A failure here is non-fatal:
-    // we fall back to the compile-time GMT_OFFSET_SECOND so sync still
-    // completes instead of leaving the user with no clock fix.
-    bool use_tz_offset = false;
-    int offset_sec = 0;
-    std::string tz = timezone_get_user_tz();
-    if (!tz.empty()) {
-        sync_set_status("Resolving timezone...", UI_COLOR_ACCENT);
-        lv_refr_now(NULL);
-        int raw = 0, dst = 0;
-        std::string err;
-        if (timezone_fetch_offset(tz.c_str(), raw, dst, err)) {
-            offset_sec = raw + dst;
-            use_tz_offset = true;
-        } else {
-            sync_set_status(("TZ lookup failed: " + err).c_str(),
-                            lv_palette_main(LV_PALETTE_RED));
-            // Don't return — NTP sync is still valuable with the default offset.
-        }
-    }
-
-    bool started = use_tz_offset
-        ? hw_start_time_sync_ntp(offset_sec)
-        : hw_start_time_sync_ntp();
+    // hw_start_time_sync_ntp() applies the user's POSIX TZ rule (DST
+    // included) via configTzTime(), so no offset needs resolving here.
+    bool started = hw_start_time_sync_ntp();
     if (!started) {
         sync_set_status("Sync failed to start", lv_palette_main(LV_PALETTE_RED));
         return;
@@ -266,13 +242,7 @@ static void tz_picked_cb(int index, void *ud)
 
 static void set_tz_cb(lv_event_t *)
 {
-    g_tz_candidates.clear();
-    std::string err;
-    if (!timezone_fetch_list(g_tz_candidates, err)) {
-        sync_set_status(("List failed: " + err).c_str(),
-                        lv_palette_main(LV_PALETTE_RED));
-        return;
-    }
+    timezone_fetch_list(g_tz_candidates);
     sync_set_status("", UI_COLOR_MUTED);
     ui_list_picker_open("Pick a timezone", g_tz_candidates, tz_picked_cb, nullptr);
 }
@@ -281,7 +251,7 @@ static void clear_tz_cb(lv_event_t *)
 {
     timezone_set_user_tz("");
     refresh_tz_label();
-    sync_set_status("Using device default offset", UI_COLOR_MUTED);
+    sync_set_status("Timezone reset to default. Tap Sync to apply.", UI_COLOR_MUTED);
 }
 
 void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
@@ -378,7 +348,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 
     /* ============ Section 2: Timezone ============
      * Stored in NVS; "Use default" clears the override so the device falls
-     * back to the compile-time GMT_OFFSET_SECOND. */
+     * back to TZ_DEFAULT (America/Sao_Paulo, see ui_time_sync.cpp). */
     add_section_header("Timezone");
     lv_obj_t *tz_card = add_card();
 

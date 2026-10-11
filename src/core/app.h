@@ -36,11 +36,6 @@ public:
     }
 
     /**
-     * @brief Called periodically to update the app logic.
-     */
-    virtual void onUpdate() {}
-
-    /**
      * @brief Get the name of the app.
      */
     const std::string& getName() const { return _name; }

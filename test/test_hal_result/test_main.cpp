@@ -19,27 +19,14 @@ void tearDown(void) {}
 static const HalError ALL_ERRORS[] = {
     HalError::Ok,
     HalError::InvalidArgument,
-    HalError::NotInitialized,
     HalError::NotSupported,
-    HalError::Timeout,
     HalError::InternalError,
-    HalError::PathNotFound,
-    HalError::PathTooLong,
-    HalError::CannotOpen,
-    HalError::ReadFailed,
-    HalError::WriteFailed,
     HalError::StorageFull,
-    HalError::StorageOffline,
-    HalError::DecodeFailed,
     HalError::WifiOffline,
-    HalError::WifiAuthFailed,
-    HalError::DnsFailed,
-    HalError::NetworkUnreachable,
     HalError::HttpError,
     HalError::Unauthorized,
     HalError::HubDisabled,
     HalError::HubUnreachable,
-    HalError::HubBadResponse,
 };
 
 static void test_every_error_has_message(void)

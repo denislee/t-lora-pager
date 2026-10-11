@@ -13,10 +13,10 @@
  * stable enough that caching across sessions is fine; a network/IP change
  * will just show a slightly stale city name until the user clears it.
  *
- * The page lays out as a vertical column (current row, 24h strip, week
- * strip) that is vertically scrollable; each hour/day cell is focusable and
- * joins the default input group so encoder/keyboard navigation scrolls the
- * page to bring the focused cell into view.
+ * The page lays out as a vertical scrollable column: a "24h" header row
+ * (with the status text right-aligned), the 3-hourly strip, a "Week" label
+ * and the daily strip. Nothing on it is focusable — the strips and cells are
+ * passive; tapping anywhere on the panel triggers a refresh.
  *
  * Weather conditions are drawn as small pictorial icons (sun/cloud/rain/etc.)
  * via LV_EVENT_DRAW_MAIN on plain lv_obj_t widgets — no icon font assets to
@@ -28,11 +28,11 @@
  * the next app that inherits from it.
  *
  * State reset on onStop (ui_weather_exit):
- *   widgets: root, hourly_col, daily_col, status_label
+ *   widgets: hourly_col, daily_col, status_label
  *                                       — nulled (deleted with parent)
- *   timers:  s_w_timer (drain ticker)   — lv_timer_del + null
- *   tasks:   s_w_bg (HTTPS fetcher)     — cooperatively stopped via flag,
- *                                          joined before timer null
+ *   job:     s_w_job (HTTPS fetcher + drain ticker, core::OneShotJob)
+ *                                       — teardown(): drain killed, a running
+ *                                          worker detached (frees its own result)
  * If you add new cached LVGL pointers or a background task, list them
  * above AND extend ui_weather_exit() — see the file header note about
  * panel-inherited styles; the same hazard applies to leaked timers.
@@ -43,8 +43,9 @@
 #include "../hal/hub.h"
 #include "../hal/str_encode.h"
 #include "../core/app_manager.h"
-#include "../core/scoped_lock.h"
+#include "../core/one_shot_job.h"
 #include "app_registry.h"
+#include "settings_internal.h"  // weather_city_match + the weather_* decls
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,6 +61,10 @@ extern "C" {
 #include "cJSON.h"
 }
 #endif
+
+// Defined at the bottom of this file (also used by Settings » Weather).
+// "" = auto (IP geolocation); a missing key = WEATHER_DEFAULT_CITY.
+std::string weather_get_user_city();
 
 namespace {
 
@@ -78,8 +83,10 @@ enum IconKind {
 // ip-api.com's free tier is plain HTTP only; that's fine — no credentials or
 // sensitive data in the request, and it saves the TLS handshake. Fields are
 // restricted to shrink the response body we have to parse on-device.
+#ifdef ARDUINO
 static const char *GEO_URL =
     "http://ip-api.com/json/?fields=status,lat,lon,city,regionName,country";
+#endif
 
 // When the local hub is enabled (Settings » Local Hub, backed by hal::hub_*),
 // every weather fetch tries the hub first and only falls back to the public
@@ -102,32 +109,20 @@ static const char *GEO_URL =
 // cache on first use so that without network we still have coordinates to
 // feed the forecast call.
 static const char   *WEATHER_DEFAULT_CITY = "Sao Paulo";
+#ifdef ARDUINO
 static const double  WEATHER_DEFAULT_LAT  = -23.5505;
 static const double  WEATHER_DEFAULT_LON  = -46.6333;
+#endif
 
-static lv_obj_t *root = nullptr;
 static lv_obj_t *hourly_col = nullptr;
 static lv_obj_t *daily_col = nullptr;
 static lv_obj_t *status_label = nullptr;
 
 // --- async fetch state ----------------------------------------------------
 //
-// HTTP runs on a FreeRTOS task so the LVGL thread keeps servicing input
-// (keyboard / encoder / back button) during a fetch. The task only writes
-// to these shared globals; a UI-thread timer drains the result and updates
-// widgets. Sharing is serialized by the global instance mutex (LVGL holds
-// it during `lv_timer_handler()`; the bg task takes it briefly to write).
-struct ForecastCache;
-#ifdef ARDUINO
-static TaskHandle_t    s_w_bg = nullptr;
-static lv_timer_t     *s_w_timer = nullptr;
-static volatile bool   s_w_done = false;
-static ForecastCache  *s_w_result = nullptr;  // heap-owned by UI thread
-static std::string     s_w_status_msg;
-static lv_color_t      s_w_status_color;
-static std::string     s_w_key;
-static std::string     s_w_user_city;
-#endif
+// HTTP runs on a core::OneShotJob worker (s_w_job, below weather_fetch) so the
+// LVGL thread keeps servicing input (keyboard / encoder / back button) during
+// a fetch; the job's drain timer renders the result on the UI thread.
 
 static void back_btn_cb(lv_event_t *e)
 {
@@ -137,6 +132,7 @@ static void back_btn_cb(lv_event_t *e)
 
 // Montserrat-10 (what we use here) only covers basic Latin — anything outside
 // 0x20–0x7F needs to be stripped or downgraded or it renders as tofu.
+#ifdef ARDUINO
 static std::string sanitize_ascii(const std::string &in)
 {
     std::string out;
@@ -184,6 +180,7 @@ static std::string sanitize_ascii(const std::string &in)
     }
     return out;
 }
+#endif
 
 static void set_status(const char *text, lv_color_t color)
 {
@@ -191,6 +188,10 @@ static void set_status(const char *text, lv_color_t color)
     lv_label_set_text(status_label, text ? text : "");
     lv_obj_set_style_text_color(status_label, color, 0);
 }
+
+#ifdef ARDUINO
+// Everything from here to make_cell() is the forecast-grid renderer; only
+// render_cache() (hardware fetch path) draws it, so it is hardware-only.
 
 // --- pictorial icon drawing ------------------------------------------------
 // Icons are drawn inside a fixed 20x20 widget via LV_EVENT_DRAW_MAIN. Shapes
@@ -337,13 +338,6 @@ static lv_obj_t *make_icon_widget(lv_obj_t *parent, int kind)
     return w;
 }
 
-static void set_icon_kind(lv_obj_t *w, int kind)
-{
-    if (!w) return;
-    lv_obj_set_user_data(w, (void *)(intptr_t)kind);
-    lv_obj_invalidate(w);
-}
-
 // --- weather code -> icon kind --------------------------------------------
 
 static int wmo_to_icon(int code)
@@ -363,19 +357,6 @@ static int wmo_to_icon(int code)
     case 95: case 96: case 99: return ICON_THUNDER;
     }
     return ICON_UNKNOWN;
-}
-
-// 16-point compass conversion for open-meteo's wind_direction_10m (degrees).
-static const char *deg_to_compass(int deg)
-{
-    static const char *pts[16] = {
-        "N","NNE","NE","ENE","E","ESE","SE","SSE",
-        "S","SSW","SW","WSW","W","WNW","NW","NNW"
-    };
-    while (deg < 0) deg += 360;
-    // idx = round(deg / 22.5) mod 16, using integer math.
-    int idx = ((deg * 10 + 1125) / 2250) % 16;
-    return pts[idx];
 }
 
 static int weekday_from_date(const std::string &date)
@@ -399,10 +380,9 @@ static const char *day_short(int iso_wday)
 }
 
 // Cell = vertical stack (top label, icon, mid label, bot label) that shares a
-// row with its siblings via flex_grow. The row — not the cell — is the input
-// group stop; cells are passive. When `is_current`, a thin accent outline
-// marks the hour/day that matches "now" so it stays visible regardless of
-// which row is focused.
+// strip with its siblings via flex_grow. Cells (and their strips) are passive,
+// not input-group members. When `is_current`, a thin accent outline on a
+// tinted fill marks the hour/day that matches "now".
 static lv_obj_t *make_cell(lv_obj_t *parent, const char *top, int icon_kind,
                            const char *mid, const char *bot, bool is_current)
 {
@@ -442,6 +422,7 @@ static lv_obj_t *make_cell(lv_obj_t *parent, const char *top, int icon_kind,
     add_label(bot, lv_color_hex(0x4AA3FF));
     return cell;
 }
+#endif // ARDUINO (forecast-grid renderer)
 
 static void clear_all()
 {
@@ -459,28 +440,9 @@ static std::string json_str(cJSON *obj, const char *key)
     return sanitize_ascii(v->valuestring);
 }
 
-static std::string json_nested_value(cJSON *obj, const char *key)
-{
-    if (!obj) return "";
-    cJSON *arr = cJSON_GetObjectItemCaseSensitive(obj, key);
-    if (!cJSON_IsArray(arr)) return "";
-    cJSON *first = cJSON_GetArrayItem(arr, 0);
-    return json_str(first, "value");
-}
-
-static int json_num(cJSON *obj, const char *key, int fallback)
-{
-    if (!obj) return fallback;
-    cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
-    if (cJSON_IsNumber(v)) return (int)v->valuedouble;
-    if (cJSON_IsString(v) && v->valuestring) return atoi(v->valuestring);
-    return fallback;
-}
-
 struct GeoData {
     std::string location;
     double lat = 0, lon = 0;
-    bool have_coords = false;
 };
 
 static bool parse_geo(const std::string &body, GeoData &out, std::string &err)
@@ -510,7 +472,6 @@ static bool parse_geo(const std::string &body, GeoData &out, std::string &err)
     if (cJSON_IsNumber(lat_j) && cJSON_IsNumber(lon_j)) {
         out.lat = lat_j->valuedouble;
         out.lon = lon_j->valuedouble;
-        out.have_coords = true;
     } else {
         cJSON_Delete(root_json);
         err = "geo coords";
@@ -530,15 +491,6 @@ static bool parse_geo(const std::string &body, GeoData &out, std::string &err)
 // "auto" for IP-based lookups or the user-supplied city name for manual mode.
 // Switching modes invalidates the cache automatically.
 
-static std::string load_user_city()
-{
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, true)) return std::string(WEATHER_DEFAULT_CITY);
-    String c = p.getString("user_city", WEATHER_DEFAULT_CITY);
-    p.end();
-    return std::string(c.c_str());
-}
-
 static bool load_cached_geo(const std::string &want_key, GeoData &out)
 {
     Preferences p;
@@ -555,7 +507,6 @@ static bool load_cached_geo(const std::string &want_key, GeoData &out)
     out.location = loc.c_str();
     out.lat = lat;
     out.lon = lon;
-    out.have_coords = true;
     return true;
 }
 
@@ -631,7 +582,6 @@ static bool fetch_geo_city(const std::string &city, GeoData &out, std::string &e
     }
     out.lat = lat_j->valuedouble;
     out.lon = lon_j->valuedouble;
-    out.have_coords = true;
     out.location = sanitize_ascii(city);
     cJSON_Delete(j);
     return true;
@@ -701,19 +651,6 @@ static void save_forecast_cache(const std::string &key, const ForecastCache &in)
     p.putInt("fcv", WEATHER_CACHE_VER);
     p.putString("fck", key.c_str());
     p.putBytes("fcd", &in, sizeof(in));
-    p.end();
-}
-
-// Used when the user picks a new city — the stored forecast is tied to a
-// specific key, so we drop it rather than leave it occupying NVS space and
-// risking a miskeyed hit after a future schema change.
-static void clear_forecast_cache_nvs()
-{
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, false)) return;
-    p.remove("fcv");
-    p.remove("fck");
-    p.remove("fcd");
     p.end();
 }
 
@@ -852,30 +789,22 @@ static bool fetch_weather(double lat, double lon, ForecastCache &out,
 #endif // ARDUINO
 
 #ifdef ARDUINO
-// Background HTTP worker: geocode → forecast → save cache. Touches only the
-// shared `s_w_*` state under the instance mutex; never the LVGL widget tree.
-// Result is delivered as a heap-owned ForecastCache that the UI thread takes
-// ownership of (and frees) via the drain timer.
-static void weather_bg_task(void *arg)
-{
-    (void)arg;
-    std::string key, user_city;
-    {
-        core::ScopedInstanceLock lock;
-        key = s_w_key;
-        user_city = s_w_user_city;
-    }
+// What the worker hands back to the UI thread.
+struct WeatherFetchResult {
+    bool          ok = false;          // `forecast` is valid → render it
+    ForecastCache forecast;
+    std::string   status;              // status-label text ("" clears it)
+    lv_color_t    status_color;
+};
 
-    auto finish = [](ForecastCache *result, const std::string &status,
-                     lv_color_t color) {
-        core::ScopedInstanceLock lock;
-        if (s_w_result) { delete s_w_result; s_w_result = nullptr; }
-        s_w_result = result;
-        s_w_status_msg = status;
-        s_w_status_color = color;
-        s_w_done = true;
-        s_w_bg = nullptr;
-    };
+// Background HTTP worker: geocode → forecast → save cache. Touches only its
+// arguments and the NVS caches, never the LVGL widget tree; the result is
+// heap-owned and freed by s_w_job after the UI thread renders it.
+static WeatherFetchResult *weather_fetch(const std::string &key,
+                                         const std::string &user_city)
+{
+    WeatherFetchResult *res = new WeatherFetchResult();
+    res->status_color = lv_palette_main(LV_PALETTE_RED);
 
     std::string err;
     GeoData g;
@@ -888,58 +817,39 @@ static void weather_bg_task(void *arg)
             g.location    = WEATHER_DEFAULT_CITY;
             g.lat         = WEATHER_DEFAULT_LAT;
             g.lon         = WEATHER_DEFAULT_LON;
-            g.have_coords = true;
             ok            = true;
         }
         if (!ok) {
-            std::string msg = "geo fail: " +
-                              (err.empty() ? std::string("err") : err);
-            finish(nullptr, msg, lv_palette_main(LV_PALETTE_RED));
-            vTaskDelete(NULL);
-            return;
+            res->status = "geo fail: " + (err.empty() ? std::string("err") : err);
+            return res;
         }
         save_cached_geo(key, g);
     }
 
-    ForecastCache *fresh = new ForecastCache();
-    if (!fetch_weather(g.lat, g.lon, *fresh, err)) {
-        delete fresh;
-        finish(nullptr, "forecast: " + err, lv_palette_main(LV_PALETTE_RED));
-        vTaskDelete(NULL);
-        return;
+    if (!fetch_weather(g.lat, g.lon, res->forecast, err)) {
+        res->status = "forecast: " + err;
+        return res;
     }
-    save_forecast_cache(key, *fresh);
-    finish(fresh, std::string(), UI_COLOR_MUTED);
-    vTaskDelete(NULL);
+    save_forecast_cache(key, res->forecast);
+    res->ok = true;
+    res->status_color = UI_COLOR_MUTED;
+    return res;
 }
 
-// LVGL timer: runs inside `lv_timer_handler()` and so already holds the
-// instance mutex. When the bg task signals done, render the result (if any)
-// and tear the timer down. Ownership of `s_w_result` transfers to this
-// function.
-static void weather_drain_tick(lv_timer_t *t)
+// Drain callback (LVGL thread, instance mutex held by lv_timer_handler).
+static void weather_fetch_done(WeatherFetchResult &r)
 {
-    (void)t;
-    if (!s_w_done) return;
-    s_w_done = false;
-    ForecastCache *result = s_w_result;
-    s_w_result = nullptr;
-    if (result) {
-        render_cache(*result);
-        delete result;
-    }
-    set_status(s_w_status_msg.c_str(), s_w_status_color);
-    if (s_w_timer) {
-        lv_timer_del(s_w_timer);
-        s_w_timer = nullptr;
-    }
+    if (r.ok) render_cache(r.forecast);
+    set_status(r.status.c_str(), r.status_color);
 }
+
+static core::OneShotJob<WeatherFetchResult> s_w_job(weather_fetch_done);
 #endif
 
 static void do_fetch()
 {
 #ifdef ARDUINO
-    std::string user_city = load_user_city();
+    std::string user_city = weather_get_user_city();
     std::string key = user_city.empty() ? std::string("auto") : user_city;
 
     // Load any cached forecast for the current key up front — we'll use it
@@ -994,30 +904,15 @@ static void do_fetch()
         set_status("Fetching...", UI_COLOR_ACCENT);
     }
 
-    if (s_w_bg != nullptr) {
-        // A previous fetch is still in flight (e.g. user re-tapped the panel
-        // or re-entered the app). Re-attach to it so the result still lands.
-        if (!s_w_timer) {
-            s_w_timer = lv_timer_create(weather_drain_tick, 100, nullptr);
-        }
-        return;
-    }
-
-    s_w_key = key;
-    s_w_user_city = user_city;
-    s_w_done = false;
-    if (s_w_result) { delete s_w_result; s_w_result = nullptr; }
-
+    // A fetch still in flight (user re-tapped the panel or re-entered the
+    // app) is re-attached rather than duplicated, so its result still lands.
     // 8 KB stack: Open-Meteo runs over HTTPS, and mbedtls TLS handshake
     // plus cert chain easily eats 6 KB on its own.
-    if (xTaskCreate(weather_bg_task, "wx_bg", 8192, nullptr, 2,
-                    &s_w_bg) != pdPASS) {
-        s_w_bg = nullptr;
+    auto started = s_w_job.start(
+        [key, user_city]() { return weather_fetch(key, user_city); },
+        8192, "wx_bg", 2);
+    if (started == core::OneShotJob<WeatherFetchResult>::Start::Failed) {
         set_status("task spawn fail", lv_palette_main(LV_PALETTE_RED));
-        return;
-    }
-    if (!s_w_timer) {
-        s_w_timer = lv_timer_create(weather_drain_tick, 100, nullptr);
     }
 #else
     clear_all();
@@ -1034,7 +929,6 @@ static void root_click_cb(lv_event_t *e)
 
 static void ui_weather_enter(lv_obj_t *parent)
 {
-    root = parent;
     ui_show_back_button(back_btn_cb);
 
     lv_obj_set_style_bg_color(parent, UI_COLOR_BG, 0);
@@ -1120,24 +1014,16 @@ static void ui_weather_exit(lv_obj_t *parent)
     if (parent) {
         lv_obj_remove_local_style_prop(parent, LV_STYLE_TEXT_FONT, 0);
     }
-    root = nullptr;
     hourly_col = nullptr;
     daily_col = nullptr;
     status_label = nullptr;
 
 #ifdef ARDUINO
-    // Stop draining the bg task, if any. The task is left to finish on its
-    // own — it only writes to heap-backed shared state, never the UI tree,
-    // so it is safe to outlive the app instance. Drop any pending result
-    // so a re-entry doesn't render stale data into a fresh panel.
-    if (s_w_timer) {
-        lv_timer_del(s_w_timer);
-        s_w_timer = nullptr;
-    }
-    if (s_w_done) {
-        s_w_done = false;
-        if (s_w_result) { delete s_w_result; s_w_result = nullptr; }
-    }
+    // Stop draining the bg fetch, if any. A running worker is left to finish
+    // on its own (it never touches the UI tree) and frees its own result; a
+    // finished-but-undrained one is dropped so a re-entry doesn't render
+    // stale data into a fresh panel.
+    s_w_job.teardown();
 #endif
 }
 
@@ -1162,6 +1048,9 @@ APP_FACTORY(make_weather_app, WeatherApp)
 
 // Settings-facing helpers for the user-chosen weather city. Defined in this
 // translation unit so the NVS layout stays co-located with the fetch logic.
+//
+// "user_city" semantics: key absent (first boot) = WEATHER_DEFAULT_CITY;
+// stored "" = auto (IP geolocation); anything else = that city.
 std::string weather_get_user_city()
 {
 #ifdef ARDUINO
@@ -1180,11 +1069,9 @@ void weather_set_user_city(const char *city)
 #ifdef ARDUINO
     Preferences p;
     if (!p.begin(WEATHER_PREFS_NS, false)) return;
-    if (city && *city) {
-        p.putString("user_city", city);
-    } else {
-        p.remove("user_city");
-    }
+    // Store "" explicitly for auto: removing the key would fall back to
+    // WEATHER_DEFAULT_CITY on the next read and auto mode would never run.
+    p.putString("user_city", (city && *city) ? city : "");
     // Drop the cached lat/lon *and* the cached forecast so the next fetch
     // resolves the new source from scratch — otherwise we'd render the old
     // city's forecast until the key-mismatch check in load_forecast_cache
@@ -1205,7 +1092,7 @@ void weather_set_user_city(const char *city)
 
 // Save both the city label and its resolved coordinates so the first weather
 // fetch can skip the geocoding round-trip. The cache key has to match what
-// do_fetch() builds from user_city (see line ~707), otherwise it will refuse
+// do_fetch() builds from user_city, otherwise it will refuse
 // the cache and re-geocode.
 void weather_set_user_location(const char *city, double lat, double lon)
 {
@@ -1236,14 +1123,8 @@ void weather_set_user_location(const char *city, double lat, double lon)
 
 // Search the open-meteo geocoding API for cities matching `query`. Returns up
 // to ~10 matches with display labels and coordinates ready to persist via
-// weather_set_user_location(). Needs WiFi.
-struct weather_city_match {
-    std::string label;  // "Paris, Île-de-France, France" — shown in the list
-    std::string name;   // "Paris" — stored as user_city
-    double lat;
-    double lon;
-};
-
+// weather_set_user_location(). Needs WiFi. weather_city_match lives in
+// settings_internal.h.
 bool weather_search_cities(const char *query,
                            std::vector<weather_city_match> &out,
                            std::string &err)

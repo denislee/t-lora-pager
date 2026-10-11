@@ -6,7 +6,8 @@
  * instead of hand-rolling lv_obj_t trees on lv_layer_top. They share the
  * theme tokens from ui/theme.h so the look is consistent.
  *
- * Implementations live in src/ui_tools.cpp (popup/loading/result),
+ * Implementations live in src/ui_tools.cpp (popup/loading/result, overlay,
+ * modal button, confirm, status-bar height),
  * src/ui_lock.cpp (passphrase/text prompts + device-lock enforcement),
  * src/ui_wifi.cpp (WiFi picker), src/ui_nfc_test.cpp (NFC overlay).
  */
@@ -26,6 +27,41 @@ void destroy_msgbox(lv_obj_t *msgbox);
  * ui_result internally — match the create_msgbox() look. */
 lv_obj_t *ui_popup_create(const char *title);
 void ui_popup_destroy(lv_obj_t *popup);
+
+/* Height of the global status bar: the header font's line height + 8 px,
+ * never less than 30. Overlays that sit just below the bar use it. */
+int32_t ui_status_bar_height(void);
+
+/* Modal input context shared by the full-screen overlays (WiFi picker, list
+ * picker, NFC test, passphrase prompts). ui_overlay_open() saves the
+ * default group, installs a fresh one (`wrap` = lv_group_set_wrap) as the
+ * default, re-points the status-bar back button at `back_cb` (skipped when
+ * NULL, e.g. the passphrase modal, which owns no back button), enables the
+ * keyboard, and returns a themed container on lv_layer_top(): full width,
+ * flush below the status bar, BG fill, 8 px padding, column flex (start /
+ * center / center) with 6 px row gap. The caller adds children and their
+ * group entries via o->group. ui_overlay_close() reverses all of it; it is
+ * safe on a zeroed struct. */
+typedef struct {
+    lv_obj_t     *overlay;
+    lv_group_t   *group;
+    lv_group_t   *prev_group;
+    lv_event_cb_t prev_back_cb;
+} ui_overlay_t;
+
+lv_obj_t *ui_overlay_open(ui_overlay_t *o, lv_event_cb_t back_cb, bool wrap);
+void ui_overlay_close(ui_overlay_t *o);
+
+/* Themed button for modal overlays: SURFACE face, faint accent border that
+ * goes solid (and the face accent-tinted) when focused, FG label centered.
+ * `cb` (may be NULL) fires on LV_EVENT_CLICKED with `user_data`. */
+lv_obj_t *ui_modal_btn_create(lv_obj_t *parent, const char *text,
+                              lv_event_cb_t cb, void *user_data);
+
+/* Yes/No confirmation dialog (create_msgbox look). `cb(true, ud)` on Yes,
+ * `cb(false, ud)` on No; the dialog is closed before `cb` runs. */
+typedef void (*ui_confirm_cb)(bool yes, void *ud);
+void ui_confirm(const char *title, const char *msg, ui_confirm_cb cb, void *ud);
 
 /* Unified loading / progress popup. Every long-running screen (sync,
  * download, index scan, storage ops) should use this instead of hand-

@@ -25,9 +25,7 @@
 // Defined in ui_time_sync.cpp. Forward-declared here so the HAL layer does
 // not have to pull in apps/settings_internal.h.
 std::string timezone_get_user_tz();
-bool        timezone_fetch_offset(const char *tz,
-                                  int &raw_offset_sec,
-                                  int &dst_offset_sec,
+bool        timezone_fetch_offset(const char *tz, int &offset_sec,
                                   std::string &err);
 
 namespace {
@@ -38,23 +36,15 @@ TinyGPSPlus s_gps;
 
 // -2 = not supported, -1 = timed out, 0 = idle/in-progress, 1 = synced.
 int  s_status = 0;
-bool s_active = false;
 
-// True iff hw_start_time_sync_gps() flipped GPS power on; on completion or
-// cancel we drop it back so the user setting isn't accidentally overridden.
-bool s_auto_enabled = false;
+#ifdef ARDUINO
+// True while a sync attempt is running. The GPS rail is off at boot and has
+// no other owner, so it is powered exactly while s_active is true: on in
+// hw_start_time_sync_gps(), off on fix, timeout or hw_stop_time_sync_gps().
+bool s_active = false;
 
 uint32_t s_deadline_ms = 0;
 
-void release_transient_gps_power()
-{
-    if (s_auto_enabled) {
-        hw_set_gps_powered(false);
-        s_auto_enabled = false;
-    }
-}
-
-#ifdef ARDUINO
 // Convert a UTC struct tm to time_t portably. ESP32 newlib doesn't ship
 // timegm(), so we temporarily switch TZ to UTC and let mktime() interpret
 // the broken-down time as UTC. The previous TZ env var is restored before
@@ -78,12 +68,9 @@ time_t utc_tm_to_epoch(struct tm &utc_tm)
 bool hw_start_time_sync_gps()
 {
 #ifdef ARDUINO
-    hw_stop_time_sync_gps();
-
-    if (!hw_get_gps_powered()) {
-        hw_set_gps_powered(true);
-        s_auto_enabled = true;
-    }
+    // A restart while a sync is already running keeps the rail up rather
+    // than cycling it (and the UART) off and on again.
+    if (!s_active) hw_set_gps_powered(true);
 
     // TinyGPSPlus has no public reset; reconstruct in place. Default ctor
     // zeroes all the latched fields so a stale fix from a prior session
@@ -107,8 +94,9 @@ bool hw_start_time_sync_gps()
 void hw_stop_time_sync_gps()
 {
 #ifdef ARDUINO
+    if (!s_active) return;
     s_active = false;
-    release_transient_gps_power();
+    hw_set_gps_powered(false);
 #endif
 }
 
@@ -142,10 +130,9 @@ void hw_pump_time_sync_gps()
         time_t utc = utc_tm_to_epoch(utc_tm);
 
         std::string tz = timezone_get_user_tz();
-        int raw = 0, dst = 0;
+        int offset_sec = 0;
         std::string err;
-        bool have_offset = !tz.empty()
-                           && timezone_fetch_offset(tz.c_str(), raw, dst, err);
+        bool have_offset = timezone_fetch_offset(tz.c_str(), offset_sec, err);
 
         struct timeval tv = { utc, 0 };
         settimeofday(&tv, nullptr);
@@ -159,7 +146,7 @@ void hw_pump_time_sync_gps()
         if (hw_get_device_online() & HW_RTC_ONLINE) {
             struct tm local_tm;
             if (have_offset) {
-                time_t local = utc + (raw + dst);
+                time_t local = utc + offset_sec;
                 gmtime_r(&local, &local_tm);
             } else {
                 local_tm = utc_tm;
@@ -169,14 +156,14 @@ void hw_pump_time_sync_gps()
 
         s_status = 1;
         s_active = false;
-        release_transient_gps_power();
+        hw_set_gps_powered(false);
         return;
     }
 
     if ((int32_t)(millis() - s_deadline_ms) > 0) {
         s_status = -1;
         s_active = false;
-        release_transient_gps_power();
+        hw_set_gps_powered(false);
     }
 #endif
 }

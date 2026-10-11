@@ -3,14 +3,16 @@
  * @brief     Bulk-copy operations split out from storage.cpp.
  *
  * Both functions are coordination layers that read from the on-device
- * stores via the public storage.h API and forward to the hub (notes
- * upload) or the SD card. They have no file-static dependencies on
- * storage.cpp — no helpers, no globals — so the extraction is a clean
- * cut along the API boundary.
+ * stores and forward to the hub (notes upload) or the SD card. They have no
+ * file-static dependencies on storage.cpp — only the public storage.h API
+ * and the shared hal/fs_util.h + notes_path.h helpers — so the extraction is
+ * a clean cut along the API boundary.
  */
 #include "storage.h"
 #include "system.h"
 #include "hub.h"
+#include "notes_path.h"
+#include "fs_util.h"
 #include "../core/spi_lock.h"
 
 #include <cstring>
@@ -125,66 +127,59 @@ bool hw_copy_internal_to_sd(int *copied, int *failed, std::string *error, void (
         }
     }
 
-    File root = FFat.open("/");
-    if (!root || !root.isDirectory()) {
+    // P6.27: collect every file first — the FFat root's own files (tasks.txt,
+    // journal_idx.bin) plus the notes one level down in NOTES_DIR. The old walk
+    // skipped directories, so the notes themselves were never copied. One pass
+    // per directory also gives the progress total without a separate count
+    // walk. Bytes are copied raw: encrypted notes land on SD as the same
+    // Salted__ ciphertext, readable with the same passphrase.
+    std::vector<std::string> paths;
+    auto collect = [&paths](const char *dir) -> bool {
+        File d = FFat.open(dir);
+        if (!d || !d.isDirectory()) return false;
+        std::string base = dir;
+        if (base.empty() || base.back() != '/') base += '/';
+        File entry = d.openNextFile();
+        while (entry) {
+            if (!entry.isDirectory()) {
+                // Normalize to leaf name — FFat returns the leaf, SD a full path.
+                const char *name = entry.name();
+                const char *slash = strrchr(name, '/');
+                if (slash) name = slash + 1;
+                paths.push_back(base + name);
+            }
+            entry.close();
+            entry = d.openNextFile();
+        }
+        d.close();
+        return true;
+    };
+    if (!collect("/")) {
         if (error) *error = "Cannot open internal storage.";
         return false;
     }
-
-    // First pass: count files
-    int total_files = 0;
-    File count_entry = root.openNextFile();
-    while (count_entry) {
-        if (!count_entry.isDirectory()) {
-            total_files++;
-        }
-        count_entry.close();
-        count_entry = root.openNextFile();
+    if (collect(hal::NOTES_DIR)) {
+        core::ScopedSpiLock lock;
+        if (!SD.exists(hal::NOTES_DIR)) SD.mkdir(hal::NOTES_DIR);
     }
-    root.close();
 
-    // Re-open for copying
-    root = FFat.open("/");
+    int total_files = (int)paths.size();
     int ok_count = 0;
     int fail_count = 0;
-    int current_idx = 0;
-    File entry = root.openNextFile();
-    while (entry) {
-        if (!entry.isDirectory()) {
-            const char* name = entry.name();
-            String dst = (name[0] == '/') ? String(name) : ("/" + String(name));
+    for (int i = 0; i < total_files; ++i) {
+        const char *path = paths[i].c_str();
+        if (cb) cb(i, total_files, path);
 
-            if (cb) cb(current_idx, total_files, name);
-
-            size_t size = entry.size();
-            std::string buf;
-            buf.resize(size);
-            if (size > 0) {
-                entry.read((uint8_t *)&buf[0], size);
-            }
-            entry.close();
-
-            bool wrote = false;
-            {
-                core::ScopedSpiLock lock;
-                File out = SD.open(dst, "w");
-                if (out) {
-                    size_t n = size > 0 ? out.write((const uint8_t *)buf.data(), size) : 0;
-                    wrote = (size == 0) || (n == size);
-                    out.close();
-                }
-            }
-
-            if (wrote) ok_count++;
-            else fail_count++;
-
-            current_idx++;
-        } else {
-            entry.close();
+        std::vector<uint8_t> buf;
+        bool wrote = false;
+        if (hal::fs_read_all(FFat, path, buf)) {
+            core::ScopedSpiLock lock;
+            wrote = hal::fs_write_all(SD, path, buf.data(), buf.size());
         }
-        entry = root.openNextFile();
+
+        if (wrote) ok_count++;
+        else fail_count++;
     }
-    root.close();
 
     if (cb) cb(total_files, total_files, "Done");
 

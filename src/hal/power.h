@@ -10,9 +10,6 @@ int16_t hw_get_battery_voltage();
 void hw_update_battery_history();
 
 void hw_get_monitor_params(monitor_params_t &params);
-// Force next hw_get_monitor_params() to bypass the TTL cache.  Call before
-// re-enabling the BQ25896 ADC so stale zeros are never served (P4.7).
-void hw_invalidate_monitor_cache();
 
 bool hw_get_otg_enable();
 bool hw_set_otg(bool enable);

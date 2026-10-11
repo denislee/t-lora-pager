@@ -110,6 +110,74 @@ static void test_salted_magic_case_sensitive(void)
     TEST_ASSERT_FALSE(content_has_salted_magic("SALTED__deadbeef", 16));
 }
 
+/* ---- notes_path_is_tasks_file ---- */
+
+static void test_tasks_file_matches_root_only(void)
+{
+    TEST_ASSERT_TRUE(notes_path_is_tasks_file("tasks.txt"));
+    TEST_ASSERT_TRUE(notes_path_is_tasks_file("/tasks.txt"));
+    TEST_ASSERT_FALSE(notes_path_is_tasks_file("notes/tasks.txt"));
+    TEST_ASSERT_FALSE(notes_path_is_tasks_file("tasks.txt.bak"));
+    TEST_ASSERT_FALSE(notes_path_is_tasks_file("Tasks.txt"));
+    TEST_ASSERT_FALSE(notes_path_is_tasks_file(""));
+    TEST_ASSERT_FALSE(notes_path_is_tasks_file(nullptr));
+}
+
+/* ---- normalize_path ---- */
+
+static void test_normalize_adds_leading_slash(void)
+{
+    char out[32];
+    normalize_path("notes/a.txt", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("/notes/a.txt", out);
+}
+
+static void test_normalize_keeps_existing_slash(void)
+{
+    char out[32];
+    normalize_path("/tasks.txt", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("/tasks.txt", out);
+    normalize_path("/", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("/", out);
+}
+
+static void test_normalize_null_and_empty_yield_empty(void)
+{
+    char out[8] = "junk";
+    normalize_path(nullptr, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("", out);
+    strcpy(out, "junk");
+    normalize_path("", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("", out);
+}
+
+static void test_normalize_truncates_and_terminates(void)
+{
+    char out[6];
+    normalize_path("abcdefgh", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("/abcd", out);
+    normalize_path("/abcdefgh", out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("/abcd", out);
+}
+
+static void test_normalize_zero_cap_writes_nothing(void)
+{
+    char out[4] = "xyz";
+    normalize_path("abc", out, 0);
+    TEST_ASSERT_EQUAL_STRING("xyz", out);
+}
+
+static void test_notes_dir_constants_agree(void)
+{
+    /* NOTES_DIR is "/" + NOTES_PREFIX without its trailing slash, and the
+     * protection policy keys off the same prefix. */
+    char out[32];
+    normalize_path(hal::NOTES_PREFIX, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("/notes/", out);
+    TEST_ASSERT_EQUAL_STRING("/notes", hal::NOTES_DIR);
+    TEST_ASSERT_TRUE(notes_crypto_path_is_protected("notes/x.txt"));
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -125,5 +193,12 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_salted_magic_rejects_short_buffer);
     RUN_TEST(test_salted_magic_rejects_plain_text);
     RUN_TEST(test_salted_magic_case_sensitive);
+    RUN_TEST(test_tasks_file_matches_root_only);
+    RUN_TEST(test_normalize_adds_leading_slash);
+    RUN_TEST(test_normalize_keeps_existing_slash);
+    RUN_TEST(test_normalize_null_and_empty_yield_empty);
+    RUN_TEST(test_normalize_truncates_and_terminates);
+    RUN_TEST(test_normalize_zero_cap_writes_nothing);
+    RUN_TEST(test_notes_dir_constants_agree);
     return UNITY_END();
 }

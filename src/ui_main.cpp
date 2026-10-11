@@ -6,7 +6,7 @@
  * `ui_is_fake_sleep` / `ui_lock` / `ui_unlock` hooks) and the new
  * `core::System` + `core::AppManager`. New code should talk to `core::`
  * directly; this file only exists to satisfy the vendor callbacks and the
- * `menu_show` / `menu_hidden` public API.
+ * `menu_show` public API.
  */
 #include "ui_define.h"
 #include "core/system.h"
@@ -19,12 +19,9 @@ static bool fake_sleep_active = false;
 // callback (or a second caller) would otherwise call hw_power_down_all() a
 // second time on the already-torn-down rail set. Cleared by ui_resume_timers().
 static bool s_power_down_active = false;
-bool editor_auto_edit = false;
 
 static void deferred_switch_timer_cb(lv_timer_t *t)
 {
-    editor_auto_edit = false;
-
     // Return to the home menu instead of the note app — but only when no
     // passphrase modal is showing. showMenu() reassigns every indev to the
     // menu group, which would steal input from a modal that's still on
@@ -88,19 +85,16 @@ bool ui_is_fake_sleep()
     return fake_sleep_active;
 }
 
-// Called from the vendor LilyGoLib radio/power paths to guard the shared SPI
-// bus. New in-tree code should prefer core::ScopedInstanceLock.
+// Called from the vendor LilyGoLib display-toggle path around
+// ui_pause_timers()/ui_resume_timers(). Takes the instance (task-coordination)
+// mutex, not the SPI-bus lock (core/spi_lock.h). New in-tree code should
+// prefer core::ScopedInstanceLock.
 void ui_lock()   { instanceLockTake(); }
 void ui_unlock() { instanceLockGive(); }
 
 void menu_show()
 {
     core::System::getInstance().showMenu();
-}
-
-void menu_hidden()
-{
-    core::System::getInstance().hideMenu();
 }
 
 void set_default_group(lv_group_t *group)

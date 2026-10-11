@@ -5,7 +5,7 @@
  * @date      2026-04-10
  *
  * State reset on onStop (ui_tasks_exit):
- *   widgets: parent_obj, menu, main_page, add_ta, task_container, quit_btn
+ *   widgets: menu, main_page, add_ta, task_container, quit_btn
  *                                       — destroyed via lv_obj_del then nulled
  *   timers:  save_debounce_timer        — flushed (pending write forced
  *                                          through) then lv_timer_del + null
@@ -26,7 +26,6 @@ struct TaskItem {
     lv_obj_t *obj;
 };
 
-static lv_obj_t *parent_obj = NULL;
 static lv_obj_t *menu = NULL;
 static lv_obj_t *main_page = NULL;
 static lv_obj_t *add_ta = NULL;
@@ -38,13 +37,14 @@ static int32_t editing_idx = -1;
 
 static const char *tasks_file_path = "/tasks.txt";
 
-void ui_tasks_exit(lv_obj_t *parent);
+static void ui_tasks_exit(lv_obj_t *parent);
+static void do_exit();
 
 static void save_tasks() {
     string content = "";
     for (auto &t : tasks) {
         if (t.is_task) {
-            content += (t.obj && lv_obj_has_state(t.obj, LV_STATE_CHECKED) ? "[x] " : "[ ] ");
+            content += t.checked ? "[x] " : "[ ] ";
             content += t.text + "\n";
         } else {
             content += t.text + "\n";
@@ -83,7 +83,7 @@ static void flush_pending_save() {
     }
 }
 
-void ui_tasks_refresh();
+static void ui_tasks_refresh();
 static void rebuild_task_list();
 
 static void task_event_cb(lv_event_t *e) {
@@ -251,11 +251,8 @@ static void add_ta_event_cb(lv_event_t *e) {
                 lv_event_stop_processing(e);
                 return;
             }
-            if (menu) {
-                lv_obj_t *bb = lv_menu_get_main_header_back_button(menu);
-                if (bb) lv_obj_send_event(bb, LV_EVENT_CLICKED, NULL);
-            }
             lv_event_stop_processing(e);
+            do_exit();
             return;
         }
 
@@ -266,77 +263,56 @@ static void add_ta_event_cb(lv_event_t *e) {
     }
 }
 
-static void back_event_handler(lv_event_t *e) {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    if (lv_menu_back_btn_is_root(menu, obj)) {
-        ui_tasks_exit(NULL);
-        menu_show();
-    }
+// Single exit path for ESC, the status-bar back button and the touch quit
+// button.
+static void do_exit() {
+    ui_tasks_exit(NULL);
+    menu_show();
 }
 
 static void tasks_back_cb(lv_event_t *e) {
-    if (!menu) return;
-    lv_obj_t *bb = lv_menu_get_main_header_back_button(menu);
-    if (bb) lv_obj_send_event(bb, LV_EVENT_CLICKED, NULL);
+    do_exit();
 }
 
-void ui_tasks_refresh() {
+// "[ ] text" → open task, "[x] text" / "[X] text" → done task, anything
+// else → a plain (non-task) line kept verbatim.
+static TaskItem parse_line(const string &line) {
+    TaskItem t;
+    t.is_task = false;
+    t.checked = false;
+    t.obj = NULL;
+    if (line.rfind("[ ] ", 0) == 0) {
+        t.is_task = true;
+        t.text = line.substr(4);
+    } else if (line.rfind("[x] ", 0) == 0 || line.rfind("[X] ", 0) == 0) {
+        t.is_task = true;
+        t.checked = true;
+        t.text = line.substr(4);
+    } else {
+        t.text = line;
+    }
+    return t;
+}
+
+static void ui_tasks_refresh() {
     if (task_container == NULL) return;
     tasks.clear();
 
     string content;
-    if (!hw_read_preferred_file(tasks_file_path, content)) {
+    if (!hw_read_file(tasks_file_path, content)) {
         content = "";
     }
 
-    // Split content by \n
-    size_t pos = 0;
-    string token;
-    string delim = "\n";
-    while ((pos = content.find(delim)) != string::npos) {
-        token = content.substr(0, pos);
-        content.erase(0, pos + delim.length());
-        
-        if (!token.empty() && token.back() == '\r') {
-            token.pop_back();
-        }
-        if (token.empty()) continue;
-
-        TaskItem t;
-        t.is_task = false;
-        t.checked = false;
-
-        if (token.rfind("[ ] ", 0) == 0) {
-            t.is_task = true;
-            t.text = token.substr(4);
-        } else if (token.rfind("[x] ", 0) == 0 || token.rfind("[X] ", 0) == 0) {
-            t.is_task = true;
-            t.checked = true;
-            t.text = token.substr(4);
-        } else {
-            t.text = token;
-        }
-        tasks.push_back(t);
-    }
-    // Handle last line if no trailing newline
-    if (!content.empty()) {
-        if (!content.empty() && content.back() == '\r') content.pop_back();
-        if (!content.empty()) {
-            TaskItem t;
-            t.is_task = false;
-            t.checked = false;
-            if (content.rfind("[ ] ", 0) == 0) {
-                t.is_task = true;
-                t.text = content.substr(4);
-            } else if (content.rfind("[x] ", 0) == 0 || content.rfind("[X] ", 0) == 0) {
-                t.is_task = true;
-                t.checked = true;
-                t.text = content.substr(4);
-            } else {
-                t.text = content;
-            }
-            tasks.push_back(t);
-        }
+    // One item per line ("\n" or "\r\n"; the last line may lack the
+    // terminator). Blank lines are dropped.
+    size_t start = 0;
+    while (start < content.size()) {
+        size_t end = content.find('\n', start);
+        if (end == string::npos) end = content.size();
+        string line = content.substr(start, end - start);
+        start = end + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) tasks.push_back(parse_line(line));
     }
 
     rebuild_task_list();
@@ -350,10 +326,6 @@ void ui_tasks_refresh() {
 static void rebuild_task_list() {
     if (task_container == NULL) return;
     lv_obj_clean(task_container);
-
-    if (tasks.empty()) {
-        return;
-    }
 
     for (auto &t : tasks) {
         if (t.is_task) {
@@ -383,11 +355,8 @@ static void rebuild_task_list() {
             lv_obj_set_style_bg_opa(t.obj, LV_OPA_20, LV_STATE_FOCUSED);
 
             // Visual feedback when the task is done (checked state)
-            lv_obj_t * child_label = lv_obj_get_child(t.obj, 0);
-            if (child_label) {
-                lv_obj_set_style_text_decor(child_label, LV_TEXT_DECOR_STRIKETHROUGH, LV_STATE_CHECKED);
-                lv_obj_set_style_text_color(child_label, UI_COLOR_MUTED, LV_STATE_CHECKED);
-            }
+            lv_obj_set_style_text_decor(label, LV_TEXT_DECOR_STRIKETHROUGH, LV_STATE_CHECKED);
+            lv_obj_set_style_text_color(label, UI_COLOR_MUTED, LV_STATE_CHECKED);
 
             if (t.checked) {
                 lv_obj_add_state(t.obj, LV_STATE_CHECKED);
@@ -420,26 +389,11 @@ static void rebuild_task_list() {
     }
 }
 
-void ui_tasks_enter(lv_obj_t *parent) {
+static void ui_tasks_enter(lv_obj_t *parent) {
     if (menu != NULL) return;
-    parent_obj = parent;
     enable_keyboard();
 
-    menu = create_menu(parent, back_event_handler);
-    lv_menu_set_mode_root_back_btn(menu, LV_MENU_ROOT_BACK_BTN_ENABLED);
-
-    // Suppress the built-in header back button by zero-sizing it so LVGL
-    // auto-hides the header (content_height becomes 0). Still clickable
-    // programmatically via send_event from the status bar back.
-    lv_obj_t *bb = lv_menu_get_main_header_back_button(menu);
-    if (bb) {
-        lv_obj_set_size(bb, 0, 0);
-        lv_obj_set_style_pad_all(bb, 0, 0);
-        lv_obj_set_style_border_width(bb, 0, 0);
-        lv_obj_set_style_outline_width(bb, 0, 0);
-        lv_obj_set_style_shadow_width(bb, 0, 0);
-        lv_obj_set_style_bg_opa(bb, LV_OPA_TRANSP, 0);
-    }
+    menu = create_menu(parent, nullptr);
     ui_show_back_button(tasks_back_cb);
 
     main_page = lv_menu_page_create(menu, NULL);
@@ -475,22 +429,16 @@ void ui_tasks_enter(lv_obj_t *parent) {
 
 #ifdef USING_TOUCHPAD
     quit_btn = create_floating_button([](lv_event_t *e) {
-        lv_obj_t *page = lv_menu_get_cur_main_page(menu);
-        if (lv_menu_back_button_is_root(menu, page)) {
-             lv_obj_send_event(lv_menu_get_main_header_back_button(menu), LV_EVENT_CLICKED, NULL);
-        } else {
-             lv_obj_t *bb = lv_menu_get_main_header_back_button(menu);
-             if (bb) lv_obj_send_event(bb, LV_EVENT_CLICKED, NULL);
-        }
+        do_exit();
     }, NULL);
 #endif
 }
 
-void ui_tasks_exit(lv_obj_t *parent) {
+static void ui_tasks_exit(lv_obj_t *parent) {
     ui_hide_back_button();
     disable_keyboard();
-    // save_tasks() reads checked-state off the live checkbox widgets, so the
-    // flush must happen before they're torn down below.
+    // save_tasks() serializes the `tasks` model (not widget state); flush
+    // before tasks.clear() below.
     flush_pending_save();
     if (menu) {
         lv_obj_clean(menu);

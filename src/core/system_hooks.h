@@ -52,7 +52,7 @@ void hw_charge_task_on_fake_sleep_enter();
 //   - hw_ble_kb_task_notify_wake(): the display is coming back
 //     (ui_resume_timers); the BLE keepalive task should resume so conn-params
 //     can be re-applied after a sleep during which the iOS link may have
-//     dropped. No-op on emulator and on builds without USING_BLE_KEYBOARD.
+//     dropped. No-op on emulator.
 void hw_ble_kb_task_notify_wake();
 
 // Vendor-compat aliases for the instance lock. New in-tree code should
@@ -60,14 +60,12 @@ void hw_ble_kb_task_notify_wake();
 void ui_lock();
 void ui_unlock();
 
-// Editor deep-link: used by NFC / shortcuts to jump to the text editor
-// from outside the editor itself.
+// Fake-sleep wake hook, called by the vendor's fake-sleep toggle. Despite
+// the (vendor-fixed) name it returns to the home menu, not the editor.
 void ui_request_editor_switch();
-extern bool editor_auto_edit;
 
-// Menu panel visibility. Thin wrappers over core::System.
+// Show the home menu panel. Thin wrapper over core::System.
 void menu_show();
-void menu_hidden();
 
 // True while any SSH session (LibSshBackend or loopback stub) is in the
 // Connected state. Set/cleared by ui_ssh.cpp; read by factory.ino loop() as a

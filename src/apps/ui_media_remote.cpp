@@ -33,7 +33,6 @@ static lv_obj_t *volume_label = nullptr;
 static lv_timer_t *status_timer = nullptr;
 static bool last_connected = false;
 static bool last_bt_enabled = false;
-static bool kb_forward_on = false;
 
 static void disconnect_btn_cb(lv_event_t *e)
 {
@@ -41,16 +40,17 @@ static void disconnect_btn_cb(lv_event_t *e)
     hw_disconnect_ble_kb();
 }
 
+// Only installed while forwarding is on (install_kb_forward), so no extra
+// on/off flag is needed here.
 static void forward_key_cb(int state, char &c)
 {
-    if (state == 1 && kb_forward_on) {
+    if (state == 1) {
         hw_set_ble_kb_char(&c);
     }
 }
 
 static void install_kb_forward(bool on)
 {
-    kb_forward_on = on;
     hw_set_keyboard_read_callback(on ? forward_key_cb : nullptr);
 }
 
@@ -146,50 +146,14 @@ static void refresh_volume_visual()
     if (active) {
         lv_label_set_text(volume_label,
             LV_SYMBOL_MINUS "  " LV_SYMBOL_VOLUME_MAX "  " LV_SYMBOL_PLUS);
-        lv_obj_set_style_bg_color(volume_btn, lv_color_hex(0x3a2200), 0);
+        lv_obj_set_style_bg_color(volume_btn, lv_color_mix(UI_COLOR_ACCENT, UI_COLOR_SURFACE, LV_OPA_30), 0);
         lv_obj_set_style_border_opa(volume_btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(volume_btn, 2, 0);
     } else {
         lv_label_set_text(volume_label, LV_SYMBOL_VOLUME_MAX "  Volume");
-        lv_obj_set_style_bg_color(volume_btn, lv_color_hex(0x151515), 0);
+        lv_obj_set_style_bg_color(volume_btn, UI_COLOR_SURFACE, 0);
         lv_obj_set_style_border_opa(volume_btn, LV_OPA_40, 0);
         lv_obj_set_style_border_width(volume_btn, 1, 0);
-    }
-}
-
-static void volume_event_cb(lv_event_t *e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_group_t *g = lv_obj_get_group(btn);
-    if (!g) return;
-
-    // Encoder press on a non-editable widget fires both LV_EVENT_KEY (ENTER)
-    // and LV_EVENT_CLICKED. Handle the toggle in CLICKED only (works for
-    // touch too) and ignore ENTER in the key branch to avoid double-toggle.
-    if (code == LV_EVENT_CLICKED) {
-        lv_group_set_editing(g, !lv_group_get_editing(g));
-        hw_feedback();
-        refresh_volume_visual();
-    } else if (code == LV_EVENT_KEY) {
-        uint32_t key = lv_event_get_key(e);
-        if (key == LV_KEY_ENTER) return;
-        if (!lv_group_get_editing(g)) return;
-        // Scroll wheel: clockwise (NEXT/RIGHT/UP) decreases volume on the
-        // LilyGo encoder — swap to match the physical scroll direction.
-        if (key == LV_KEY_RIGHT || key == LV_KEY_UP || key == LV_KEY_NEXT) {
-            hw_feedback();
-            hw_set_ble_key(MEDIA_VOLUME_DOWN);
-            lv_event_stop_processing(e);
-        } else if (key == LV_KEY_LEFT || key == LV_KEY_DOWN
-                   || key == LV_KEY_PREV) {
-            hw_feedback();
-            hw_set_ble_key(MEDIA_VOLUME_UP);
-            lv_event_stop_processing(e);
-        }
-    } else if (code == LV_EVENT_DEFOCUSED) {
-        lv_group_set_editing(g, false);
-        refresh_volume_visual();
     }
 }
 
@@ -212,21 +176,28 @@ static lv_obj_t *make_panel(lv_obj_t *parent)
     return p;
 }
 
-static lv_obj_t *make_key_button(lv_obj_t *parent, const char *symbol,
-                                 media_key_value_t key, lv_group_t *grp)
+// Face shared by the transport keys and the volume button: SURFACE fill,
+// faint accent border that goes solid (on a dark amber face) when focused.
+static void style_key_button(lv_obj_t *btn)
 {
-    lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_flex_grow(btn, 1);
-    lv_obj_set_height(btn, lv_pct(100));
     lv_obj_set_style_radius(btn, UI_RADIUS, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x151515), 0);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_width(btn, 1, 0);
     lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
     lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUSED);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x2a1a00), LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(btn, ui_palette().accent_well, LV_STATE_FOCUSED);
+}
+
+static lv_obj_t *make_key_button(lv_obj_t *parent, const char *symbol,
+                                 media_key_value_t key, lv_group_t *grp)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_flex_grow(btn, 1);
+    lv_obj_set_height(btn, lv_pct(100));
+    style_key_button(btn);
 
     lv_obj_t *lbl = lv_label_create(btn);
     lv_label_set_text(lbl, symbol);
@@ -272,8 +243,12 @@ static lv_obj_t *make_toggle_row(lv_obj_t *parent, const char *label_txt,
     lv_obj_set_width(btn, 54);
     lv_obj_set_height(btn, 22);
     lv_obj_set_style_radius(btn, UI_RADIUS, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x151515), 0);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_color(btn, UI_COLOR_ACCENT, LV_STATE_CHECKED);
+    // The state label inherits these: page text at rest, on-accent text on
+    // the accent fill (white-on-surface is unreadable in the light styles).
+    lv_obj_set_style_text_color(btn, UI_COLOR_FG, 0);
+    lv_obj_set_style_text_color(btn, UI_COLOR_ON_ACCENT, LV_STATE_CHECKED);
     lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_width(btn, 1, 0);
     lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
@@ -282,7 +257,6 @@ static lv_obj_t *make_toggle_row(lv_obj_t *parent, const char *label_txt,
 
     lv_obj_t *state_lbl = lv_label_create(btn);
     lv_label_set_text(state_lbl, checked ? " On " : " Off ");
-    lv_obj_set_style_text_color(state_lbl, UI_COLOR_FG, 0);
     lv_obj_center(state_lbl);
     lv_obj_set_user_data(btn, state_lbl);
 
@@ -360,24 +334,14 @@ static void ui_media_remote_enter(lv_obj_t *parent)
     volume_btn = lv_btn_create(parent);
     lv_obj_set_width(volume_btn, lv_pct(100));
     lv_obj_set_height(volume_btn, 38);
-    lv_obj_set_style_radius(volume_btn, UI_RADIUS, 0);
-    lv_obj_set_style_bg_color(volume_btn, lv_color_hex(0x151515), 0);
-    lv_obj_set_style_bg_opa(volume_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(volume_btn, UI_COLOR_ACCENT, 0);
-    lv_obj_set_style_border_width(volume_btn, 1, 0);
-    lv_obj_set_style_border_opa(volume_btn, LV_OPA_40, 0);
-    lv_obj_set_style_border_width(volume_btn, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_opa(volume_btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(volume_btn, lv_color_hex(0x2a1a00), LV_STATE_FOCUSED);
+    style_key_button(volume_btn);
 
     volume_label = lv_label_create(volume_btn);
     lv_obj_set_style_text_color(volume_label, UI_COLOR_FG, 0);
     lv_obj_set_style_text_font(volume_label, lv_theme_get_font_large(volume_label), 0);
     lv_obj_center(volume_label);
 
-    lv_obj_add_event_cb(volume_btn, volume_event_cb, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(volume_btn, volume_event_cb, LV_EVENT_KEY, nullptr);
-    lv_obj_add_event_cb(volume_btn, volume_event_cb, LV_EVENT_DEFOCUSED, nullptr);
+    ble_volume_btn_attach(volume_btn, refresh_volume_visual, /*require_connected=*/false);
     if (grp) lv_group_add_obj(grp, volume_btn);
     refresh_volume_visual();
 

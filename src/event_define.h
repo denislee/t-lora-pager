@@ -10,5 +10,4 @@
 
 enum app_event {
     APP_EVENT_PLAY,
-    APP_EVENT_RECOVER,
 };

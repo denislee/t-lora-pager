@@ -86,16 +86,12 @@ void msc_target_cb(lv_event_t *e) {
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     local_param.msc_prefer_sd = en;
     hw_set_msc_prefer_sd(en);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " SD " : " Int ");
 }
 
 void storage_prune_cb(lv_event_t *e) {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     local_param.prune_internal = en;
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(obj);
-    if (label) lv_label_set_text(label, en ? " On " : " Off ");
 }
 
 void storage_prune_now_cb(lv_event_t *) {
@@ -165,101 +161,16 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     (void)menu;
     lv_obj_set_style_pad_row(sub_page, 2, 0);
 
-    // USB MSC Toggle — custom button (not create_toggle_btn_row) because the
-    // labels are " SD " / " Int " rather than on/off.
-    lv_obj_t *msc_row = create_text(sub_page, NULL, "USB MSC Target", LV_MENU_ITEM_BUILDER_VARIANT_2);
+    // USB MSC target: checked = SD card, unchecked = internal flash.
+    create_toggle_btn_row(sub_page, "USB MSC Target", local_param.msc_prefer_sd,
+                          msc_target_cb, nullptr, " SD ", " Int ");
+    create_toggle_btn_row(sub_page, "Limit 50 files", local_param.prune_internal, storage_prune_cb);
 
-    lv_obj_t *msc_btn = lv_btn_create(msc_row);
-    lv_obj_add_flag(msc_btn, LV_OBJ_FLAG_CHECKABLE);
-    bool msc_sd = local_param.msc_prefer_sd;
-    if (msc_sd) lv_obj_add_state(msc_btn, LV_STATE_CHECKED);
-    lv_obj_set_style_outline_width(msc_btn, 0, 0);
-    lv_obj_set_style_outline_width(msc_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_border_width(msc_btn, 0, 0);
-    lv_obj_set_style_border_width(msc_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_bg_color(msc_btn, UI_COLOR_ACCENT, LV_STATE_CHECKED);
-    lv_obj_set_width(msc_btn, 60);
-    lv_obj_t *msc_btn_label = lv_label_create(msc_btn);
-    lv_label_set_text(msc_btn_label, msc_sd ? " SD " : " Int ");
-    lv_obj_center(msc_btn_label);
-    lv_obj_set_user_data(msc_btn, msc_btn_label);
-    lv_obj_add_event_cb(msc_btn, msc_target_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_add_event_cb(msc_btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(msc_btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
-    register_subpage_group_obj(sub_page, msc_btn);
-
-    lv_obj_t *btn = create_toggle_btn_row(sub_page, "Limit 50 files", local_param.prune_internal, storage_prune_cb);
-    register_subpage_group_obj(sub_page, btn);
-
-    // Action: copy all internal files to SD.
-    lv_obj_t *copy_row = create_text(sub_page, NULL, "Copy Internal -> SD", LV_MENU_ITEM_BUILDER_VARIANT_2);
-
-    lv_obj_t *copy_btn = lv_btn_create(copy_row);
-    lv_obj_set_width(copy_btn, 60);
-    lv_obj_set_style_outline_width(copy_btn, 0, 0);
-    lv_obj_set_style_outline_width(copy_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(copy_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(copy_btn, 0, 0);
-    lv_obj_set_style_border_width(copy_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_border_width(copy_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(copy_btn, 0, 0);
-    lv_obj_set_style_shadow_width(copy_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(copy_btn, 0, LV_STATE_FOCUS_KEY);
-
-    lv_obj_t *copy_label = lv_label_create(copy_btn);
-    lv_label_set_text(copy_label, LV_SYMBOL_COPY);
-    lv_obj_center(copy_label);
-    lv_obj_add_event_cb(copy_btn, storage_copy_to_sd_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(copy_btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(copy_btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
-    register_subpage_group_obj(sub_page, copy_btn);
-
-    // Action: copy all internal+SD notes to the hub. Mirrors the on-device
-    // store so the hub becomes the source of truth for the new sync flow.
-    lv_obj_t *hub_row = create_text(sub_page, NULL, "Copy Notes -> Hub", LV_MENU_ITEM_BUILDER_VARIANT_2);
-
-    lv_obj_t *hub_btn = lv_btn_create(hub_row);
-    lv_obj_set_width(hub_btn, 60);
-    lv_obj_set_style_outline_width(hub_btn, 0, 0);
-    lv_obj_set_style_outline_width(hub_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(hub_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(hub_btn, 0, 0);
-    lv_obj_set_style_border_width(hub_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_border_width(hub_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(hub_btn, 0, 0);
-    lv_obj_set_style_shadow_width(hub_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(hub_btn, 0, LV_STATE_FOCUS_KEY);
-
-    lv_obj_t *hub_label = lv_label_create(hub_btn);
-    lv_label_set_text(hub_label, LV_SYMBOL_UPLOAD);
-    lv_obj_center(hub_label);
-    lv_obj_add_event_cb(hub_btn, storage_copy_to_hub_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(hub_btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(hub_btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
-    register_subpage_group_obj(sub_page, hub_btn);
-
-    // Action: Manual prune.
-    lv_obj_t *prune_row = create_text(sub_page, NULL, "Prune Now (Keep 50)", LV_MENU_ITEM_BUILDER_VARIANT_2);
-
-    lv_obj_t *prune_btn = lv_btn_create(prune_row);
-    lv_obj_set_width(prune_btn, 60);
-    lv_obj_set_style_outline_width(prune_btn, 0, 0);
-    lv_obj_set_style_outline_width(prune_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(prune_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(prune_btn, 0, 0);
-    lv_obj_set_style_border_width(prune_btn, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_border_width(prune_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(prune_btn, 0, 0);
-    lv_obj_set_style_shadow_width(prune_btn, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_width(prune_btn, 0, LV_STATE_FOCUS_KEY);
-
-    lv_obj_t *prune_label = lv_label_create(prune_btn);
-    lv_label_set_text(prune_label, LV_SYMBOL_TRASH);
-    lv_obj_center(prune_label);
-    lv_obj_add_event_cb(prune_btn, storage_prune_now_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(prune_btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(prune_btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
-    register_subpage_group_obj(sub_page, prune_btn);
+    settings_action_row(sub_page, "Copy Internal -> SD", LV_SYMBOL_COPY, storage_copy_to_sd_cb);
+    // Copy all internal+SD notes to the hub. Mirrors the on-device store so
+    // the hub becomes the source of truth for the new sync flow.
+    settings_action_row(sub_page, "Copy Notes -> Hub", LV_SYMBOL_UPLOAD, storage_copy_to_hub_cb);
+    settings_action_row(sub_page, "Prune Now (Keep 50)", LV_SYMBOL_TRASH, storage_prune_now_cb);
 }
 
 } // namespace storage_cfg

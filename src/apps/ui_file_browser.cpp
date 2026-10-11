@@ -53,13 +53,6 @@ static inline bool ends_with_ci(const std::string &s, const char *suffix)
     return true;
 }
 
-struct Entry {
-    std::string path;
-    bool is_dir;
-    uint32_t mtime;
-    uint32_t size;
-};
-
 static lv_obj_t *menu = NULL;
 static lv_obj_t *parent_obj = NULL;
 static lv_obj_t *file_list = NULL;
@@ -80,9 +73,9 @@ static std::string current_dir = "/";
 // filter-button toggle re-filters in place instead of re-scanning the disk
 // (which, on SD, holds the SPI lock for the whole openNextFile walk).
 static std::vector<HwDirEntry> raw_cache;
-static std::vector<Entry> all_entries;
-// Backing storage for button user_data — keeps c_str() stable while list is shown.
-static std::vector<std::string> path_store;
+// Filtered + sorted view of raw_cache that the list renders. Each row button's
+// user_data is its index here + 1 (0 = the ".." row / not an entry row).
+static std::vector<HwDirEntry> all_entries;
 
 // Cap on rendered rows: each entry spawns ~3 LVGL objects, and a huge dir would
 // otherwise freeze the UI (and stall the SPI-lock-held flush) building them all.
@@ -114,7 +107,7 @@ static void apply_filter()
 
     for (const auto &r : raw_cache) {
         // Hide tasks.txt bookkeeping file from the browser.
-        if (!r.is_dir && (r.path == "tasks.txt" || r.path == "/tasks.txt")) continue;
+        if (!r.is_dir && notes_path_is_tasks_file(r.path.c_str())) continue;
 
         // Apply UI-side filter to files; folders are always shown.
         if (!r.is_dir) {
@@ -122,11 +115,11 @@ static void apply_filter()
             if (current_filter == FILTER_TXT && !is_txt) continue;
             if (current_filter == FILTER_NON_TXT && is_txt) continue;
         }
-        all_entries.push_back({r.path, r.is_dir, r.mtime, r.size});
+        all_entries.push_back(r);
     }
 
     std::sort(all_entries.begin(), all_entries.end(),
-              [](const Entry &a, const Entry &b) {
+              [](const HwDirEntry &a, const HwDirEntry &b) {
                   if (a.is_dir != b.is_dir) return a.is_dir;
                   if (a.mtime != b.mtime) return a.mtime > b.mtime;
                   return a.path < b.path;
@@ -173,6 +166,16 @@ static std::string display_name(const std::string &path)
 
 static void refresh_ui();
 
+// The entry a list row stands for, or nullptr for the ".." row and anything
+// that isn't a row of file_list.
+static const HwDirEntry *row_entry(lv_obj_t *btn)
+{
+    if (!btn || lv_obj_get_parent(btn) != file_list) return nullptr;
+    intptr_t idx = (intptr_t)lv_obj_get_user_data(btn) - 1;
+    if (idx < 0 || idx >= (intptr_t)all_entries.size()) return nullptr;
+    return &all_entries[idx];
+}
+
 static void file_click_open_now(const std::string &path)
 {
     core::AppManager::getInstance().switchApp("Editor", parent_obj);
@@ -188,12 +191,10 @@ static void file_click_after_unlock(bool ok, void *ud)
 
 static void file_click_cb(lv_event_t *e)
 {
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    const char *full = (const char *)lv_obj_get_user_data(btn);
-    if (!full) return;
+    const HwDirEntry *ent = row_entry((lv_obj_t *)lv_event_get_target(e));
+    if (!ent) return;
 
-    std::string path = full;
-    if (path.empty()) return;
+    std::string path = join_path(current_dir, ent->path);
     if (path[0] != '/') path = "/" + path;
 
     /* Gate the open behind the unlock modal when encryption is enabled and
@@ -210,10 +211,9 @@ static void file_click_cb(lv_event_t *e)
 
 static void folder_click_cb(lv_event_t *e)
 {
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    const char *full = (const char *)lv_obj_get_user_data(btn);
-    if (!full) return;
-    current_dir = full;
+    const HwDirEntry *ent = row_entry((lv_obj_t *)lv_event_get_target(e));
+    if (!ent) return;
+    current_dir = join_path(current_dir, ent->path);
     load_entries();
     refresh_ui();
 }
@@ -231,7 +231,7 @@ static void style_toggle_btn(lv_obj_t *btn, bool active)
     if (active) {
         lv_obj_set_style_bg_color(btn, UI_COLOR_ACCENT, LV_PART_MAIN);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_text_color(btn, UI_COLOR_FG, LV_PART_MAIN);
+        lv_obj_set_style_text_color(btn, UI_COLOR_ON_ACCENT, LV_PART_MAIN);
     } else {
         lv_obj_set_style_bg_opa(btn, LV_OPA_TRANSP, LV_PART_MAIN);
         lv_obj_set_style_text_color(btn, UI_COLOR_MUTED, LV_PART_MAIN);
@@ -245,7 +245,6 @@ static void refresh_ui()
 {
     if (!file_list) return;
     lv_obj_clean(file_list);
-    path_store.clear();
 
     int total = (int)all_entries.size();
     int render_count = total > kMaxRenderedRows ? kMaxRenderedRows : total;
@@ -256,10 +255,6 @@ static void refresh_ui()
     style_toggle_btn(filter_btn_txt,     current_filter == FILTER_TXT);
     style_toggle_btn(filter_btn_non_txt, current_filter == FILTER_NON_TXT);
     style_toggle_btn(filter_btn_all,     current_filter == FILTER_ALL);
-
-    // Reserve up-front so c_str() pointers stay stable across push_backs.
-    // Only rendered rows carry user_data; the ".." button has none.
-    path_store.reserve(render_count);
 
     if (show_parent) {
         lv_obj_t *btn = lv_list_add_btn(file_list, LV_SYMBOL_LEFT, "..");
@@ -275,47 +270,20 @@ static void refresh_ui()
         lv_obj_set_width(empty, LV_PCT(100));
         lv_obj_set_style_pad_all(empty, 16, 0);
     } else {
-        // Pre-size path_store so c_str() pointers stay valid for user_data.
         for (int i = 0; i < render_count; ++i) {
-            path_store.push_back(join_path(current_dir, all_entries[i].path));
-        }
-
-        for (int i = 0; i < render_count; ++i) {
-            const Entry &ent = all_entries[i];
+            const HwDirEntry &ent = all_entries[i];
             std::string label = display_name(ent.path);
             const char *icon = ent.is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE;
-            lv_obj_t *btn = lv_list_add_btn(file_list, icon, label.c_str());
-            lv_obj_set_user_data(btn, (void *)path_store[i].c_str());
-            if (!ent.is_dir) {
-                lv_obj_add_event_cb(btn, file_click_cb, LV_EVENT_CLICKED, NULL);
-            } else {
-                lv_obj_add_event_cb(btn, folder_click_cb, LV_EVENT_CLICKED, NULL);
-            }
-            lv_group_add_obj(lv_group_get_default(), btn);
-
-            lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
-            lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-            lv_obj_t *icon_obj = lv_obj_get_child(btn, 0);
-            lv_obj_t *lbl = lv_obj_get_child(btn, 1);
-            if (icon_obj) {
-                lv_obj_set_width(icon_obj, 20);
-                lv_obj_set_style_text_align(icon_obj, LV_TEXT_ALIGN_CENTER, 0);
-            }
-            if (lbl) {
-                lv_obj_set_width(lbl, 0);
-                lv_obj_set_flex_grow(lbl, 1);
-                lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
-            }
-
             // Trailing column: size (files only).
-            if (!ent.is_dir) {
-                lv_obj_t *size_lbl = lv_label_create(btn);
-                lv_label_set_text(size_lbl, format_size(ent.size).c_str());
-                lv_obj_set_style_text_color(size_lbl, UI_COLOR_MUTED, 0);
-                lv_obj_set_style_text_font(size_lbl, &lv_font_montserrat_10, 0);
-                lv_obj_set_style_pad_left(size_lbl, 8, 0);
-            }
+            std::string size = ent.is_dir ? std::string() : format_size(ent.size);
+            lv_obj_t *btn = ui_list_add_meta_row(file_list, icon, label.c_str(),
+                                                 ent.is_dir ? nullptr : size.c_str(),
+                                                 &lv_font_montserrat_10);
+            lv_obj_set_style_text_align(lv_obj_get_child(btn, 0), LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_user_data(btn, (void *)(intptr_t)(i + 1));
+            lv_obj_add_event_cb(btn, ent.is_dir ? folder_click_cb : file_click_cb,
+                                LV_EVENT_CLICKED, NULL);
+            lv_group_add_obj(lv_group_get_default(), btn);
         }
 
         // Non-focusable footer when the directory exceeds the render cap.
@@ -362,19 +330,15 @@ static void filter_click_cb(lv_event_t *e)
     refresh_ui();
 }
 
-static void back_event_handler(lv_event_t *e)
+static void do_exit()
 {
-    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    if (lv_menu_back_btn_is_root(menu, obj)) {
-        ui_file_browser_exit(NULL);
-        menu_show();
-    }
+    ui_file_browser_exit(NULL);
+    menu_show();
 }
 
 static void exit_btn_cb(lv_event_t *e)
 {
-    ui_file_browser_exit(NULL);
-    menu_show();
+    do_exit();
 }
 
 static lv_obj_t *make_side_btn(lv_obj_t *parent, const char *icon, const char *txt,
@@ -424,15 +388,9 @@ struct DeleteCtx {
     bool use_sd;
 };
 
-static void delete_msgbox_cb(lv_event_t *e)
+static void delete_confirm_cb(bool confirmed, void *ud)
 {
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t *label = lv_obj_get_child(btn, 0);
-    const char *text = lv_label_get_text(label);
-    bool confirmed = (strcmp(text, "Yes") == 0);
-    lv_obj_t *mbox_to_del = lv_obj_get_parent(lv_obj_get_parent(btn));
-
-    DeleteCtx *ctx = (DeleteCtx *)lv_event_get_user_data(e);
+    DeleteCtx *ctx = (DeleteCtx *)ud;
 
     if (confirmed && ctx) {
         if (hw_delete_path(ctx->path.c_str(), ctx->use_sd)) {
@@ -444,13 +402,11 @@ static void delete_msgbox_cb(lv_event_t *e)
         }
     }
 
-    destroy_msgbox(mbox_to_del);
     delete ctx;
 }
 
 static void show_delete_confirm(const std::string &path, bool is_dir)
 {
-    static const char *btns[] = {"Yes", "No", ""};
     char msg[200];
     if (is_dir) {
         snprintf(msg, sizeof(msg), "Delete folder and all contents?\n%s", path.c_str());
@@ -459,7 +415,7 @@ static void show_delete_confirm(const std::string &path, bool is_dir)
     }
 
     DeleteCtx *ctx = new DeleteCtx{path, is_dir, current_source == SOURCE_SD};
-    create_msgbox(NULL, "Confirm", msg, btns, delete_msgbox_cb, ctx);
+    ui_confirm("Confirm", msg, delete_confirm_cb, ctx);
 }
 
 static void file_list_key_cb(lv_event_t *e)
@@ -471,16 +427,9 @@ static void file_list_key_cb(lv_event_t *e)
     lv_obj_t *focused = lv_group_get_focused(g);
     if (!focused) return;
 
-    const char *full = (const char *)lv_obj_get_user_data(focused);
-    if (!full) return;
-
-    std::string path_str = full;
-    for (const auto &ent : all_entries) {
-        if (join_path(current_dir, ent.path) == path_str) {
-            show_delete_confirm(path_str, ent.is_dir);
-            return;
-        }
-    }
+    const HwDirEntry *ent = row_entry(focused);
+    if (!ent) return;
+    show_delete_confirm(join_path(current_dir, ent->path), ent->is_dir);
 }
 
 void ui_file_browser_enter(lv_obj_t *parent)
@@ -493,7 +442,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
     current_source = SOURCE_INTERNAL;
     current_dir = "/";
 
-    menu = create_menu(parent, back_event_handler);
+    menu = create_menu(parent, nullptr);
 
     main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_COLUMN);
@@ -561,8 +510,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
 
 #ifdef USING_TOUCHPAD
     quit_btn = create_floating_button([](lv_event_t *e) {
-        ui_file_browser_exit(NULL);
-        menu_show();
+        do_exit();
     }, NULL);
 #endif
 }
@@ -587,7 +535,6 @@ void ui_file_browser_exit(lv_obj_t *parent)
     filter_btn_txt = NULL;
     filter_btn_non_txt = NULL;
     filter_btn_all = NULL;
-    path_store.clear();
     all_entries.clear();
     raw_cache.clear();
 }

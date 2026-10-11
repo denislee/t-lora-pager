@@ -40,23 +40,6 @@ void hw_radio_begin() {}
 
 int16_t hw_set_radio_params(radio_params_t &params)
 {
-    RADIO_LOG("Set radio params:\n");
-    RADIO_LOG("Frequency:%.2f MHz\n", params.freq);
-    RADIO_LOG("Bandwidth:%.2f KHz\n", params.bandwidth);
-    RADIO_LOG("TxPower:%u dBm\n", params.power);
-    RADIO_LOG("Interval:%u ms\n", params.interval);
-    RADIO_LOG("CR:%u \n", params.cr);
-    RADIO_LOG("SF:%u \n", params.sf);
-    RADIO_LOG("SyncWord:%u \n", params.syncWord);
-    RADIO_LOG("Mode: ");
-    switch (params.mode) {
-    case RADIO_DISABLE: RADIO_LOG("RADIO_DISABLE\n"); break;
-    case RADIO_TX:      RADIO_LOG("RADIO_TX\n");      break;
-    case RADIO_RX:      RADIO_LOG("RADIO_RX\n");      break;
-    case RADIO_CW:      RADIO_LOG("RADIO_CW\n");      break;
-    default:            break;
-    }
-
 #ifdef ARDUINO
     core::ScopedSpiLock lock;
     return radio_chip::configure(params);

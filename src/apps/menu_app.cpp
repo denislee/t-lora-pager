@@ -14,12 +14,12 @@
  * halo on focus so the selected tile reads at a glance from across the room.
  */
 #include "menu_app.h"
-#include "menu_glance.h"
 #include "../core/system.h"
-#include "../core/scoped_lock.h"
+#include "../core/one_shot_job.h"
 #include "../ui_define.h"
 #include "../hal/wireless.h"
 #include "../hal/hub.h"
+#include "../hal/nvs.h"
 #include "app_registry.h"
 #include <vector>
 #include <string>
@@ -73,13 +73,15 @@ constexpr int kItemCount = sizeof(kItems) / sizeof(kItems[0]);
 
 // Keeps the badge labels alive for the lifetime of the menu view so the
 // periodic timer can refresh them. Reset each time the menu re-mounts.
-static std::vector<lv_obj_t*> s_badge_labels;
-static std::vector<BadgeFn>   s_badge_fns;
-// P4.13a: cached count per badge — lv_label_set_text in LVGL 9 calls
-// lv_obj_invalidate() unconditionally, so an unchanged badge forces a
-// dirty-rect + SPI flush every 2 s. Initialised to -1 so the first tick
-// always writes. Reset in parallel with s_badge_labels.
-static std::vector<int>       s_badge_cached_counts;
+struct Badge {
+    lv_obj_t* label;
+    BadgeFn   fn;
+    // P4.13a: cached count — lv_label_set_text in LVGL 9 calls
+    // lv_obj_invalidate() unconditionally, so an unchanged badge forces a
+    // dirty-rect + SPI flush every 2 s. -1 so the first tick always writes.
+    int       cached_count;
+};
+static std::vector<Badge> s_badges;
 static lv_timer_t* s_badge_timer = nullptr;
 
 // Tiles whose backing app needs an active WiFi connection — greyed out and
@@ -119,16 +121,13 @@ static void format_badge_text(int n, char *buf, size_t cap) {
 
 static void update_badges(lv_timer_t *t) {
     (void)t;
-    for (size_t i = 0; i < s_badge_labels.size(); i++) {
-        lv_obj_t *lbl = s_badge_labels[i];
+    for (Badge &b : s_badges) {
+        lv_obj_t *lbl = b.label;
         if (!lbl) continue;
-        int n = s_badge_fns[i] ? s_badge_fns[i]() : 0;
+        int n = b.fn ? b.fn() : 0;
         // P4.13a: skip the label write when the count hasn't changed.
-        // lv_label_set_text in LVGL 9 calls lv_obj_invalidate()
-        // unconditionally, forcing a dirty-rect + SPI flush on every tick.
-        int cached = (i < s_badge_cached_counts.size()) ? s_badge_cached_counts[i] : -1;
-        if (n == cached) continue;
-        if (i < s_badge_cached_counts.size()) s_badge_cached_counts[i] = n;
+        if (n == b.cached_count) continue;
+        b.cached_count = n;
         if (n > 0) {
             char buf[8];
             format_badge_text(n, buf, sizeof(buf));
@@ -155,8 +154,7 @@ const lv_font_t* pick_icon_font(int32_t tile_h) {
 // Resting background for tiles and pills — a hair above pure black so the
 // accent border stays visible on OLED/AMOLED panels without bleeding into the
 // page background.
-static inline lv_color_t tile_rest_bg()   { return lv_color_hex(0x15171d); }
-static inline lv_color_t pill_rest_bg()   { return lv_color_hex(0x15171d); }
+static inline lv_color_t rest_bg() { return ui_color_surface(); }
 
 // ---- Quick toggles (WiFi / BT) -------------------------------------------
 
@@ -178,13 +176,30 @@ static void apply_toggle_style(lv_obj_t* btn, bool on) {
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
         lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_text_color(btn, UI_COLOR_FG, 0);
+        lv_obj_set_style_text_color(btn, UI_COLOR_ON_ACCENT, 0);
     } else {
-        lv_obj_set_style_bg_color(btn, pill_rest_bg(), 0);
+        lv_obj_set_style_bg_color(btn, rest_bg(), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(btn, UI_COLOR_MUTED, 0);
         lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
         lv_obj_set_style_text_color(btn, UI_COLOR_MUTED, 0);
+    }
+    // Pixel Iso: the pill's lit top/left edge follows its state instead of the
+    // muted resting border.
+    if (ui_style_is_pixel()) {
+        lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(btn,
+            lv_color_lighten(on ? UI_COLOR_ACCENT : rest_bg(), LV_OPA_30), 0);
+    }
+    // Hotel / BeOS: the chrome keyline (Hotel's 2px black ring, BeOS's 1px
+    // grey frame) plus a top-lit gradient, matching the theme's buttons.
+    if (ui_style_has_chrome()) {
+        const ui_palette_t &pal = ui_palette();
+        lv_obj_set_style_bg_grad_color(btn, on ? lv_color_darken(UI_COLOR_ACCENT, LV_OPA_20)
+                                               : lv_color_darken(rest_bg(), pal.grad_darken), 0);
+        lv_obj_set_style_border_color(btn, ui_color_outline(), 0);
+        lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(btn, pal.keyline_w, 0);
     }
 }
 
@@ -207,7 +222,7 @@ static void settings_click_cb(lv_event_t* e) {
         core::System::getInstance().getAppPanel());
 }
 
-// ---- Internet check pill -------------------------------------------------
+// ---- Internet check ('p' home shortcut) ----------------------------------
 // Quick TCP probe to 1.1.1.1:53 (mirrors Settings → Connectivity → Test
 // Internet). The probe blocks for up to 3 s, so it runs on a one-shot task
 // behind a modal spinner; a drain timer shows the rtt/error popup when it
@@ -233,99 +248,62 @@ static void show_inet_result(bool ok, uint32_t rtt_ms, const std::string &err) {
 }
 
 #ifdef ARDUINO
-static ui_loading_t  s_inet_loading;
-static lv_timer_t*   s_inet_timer   = nullptr;
-static volatile bool s_inet_running = false;
-static volatile bool s_inet_done    = false;
-static bool          s_inet_ok      = false;   // \.
-static uint32_t      s_inet_rtt     = 0;        //  > guarded by the instance lock
-static std::string   s_inet_err;                // /
-
-// Worker: the 3 s TCP probe off the LVGL thread. Publishes into the shared
-// statics under the instance lock, then clears the running flag and exits.
-static void inet_check_task(void *arg) {
-    (void)arg;
-    uint32_t rtt = 0;
+struct InetCheckResult {
+    bool        ok = false;
+    uint32_t    rtt_ms = 0;
     std::string err;
-    bool ok = hw_ping_internet("1.1.1.1", 53, 3000, &rtt, &err);
-    {
-        core::ScopedInstanceLock lock;
-        s_inet_ok   = ok;
-        s_inet_rtt  = rtt;
-        s_inet_err  = err;
-        s_inet_done = true;
-    }
-    s_inet_running = false;
-    vTaskDelete(NULL);
+};
+
+static ui_loading_t s_inet_loading;
+
+// Drain callback (LVGL thread): close the spinner and show the popup.
+static void inet_check_done(InetCheckResult &r) {
+    ui_loading_close(&s_inet_loading);
+    show_inet_result(r.ok, r.rtt_ms, r.err);
 }
+
+// The 3 s TCP probe runs off the LVGL thread on this job.
+static core::OneShotJob<InetCheckResult> s_inet_job(inet_check_done);
 
 // Tear down the in-flight check's UI (drain timer + spinner). A worker still
-// running just finishes into the statics harmlessly — nothing here is touched
-// from the task. Called by the drain on completion and by MenuApp::onStop().
+// running is detached and frees its own result. Called by MenuApp::onStop().
 static void inet_check_teardown() {
-    if (s_inet_timer) { lv_timer_del(s_inet_timer); s_inet_timer = nullptr; }
+    s_inet_job.teardown();
     ui_loading_close(&s_inet_loading);
-}
-
-// LVGL timer: polls for the worker's result, then closes the spinner and shows
-// the popup. Runs inside lv_timer_handler(), which already holds the instance
-// lock the worker publishes under — so read the statics directly. Re-taking the
-// (non-recursive) instance lock here would deadlock; the held lock also means
-// the worker can't be mid-write while this reads (it blocks on the same mutex).
-static void inet_check_drain(lv_timer_t *t) {
-    (void)t;
-    if (!s_inet_done) return;
-    s_inet_done = false;
-
-    bool ok = s_inet_ok;
-    uint32_t rtt = s_inet_rtt;
-    std::string err = s_inet_err;
-    inet_check_teardown();
-    show_inet_result(ok, rtt, err);
 }
 #endif
 
-static void run_internet_check(lv_obj_t* btn) {
-    (void)btn;
+static void run_internet_check() {
     if (!hw_get_wifi_connected()) {
         ui_result_show("Internet", "Wi-Fi is not connected.", nullptr, 0);
         return;
     }
 #ifdef ARDUINO
-    if (s_inet_running || s_inet_timer) return;   // one check at a time
+    if (s_inet_job.busy()) return;   // one check at a time
 
     ui_loading_open(&s_inet_loading, "Internet", "Checking 1.1.1.1...");
-    s_inet_done    = false;
-    s_inet_running = true;
-    if (xTaskCreate(inet_check_task, "inet_chk", 4096, nullptr, 1, nullptr) != pdPASS) {
-        // Task slots exhausted — fall back to a synchronous probe so the pill
+    auto started = s_inet_job.start([]() {
+        InetCheckResult *r = new InetCheckResult();
+        r->ok = hw_ping_internet(&r->rtt_ms, &r->err);
+        return r;
+    }, 4096, "inet_chk", 1);
+    if (started == core::OneShotJob<InetCheckResult>::Start::Failed) {
+        // Task slots exhausted — fall back to a synchronous probe so the check
         // still works (this path pays the old up-to-3 s UI freeze).
-        s_inet_running = false;
         ui_loading_close(&s_inet_loading);
         uint32_t rtt_ms = 0;
         std::string err;
-        bool ok = hw_ping_internet("1.1.1.1", 53, 3000, &rtt_ms, &err);
+        bool ok = hw_ping_internet(&rtt_ms, &err);
         show_inet_result(ok, rtt_ms, err);
-        return;
     }
-    s_inet_timer = lv_timer_create(inet_check_drain, 100, nullptr);
 #else
     // Emulator: no FreeRTOS task; probe inline.
     uint32_t rtt_ms = 0;
     std::string err;
-    bool ok = hw_ping_internet("1.1.1.1", 53, 3000, &rtt_ms, &err);
+    bool ok = hw_ping_internet(&rtt_ms, &err);
     show_inet_result(ok, rtt_ms, err);
 #endif
 }
-
-static void internet_check_click_cb(lv_event_t* e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    hw_feedback();
-    run_internet_check((lv_obj_t*)lv_event_get_target(e));
-}
-
-// Glance overlay lives in menu_glance.{h,cpp}. Call apps::menu::glance_show()
-// to bring up the full-screen at-a-glance readout.
 
 // ---- Media controls (BLE HID transport keys to a paired phone) -----------
 // Shown only when Bluetooth is enabled AND a BLE HID host has paired with us.
@@ -344,6 +322,8 @@ static bool media_controls_should_show() {
     return hw_get_bt_enable() && hw_get_ble_kb_connected();
 }
 
+static void refresh_volume_visual();
+
 static bool volume_is_editing() {
     if (!s_volume_btn) return false;
     lv_group_t* g = lv_obj_get_group(s_volume_btn);
@@ -351,7 +331,7 @@ static bool volume_is_editing() {
         && lv_group_get_focused(g) == s_volume_btn;
 }
 
-static void refresh_volume_visual() {
+static void refresh_volume_visual(void) {
     if (!s_volume_btn || !s_volume_icon) return;
     bool active = volume_is_editing();
     if (active) {
@@ -360,7 +340,7 @@ static void refresh_volume_visual() {
         lv_obj_set_style_border_opa(s_volume_btn, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(s_volume_icon, UI_COLOR_FG, 0);
     } else {
-        lv_obj_set_style_bg_color(s_volume_btn, pill_rest_bg(), 0);
+        lv_obj_set_style_bg_color(s_volume_btn, rest_bg(), 0);
         lv_obj_set_style_border_color(s_volume_btn, UI_COLOR_ACCENT, 0);
         lv_obj_set_style_border_opa(s_volume_btn, LV_OPA_COVER, 0);
         lv_obj_set_style_text_color(s_volume_icon, UI_COLOR_ACCENT, 0);
@@ -453,52 +433,18 @@ static void play_pause_click_cb(lv_event_t* e) {
     hw_set_ble_key(MEDIA_PLAY_PAUSE);
 }
 
-// Volume button: mirrors ui_media_remote.cpp's volume_event_cb. Click toggles
-// the group's editing mode so the encoder wheel stops navigating tiles and
-// starts sending vol±. Click again — or focus away — releases capture.
-static void volume_event_cb(lv_event_t* e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
-    lv_group_t* g = lv_obj_get_group(btn);
-    if (!g) return;
-
-    if (code == LV_EVENT_CLICKED) {
-        if (!hw_get_ble_kb_connected()) return;
-        lv_group_set_editing(g, !lv_group_get_editing(g));
-        hw_feedback();
-        refresh_volume_visual();
-    } else if (code == LV_EVENT_KEY) {
-        uint32_t key = lv_event_get_key(e);
-        if (key == LV_KEY_ENTER) return;  // avoid double-toggle with CLICKED
-        if (!lv_group_get_editing(g)) return;
-        if (!hw_get_ble_kb_connected()) return;
-        // The LilyGo encoder's clockwise detent maps to NEXT/RIGHT/UP, which
-        // the Remote app sends as VOL_DOWN so wheel direction matches the
-        // physical feel. Keep the same mapping here.
-        if (key == LV_KEY_RIGHT || key == LV_KEY_UP || key == LV_KEY_NEXT) {
-            hw_feedback();
-            hw_set_ble_key(MEDIA_VOLUME_DOWN);
-            lv_event_stop_processing(e);
-        } else if (key == LV_KEY_LEFT || key == LV_KEY_DOWN
-                   || key == LV_KEY_PREV) {
-            hw_feedback();
-            hw_set_ble_key(MEDIA_VOLUME_UP);
-            lv_event_stop_processing(e);
-        }
-    } else if (code == LV_EVENT_DEFOCUSED) {
-        lv_group_set_editing(g, false);
-        refresh_volume_visual();
-    }
-}
-
 // Home-screen single-letter shortcuts. Attached to every focusable object on
 // the home screen below; LV_EVENT_KEY only fires on the focused widget, so
 // this is dormant elsewhere in the app.
 //   d → low-power loop (real ESP lightSleep / sleep, per sleep_mode)
 //   w → toggle WiFi
-//   p → run internet ping test (same as the refresh pill)
+//   b → toggle Bluetooth
+//   p → run internet ping test
 //   n → open Notes (Editor)
 //   t → open Tasks
+//   r → open Recorder
+//   s → open Settings
+//   z → NTP time sync (WiFi must be connected)
 static void launch_app_from_home(const char* appName) {
     hw_feedback();
     core::System::getInstance().hideMenu();
@@ -524,7 +470,7 @@ static void home_shortcut_key_cb(lv_event_t* e) {
         hw_feedback();
     } else if (key == 'p' || key == 'P') {
         hw_feedback();
-        run_internet_check(nullptr);
+        run_internet_check();
     } else if (key == 'n' || key == 'N') {
         launch_app_from_home("Editor");
     } else if (key == 't' || key == 'T') {
@@ -573,20 +519,17 @@ void tile_click_cb(lv_event_t* e) {
 
 MenuApp::MenuApp() : core::App("MainMenu") {}
 
-void MenuApp::onStop() {
-    // Kill timers before the tiles are cleaned up — otherwise their next
-    // tick would touch labels that lv_obj_clean just destroyed.
+// Kill the timers and forget every cached widget pointer. Shared by onStop
+// (timers must die before the tiles are cleaned up — otherwise their next
+// tick would touch labels that lv_obj_clean just destroyed) and onStart
+// (tiles are about to be recreated, so old pointers are now invalid).
+static void reset_state() {
     if (s_badge_timer) { lv_timer_del(s_badge_timer); s_badge_timer = nullptr; }
     if (s_media_visibility_timer) {
         lv_timer_del(s_media_visibility_timer);
         s_media_visibility_timer = nullptr;
     }
-#ifdef ARDUINO
-    inet_check_teardown();   // cancel any in-flight internet-check UI (worker self-finishes)
-#endif
-    s_badge_labels.clear();
-    s_badge_fns.clear();
-    s_badge_cached_counts.clear();
+    s_badges.clear();
     s_media_buttons.clear();
     s_volume_btn = nullptr;
     s_volume_icon = nullptr;
@@ -595,13 +538,19 @@ void MenuApp::onStop() {
     s_media_last_visible = false;
     s_wifi_gated.clear();
     s_wifi_gated_last_state = -1;
+}
+
+void MenuApp::onStop() {
+#ifdef ARDUINO
+    inet_check_teardown();   // cancel any in-flight internet-check UI (worker self-finishes)
+#endif
+    reset_state();
     core::App::onStop();
 }
 
 void MenuApp::onStart(lv_obj_t* parent) {
     // Parent column: toggle strip on top, tile grid filling the rest.
-    lv_obj_set_style_bg_color(parent, UI_COLOR_BG, 0);
-    lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
+    ui_apply_backdrop(parent);
     lv_obj_set_style_border_width(parent, 0, 0);
     lv_obj_set_style_pad_all(parent, 8, 0);
     lv_obj_set_style_pad_row(parent, 6, 0);
@@ -611,24 +560,8 @@ void MenuApp::onStart(lv_obj_t* parent) {
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Reset mutable tracking: tiles are about to be recreated, old pointers
-    // are now invalid. onStop() kills the timer before the tiles go away.
-    s_badge_labels.clear();
-    s_badge_fns.clear();
-    s_badge_cached_counts.clear();
-    if (s_badge_timer) { lv_timer_del(s_badge_timer); s_badge_timer = nullptr; }
-    s_media_buttons.clear();
-    s_volume_btn = nullptr;
-    s_volume_icon = nullptr;
-    s_wifi_btn = nullptr;
-    s_bt_btn = nullptr;
-    s_media_last_visible = false;
-    s_wifi_gated.clear();
-    s_wifi_gated_last_state = -1;
-    if (s_media_visibility_timer) {
-        lv_timer_del(s_media_visibility_timer);
-        s_media_visibility_timer = nullptr;
-    }
+    // Tiles are about to be recreated; old pointers are now invalid.
+    reset_state();
 
     lv_group_t* grp = lv_group_get_default();
 
@@ -668,7 +601,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_obj_set_size(btn, toggle_h + w_extra, toggle_h);
         lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_radius(btn, toggle_h / 2, 0);
-        lv_obj_set_style_bg_color(btn, pill_rest_bg(), 0);
+        lv_obj_set_style_bg_color(btn, rest_bg(), 0);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(btn, 1, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
@@ -689,11 +622,12 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_obj_set_style_text_font(icon, &lv_font_montserrat_18, 0);
         lv_obj_center(icon);
         lv_obj_set_user_data(btn, icon);
+        ui_block(btn, rest_bg());
         return btn;
     };
 
     // --- Media pills (play/pause + volume) ---
-    // Sit just after the glance pill, created hidden; a 1 s timer shows/hides
+    // Sit first in the strip, created hidden; a 1 s timer shows/hides
     // them based on BLE HID pairing state.
     lv_obj_t* play_btn = make_pill(toggle_bar, LV_SYMBOL_PLAY, 14);
     lv_obj_set_style_border_color(play_btn, UI_COLOR_ACCENT, 0);
@@ -704,7 +638,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
     // Add to the group here so lv_group_focus_next/prev can skip them via the
     // HIDDEN flag while BLE is disconnected. Registering before the wifi/bt
     // toggles and app tiles keeps nav order matching the physical left-to-
-    // right layout (glance pill was added first, just above).
+    // right layout.
     if (grp) lv_group_add_obj(grp, play_btn);
     s_media_buttons.push_back(play_btn);
 
@@ -713,9 +647,9 @@ void MenuApp::onStart(lv_obj_t* parent) {
     lv_obj_set_style_border_opa(s_volume_btn, LV_OPA_60, 0);
     s_volume_icon = (lv_obj_t*)lv_obj_get_user_data(s_volume_btn);
     lv_obj_set_style_text_color(s_volume_icon, UI_COLOR_ACCENT, 0);
-    lv_obj_add_event_cb(s_volume_btn, volume_event_cb, LV_EVENT_CLICKED, nullptr);
-    lv_obj_add_event_cb(s_volume_btn, volume_event_cb, LV_EVENT_KEY, nullptr);
-    lv_obj_add_event_cb(s_volume_btn, volume_event_cb, LV_EVENT_DEFOCUSED, nullptr);
+    // Same capture-the-wheel volume control as the Remote app; inert until
+    // a phone is connected.
+    ble_volume_btn_attach(s_volume_btn, refresh_volume_visual, /*require_connected=*/true);
     if (grp) lv_group_add_obj(grp, s_volume_btn);
     s_media_buttons.push_back(s_volume_btn);
 
@@ -758,6 +692,9 @@ void MenuApp::onStart(lv_obj_t* parent) {
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    // Pixel Iso / Hotel / BeOS: the extrusion spills past the tile bounds into
+    // the panel padding, so let it draw outside the grid container.
+    if (ui_style_is_pixel() || ui_style_has_chrome()) lv_obj_add_flag(grid, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     lv_obj_update_layout(parent);
     int32_t grid_h = lv_obj_get_content_height(grid);
@@ -780,7 +717,9 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_label_set_text(hint, "No apps on home.\nSettings " LV_SYMBOL_RIGHT
                                 " Home Apps to enable.");
         lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_color(hint, UI_COLOR_MUTED, 0);
+        // Drawn straight on the backdrop: muted grey, or white on the BeOS
+        // desktop blue where the grey is illegible.
+        lv_obj_set_style_text_color(hint, ui_palette().on_backdrop, 0);
         lv_obj_center(hint);
         // Still hand focus somewhere reachable so the encoder isn't stranded.
         if (grp && lv_obj_get_child_count(toggle_bar) > 0) {
@@ -832,7 +771,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
         // Resting look: near-black fill with a faint muted border. All tiles
         // share the same neutral chrome so the grid reads as one surface.
         lv_obj_set_style_radius(tile, 14, 0);
-        lv_obj_set_style_bg_color(tile, tile_rest_bg(), 0);
+        lv_obj_set_style_bg_color(tile, rest_bg(), 0);
         lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
         lv_obj_set_style_border_color(tile, UI_COLOR_MUTED, 0);
         lv_obj_set_style_border_width(tile, 1, 0);
@@ -852,8 +791,9 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_obj_set_style_outline_pad(tile, 2, LV_STATE_FOCUSED);
 
         // Pressed: brief flash via a slightly lighter neutral fill.
-        lv_obj_set_style_bg_color(tile, lv_color_hex(0x22252d),
+        lv_obj_set_style_bg_color(tile, lv_color_mix(UI_COLOR_FG, rest_bg(), LV_OPA_10),
                                   LV_STATE_PRESSED);
+        ui_block(tile, rest_bg());
 
         lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER,
@@ -893,15 +833,13 @@ void MenuApp::onStart(lv_obj_t* parent) {
             lv_obj_align(badge, LV_ALIGN_TOP_RIGHT, -2, 2);
             lv_obj_set_style_bg_color(badge, lv_palette_main(LV_PALETTE_RED), 0);
             lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
-            lv_obj_set_style_text_color(badge, UI_COLOR_FG, 0);
+            lv_obj_set_style_text_color(badge, UI_COLOR_ON_ACCENT, 0);
             lv_obj_set_style_text_font(badge, &lv_font_montserrat_14, 0);
-            lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_radius(badge, ui_palette().pill_radius, 0);
             lv_obj_set_style_pad_hor(badge, 5, 0);
             lv_obj_set_style_pad_ver(badge, 1, 0);
             lv_obj_add_flag(badge, LV_OBJ_FLAG_HIDDEN);
-            s_badge_labels.push_back(badge);
-            s_badge_fns.push_back(item.badge_fn);
-            s_badge_cached_counts.push_back(-1); // -1 = never written
+            s_badges.push_back({badge, item.badge_fn, -1}); // -1 = never written
         }
     }
 
@@ -913,7 +851,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
 
     // Populate badges immediately, then refresh on a slow tick so the menu
     // reflects unread counts that arrive while it's open.
-    if (!s_badge_labels.empty()) {
+    if (!s_badges.empty()) {
         update_badges(nullptr);
         s_badge_timer = lv_timer_create(update_badges, 2000, nullptr);
     }
@@ -935,7 +873,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
             lv_timer_create(media_visibility_tick, 1000, nullptr);
     }
 
-    // Wire the home-screen letter shortcuts ('d'/'l'/'w'/'b'/'p'/...) on every
+    // Wire the home-screen letter shortcuts ('d'/'w'/'b'/'p'/...) on every
     // focusable object — LV_EVENT_KEY fires only on the focused widget.
     // LV_EVENT_KEY fires on the focused widget only, so attaching to each
     // group member is the way to make the shortcut work regardless of which
@@ -959,7 +897,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
 namespace {
 
 // NVS keys are capped at 15 chars including the null. "v_" prefix keeps us
-// well clear of the limit (longest current appName is "Recordings" → 12).
+// well clear of the limit (longest current appName is "Telegram" → 10).
 constexpr const char *kHomeAppsNs = "homeapps";
 
 void make_vis_key(const char *appName, char out[16]) {
@@ -1009,16 +947,9 @@ void home_apps_set_visible(int idx, bool on) {
     if (idx < 0 || idx >= kItemCount) return;
     if (!s_vis_loaded) load_vis_cache();
     s_vis_cache[idx] = on ? 1 : 0;
-#ifdef ARDUINO
-    Preferences p;
-    if (!p.begin(kHomeAppsNs, false)) return;
     char key[16];
     make_vis_key(kItems[idx].appName, key);
-    p.putBool(key, on);
-    p.end();
-#else
-    (void)on;
-#endif
+    hal::nvs_set_bool(kHomeAppsNs, key, on);
 }
 
 } // namespace apps

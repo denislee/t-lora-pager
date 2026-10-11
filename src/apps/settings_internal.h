@@ -1,21 +1,23 @@
 /**
  * @file      settings_internal.h
- * @brief     Private header shared between ui_settings.cpp and the split-out
- *            Settings sub-config files (settings_weather.cpp,
- *            settings_telegram.cpp, settings_notes_sync.cpp).
+ * @brief     Private header shared between ui_settings.cpp and the 12
+ *            split-out Settings subpage files (settings_*.cpp).
  *
  * Not a public API — do NOT include from anywhere else. The settings app is
- * conceptually one module; the split exists only to keep ui_settings.cpp
- * from tipping past 3,000 lines.
+ * conceptually one module; the split keeps each subpage in its own TU so
+ * ui_settings.cpp stays the page wiring only.
  *
  * Contracts:
- *  - `register_subpage_group_obj` and `create_toggle_btn_row` live in
- *    ui_settings.cpp with external linkage so each split-out TU can wire
- *    its buttons into the shared focus-group tracking.
- *  - Each sub-config namespace exposes `build_subpage()` (entry point stored
- *    on the LVGL page's user_data), `set_sub_page()` (called by
- *    create_subpage_*), and `reset_state()` (called from ui_sys_exit to
- *    clear cached LVGL pointers before the menu is deleted).
+ *  - `register_subpage_group_obj` and the row helpers
+ *    (`create_toggle_btn_row`, `settings_kv_row`, `settings_action_row`)
+ *    live in ui_settings.cpp with external linkage so each split-out TU can
+ *    wire its widgets into the shared focus-group tracking.
+ *  - Each sub-config namespace exposes `build_subpage()` (entry point listed
+ *    in ui_settings.cpp's kTiles table and stored on the LVGL page's
+ *    user_data), optionally `set_sub_page()` (also listed in kTiles, for
+ *    subpages that rebuild themselves in place), and `reset_state()`
+ *    (called from ui_sys_exit to clear cached LVGL pointers before the
+ *    menu is deleted).
  *  - The `weather_*` and `timezone_*` forward declarations refer to symbols
  *    defined in ui_weather.cpp / ui_time_sync.cpp — those modules predate
  *    the split and still own the storage and geocoding logic.
@@ -30,24 +32,52 @@
 
 // --- Shared helpers implemented in ui_settings.cpp ---
 void register_subpage_group_obj(lv_obj_t *page, lv_obj_t *obj);
-lv_obj_t *create_toggle_btn_row(lv_obj_t *parent, const char *txt,
-                                bool initial_state, lv_event_cb_t cb);
+// "label ...... [ On ]" row on `page`. The checkable button is registered
+// with `page`'s focus group, `cb` fires on LV_EVENT_VALUE_CHANGED with
+// `user_data` as the event user_data, and the button label flips between
+// on_txt/off_txt by itself (after `cb`, so a cb that clears
+// LV_STATE_CHECKED to reject the change shows off_txt). Returns the button.
+lv_obj_t *create_toggle_btn_row(lv_obj_t *page, const char *txt,
+                                bool initial_state, lv_event_cb_t cb,
+                                void *user_data = nullptr,
+                                const char *on_txt = " On ",
+                                const char *off_txt = " Off ");
+// Read-only "key ........ value" row (muted key, value truncated with an
+// ellipsis past val_max_pct of the row), focusable so the encoder can
+// scroll the page. Registered with `page`'s focus group. Returns the value
+// label so callers can refresh it.
+lv_obj_t *settings_kv_row(lv_obj_t *page, const char *key, const char *val,
+                          int32_t pad_ver = 4, int32_t val_max_pct = 55);
+// "label ...... [btn_txt]" row whose button fires `cb` on LV_EVENT_CLICKED.
+// Registered with `page`'s focus group. Returns the button.
+lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_txt,
+                              lv_event_cb_t cb, int32_t btn_width = 60);
+// Token row + notes-crypto note shared by the Telegram and Notes Sync
+// subpages. `display` is the masked token (hal::secret_mask_display) and
+// `encrypted` whether ciphertext is stored; the note (hardware only) says
+// what notes_crypto needs before the token can be saved or read, with
+// `disabled_note` / `ready_note` as the subpage's wording for the
+// encryption-off and unlocked states. Either label may be null.
+void settings_refresh_token_labels(lv_obj_t *tok_label, lv_obj_t *note_label,
+                                   const std::string &display, bool encrypted,
+                                   const char *disabled_note,
+                                   const char *ready_note);
 // Re-populate the menu_g nav group with the subpage's registered widgets
 // (skipping hidden ones). Used by subpages that toggle row visibility and
 // need the keyboard focus list rebuilt in-place (connectivity's WiFi/NFC
 // Test rows follow their toggle's state).
 void activate_subpage_group(lv_obj_t *page);
-// Event handler that maps the encoder/keyboard scroll keys (w/s, +/-, etc.)
-// onto spinbox/slider increment/decrement. Attached via LV_EVENT_KEY |
-// LV_EVENT_PREPROCESS. Used by datetime, backlight, and charger subpages.
+// LV_EVENT_KEY | LV_EVENT_PREPROCESS handler that swaps LV_KEY_LEFT and
+// LV_KEY_RIGHT when the input comes from the encoder, so rotating the
+// wheel moves a spinbox/slider in the visually expected direction. Other
+// keys and other input devices pass through untouched. Used by datetime,
+// backlight, and charger subpages.
 void invert_scroll_key_cb(lv_event_t *e);
 // Pop the Settings menu back to the root page (e.g. datetime "Save" does
 // this after applying the entered time).
 void settings_return_to_main_page();
-// Focus-indication hook used by the Storage subpage's custom (non-
-// create_toggle_btn_row) buttons: paints the parent row as LV_STATE_FOCUSED
-// when the inner button gets focus, so the full row reads as highlighted.
-void toggle_child_focus_cb(lv_event_t *e);
+// toggle_child_focus_cb (row focus mirroring for custom row buttons, used by
+// the Storage subpage) is declared in ui/widgets.h.
 // Drop any subpage_items entries for `page` from the focus-group tracking.
 // Notes Security calls this when rebuilding its page in place after a
 // passphrase op, so activate_subpage_group won't re-add freed widgets.
@@ -62,16 +92,13 @@ extern user_setting_params_t local_param;
 // --- Timezone: defined in ui_time_sync.cpp ---
 std::string timezone_get_user_tz();
 void        timezone_set_user_tz(const char *tz);
-bool        timezone_fetch_list(std::vector<std::string> &out, std::string &err);
-bool        timezone_fetch_offset(const char *tz,
-                                  int &raw_offset_sec,
-                                  int &dst_offset_sec,
-                                  std::string &err);
+// Fills `out` with the bundled IANA zone names (replaces its contents).
+void        timezone_fetch_list(std::vector<std::string> &out);
 
 // --- Weather geocoding: defined in ui_weather.cpp ---
 struct weather_city_match {
-    std::string label;
-    std::string name;
+    std::string label;  // "Paris, Île-de-France, France" — shown in the list
+    std::string name;   // "Paris" — stored as user_city
     double lat;
     double lon;
 };
@@ -84,7 +111,6 @@ bool        weather_search_cities(const char *query,
 // --- Per-sub-config entry points ---
 namespace weather_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
-    void set_sub_page(lv_obj_t *page);
     void reset_state();
 }
 
@@ -92,24 +118,22 @@ namespace weather_cfg {
 // hal::hub_*. Cross-cutting: weather and notes-sync both consult this.
 namespace hub_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
-    void set_sub_page(lv_obj_t *page);
     void reset_state();
 }
 
 namespace telegram_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
-    void set_sub_page(lv_obj_t *page);
     void reset_state();
 }
 
 namespace notes_sync_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
-    void set_sub_page(lv_obj_t *page);
     void reset_state();
 }
 
-// Fonts subpage has no persistent state of its own — all 14 callbacks mutate
-// `local_param.*_font_index/size` fields and commit. No set_sub_page/
+// Fonts subpage has no persistent state of its own — its 18 dropdowns (9
+// contexts × face/size) share two callbacks that mutate the
+// `local_param.*_font_index/size` field passed as user_data and commit. No set_sub_page/
 // reset_state needed.
 namespace fonts_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);

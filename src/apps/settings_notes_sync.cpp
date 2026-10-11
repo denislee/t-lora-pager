@@ -15,17 +15,13 @@
 
 namespace notes_sync_cfg {
 
-static lv_obj_t *g_sub_page    = nullptr;
 static lv_obj_t *g_repo_label  = nullptr;
 static lv_obj_t *g_branch_label = nullptr;
 static lv_obj_t *g_tok_label   = nullptr;
 static lv_obj_t *g_note_label  = nullptr;
 
-void set_sub_page(lv_obj_t *page) { g_sub_page = page; }
-
 void reset_state()
 {
-    g_sub_page = nullptr;
     g_repo_label = nullptr;
     g_branch_label = nullptr;
     g_tok_label = nullptr;
@@ -43,34 +39,15 @@ static void refresh_labels()
         std::string v = apps::nsync_cfg_get_branch();
         lv_label_set_text_fmt(g_branch_label, "Branch: %s", v.c_str());
     }
-    if (g_tok_label) {
-        // Single token_is_encrypted() probe shared with the display string —
-        // each call is an NVS open, so collapsing them halves the work the
-        // deferred refresh has to do.
-        bool encrypted = apps::nsync_cfg_token_is_encrypted();
-        std::string tok = apps::nsync_cfg_get_token_display();
-        lv_label_set_text_fmt(g_tok_label, "Token: %s%s",
-                              tok.c_str(),
-                              encrypted ? "  [encrypted]" : "  [plaintext]");
-    }
-#ifdef ARDUINO
-    if (g_note_label) {
-        const char *note;
-        if (!notes_crypto_is_enabled()) {
-            note = "Enable Notes encryption (Settings » Notes Security) "
-                   "before saving a PAT — the token is persisted only "
-                   "AES-256 wrapped, never plaintext.";
-        } else if (!notes_crypto_is_unlocked()) {
-            note = "Notes session locked — unlock (open Notes) to "
-                   "save or read the token.";
-        } else {
-            note = "Token is AES-256 wrapped with your notes passphrase. "
-                   "Private repos work — use a fine-grained PAT with "
-                   "Contents: read/write on just this repo.";
-        }
-        lv_label_set_text(g_note_label, note);
-    }
-#endif
+    settings_refresh_token_labels(
+        g_tok_label, g_note_label,
+        apps::nsync_cfg_get_token_display(), apps::nsync_cfg_token_is_encrypted(),
+        "Enable Notes encryption (Settings » Notes Security) "
+        "before saving a PAT — the token is persisted only "
+        "AES-256 wrapped, never plaintext.",
+        "Token is AES-256 wrapped with your notes passphrase. "
+        "Private repos work — use a fine-grained PAT with "
+        "Contents: read/write on just this repo.");
 }
 
 static void set_repo_cb(const char *text, void *)

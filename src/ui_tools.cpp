@@ -25,12 +25,6 @@ const char *ui_battery_icon(int percent, bool is_charging)
 
 void destroy_msgbox(lv_obj_t *msgbox)
 {
-#if LVGL_VERSION_MAJOR == 9
-#else
-    lv_obj_t *msg_btns = lv_msgbox_get_btns(msgbox);
-    lv_group_focus_obj(msg_btns);
-    lv_btnmatrix_set_btn_ctrl_all(msg_btns, LV_BTNMATRIX_CTRL_HIDDEN);
-#endif
     lv_msgbox_close(msgbox);
     // lv_group_focus_freeze(msg_group, false);
     set_default_group(prev_group);
@@ -57,6 +51,12 @@ lv_obj_t *ui_popup_create(const char *title)
         lv_obj_set_style_text_color(t, UI_COLOR_ACCENT, 0);
         lv_obj_set_style_text_font(t, lv_theme_get_font_large(t), 0);
         lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+        // Hotel: the title becomes a full-width Habbo title bar; BeOS: a
+        // yellow window tab; the flat styles keep the accent-coloured label.
+        if (ui_dress_title(t, t, 8) == UI_TITLE_BAR) {
+            lv_obj_set_width(t, lv_pct(100));
+            lv_obj_set_style_radius(t, 3, 0);
+        }
     }
     return overlay;
 }
@@ -66,18 +66,124 @@ void ui_popup_destroy(lv_obj_t *popup)
     if (popup) lv_obj_del(popup);
 }
 
+int32_t ui_status_bar_height(void)
+{
+    int32_t bar_h = lv_font_get_line_height(get_header_font()) + 8;
+    return bar_h < 30 ? 30 : bar_h;
+}
+
 // ---------------------------------------------------------------------------
-// Unified loading / progress popup. See ui_define.h for contract.
+// Modal overlay + modal button. See ui/modals.h for contract.
+// ---------------------------------------------------------------------------
+
+lv_obj_t *ui_overlay_open(ui_overlay_t *o, lv_event_cb_t back_cb, bool wrap)
+{
+    o->prev_group = lv_group_get_default();
+    o->prev_back_cb = back_cb ? ui_get_back_button_cb() : NULL;
+    o->group = lv_group_create();
+    lv_group_set_wrap(o->group, wrap);
+    set_default_group(o->group);
+
+    // ui_show_back_button adds the button to the current default group —
+    // ours, set just above — so it stays keyboard-reachable as "close".
+    if (back_cb) ui_show_back_button(back_cb);
+
+    enable_keyboard();
+
+    int32_t v_res = lv_display_get_vertical_resolution(NULL);
+    if (v_res <= 0) v_res = 222;
+
+    lv_obj_t *overlay = lv_obj_create(lv_layer_top());
+    o->overlay = overlay;
+    lv_obj_set_size(overlay, lv_pct(100), v_res - ui_status_bar_height());
+    lv_obj_align(overlay, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(overlay, UI_COLOR_BG, 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(overlay, 0, 0);
+    lv_obj_set_style_pad_all(overlay, 8, 0);
+    lv_obj_set_flex_flow(overlay, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(overlay, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(overlay, 6, 0);
+    return overlay;
+}
+
+void ui_overlay_close(ui_overlay_t *o)
+{
+    if (o->overlay) lv_obj_del(o->overlay);
+    if (o->group) lv_group_del(o->group);
+    if (o->prev_group) set_default_group(o->prev_group);
+    // Hand the back button back to the screen underneath. ui_show_back_button
+    // re-adds it to the now-restored default group.
+    if (o->prev_back_cb) ui_show_back_button(o->prev_back_cb);
+    o->overlay = NULL;
+    o->group = NULL;
+    o->prev_group = NULL;
+    o->prev_back_cb = NULL;
+}
+
+lv_obj_t *ui_modal_btn_create(lv_obj_t *parent, const char *text,
+                              lv_event_cb_t cb, void *user_data)
+{
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_style_radius(btn, UI_RADIUS, 0);
+    lv_obj_set_style_bg_color(btn, UI_COLOR_SURFACE, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_border_opa(btn, LV_OPA_40, 0);
+    lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUSED);
+    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(btn, lv_color_mix(UI_COLOR_ACCENT, UI_COLOR_SURFACE, LV_OPA_20),
+                              LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUS_KEY);
+    lv_obj_set_height(btn, LV_SIZE_CONTENT);
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, text);
+    lv_obj_set_style_text_color(lbl, UI_COLOR_FG, 0);
+    lv_obj_center(lbl);
+    if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, user_data);
+    return btn;
+}
+
+// ---------------------------------------------------------------------------
+// Yes/No confirm. See ui/modals.h for contract.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct ConfirmCtx {
+    ui_confirm_cb cb;
+    void *ud;
+    lv_obj_t *msgbox;
+};
+} // namespace
+
+static void confirm_btn_cb(lv_event_t *e)
+{
+    ConfirmCtx *ctx = (ConfirmCtx *)lv_event_get_user_data(e);
+    // Footer buttons are added in {"Yes", "No"} order.
+    bool yes = lv_obj_get_index((lv_obj_t *)lv_event_get_target(e)) == 0;
+    ConfirmCtx c = *ctx;
+    delete ctx;
+    destroy_msgbox(c.msgbox);
+    if (c.cb) c.cb(yes, c.ud);
+}
+
+void ui_confirm(const char *title, const char *msg, ui_confirm_cb cb, void *ud)
+{
+    static const char *btns[] = {"Yes", "No", ""};
+    ConfirmCtx *ctx = new ConfirmCtx{cb, ud, NULL};
+    ctx->msgbox = create_msgbox(NULL, title, msg, btns, confirm_btn_cb, ctx);
+}
+
+// ---------------------------------------------------------------------------
+// Unified loading / progress popup. See ui/modals.h for contract.
 // ---------------------------------------------------------------------------
 
 static lv_obj_t *_loading_make_spinner(lv_obj_t *parent)
 {
-#if LVGL_VERSION_MAJOR == 9
     lv_obj_t *sp = lv_spinner_create(parent);
     lv_spinner_set_anim_params(sp, 1000, 200);
-#else
-    lv_obj_t *sp = lv_spinner_create(parent, 1000, 60);
-#endif
     lv_obj_set_size(sp, 48, 48);
     lv_obj_set_style_arc_color(sp, UI_COLOR_MUTED, LV_PART_MAIN);
     lv_obj_set_style_arc_color(sp, UI_COLOR_ACCENT, LV_PART_INDICATOR);
@@ -217,11 +323,7 @@ void ui_result_show(const char *title, const char *subtitle,
                                     _result_close_cb, NULL);
     if (!s_result_msgbox) return;
 
-#if LVGL_VERSION_MAJOR == 9
     lv_obj_t *content = lv_msgbox_get_content(s_result_msgbox);
-#else
-    lv_obj_t *content = lv_msgbox_get_text(s_result_msgbox);
-#endif
     if (!content) return;
 
     // Strip the default text label lv_msgbox_add_text created (an empty
@@ -295,7 +397,6 @@ void ui_result_show(const char *title, const char *subtitle,
         }
     }
 
-#if LVGL_VERSION_MAJOR == 9
     // lv_msgbox's SIZE_CHANGED handler only flips content->flex_grow to 1
     // when the msgbox height is NOT LV_SIZE_CONTENT. With SIZE_CONTENT +
     // max_height the msgbox clamps but children keep natural sizes, so tall
@@ -310,7 +411,6 @@ void ui_result_show(const char *title, const char *subtitle,
     if (natural_h > max_h) {
         lv_obj_set_height(s_result_msgbox, max_h);
     }
-#endif
 }
 
 lv_obj_t *create_msgbox(lv_obj_t *parent, const char *title_txt,
@@ -329,7 +429,6 @@ lv_obj_t *create_msgbox(lv_obj_t *parent, const char *title_txt,
 
     lv_obj_t *msgbox;
 
-    #if LVGL_VERSION_MAJOR == 9
     msgbox = lv_msgbox_create(lv_layer_top());
 
     // Sizing: width caps at 90% so short messages don't stretch; height
@@ -343,20 +442,36 @@ lv_obj_t *create_msgbox(lv_obj_t *parent, const char *title_txt,
 
     lv_obj_set_style_bg_color(msgbox, UI_COLOR_BG, 0);
     lv_obj_set_style_bg_opa(msgbox, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(msgbox, UI_COLOR_ACCENT, 0);
-    lv_obj_set_style_border_width(msgbox, UI_BORDER_W, 0);
-    lv_obj_set_style_radius(msgbox, UI_RADIUS, 0);
+    // Accent frame on the flat styles, the chrome keyline on Hotel / BeOS
+    // (BeOS: a flat 1px frame with its corners squared off).
+    const ui_palette_t &pal = ui_palette();
+    lv_obj_set_style_border_color(msgbox, pal.frame, 0);
+    lv_obj_set_style_border_width(msgbox, pal.frame_w, 0);
+    lv_obj_set_style_radius(msgbox, pal.frame_radius, 0);
     lv_obj_set_style_text_color(msgbox, UI_COLOR_FG, 0);
     lv_obj_set_style_pad_all(msgbox, 0, 0);
     lv_obj_set_style_shadow_width(msgbox, 18, 0);
     lv_obj_set_style_shadow_opa(msgbox, LV_OPA_40, 0);
     lv_obj_set_style_shadow_color(msgbox, lv_color_black(), 0);
 
-    (void)title_txt;
-
-    // Hide the header entirely — popups no longer carry a title bar.
+    // Hotel keeps the header and dresses it as a Habbo title bar; BeOS
+    // keeps it too and turns the title into a yellow window tab; every other
+    // style hides it (popups no longer carry a title bar).
     lv_obj_t *hdr = lv_msgbox_get_header(msgbox);
-    if (hdr) {
+    if (ui_style_has_chrome()) {
+        // lv_msgbox_add_title lazily creates the header, so re-fetch it.
+        lv_obj_t *title_lbl = lv_msgbox_add_title(msgbox,
+            (title_txt && *title_txt) ? title_txt : " ");
+        hdr = lv_msgbox_get_header(msgbox);
+        if (ui_dress_title(hdr, title_lbl, 10) == UI_TITLE_TAB && hdr) {
+            // The BeOS tab sits on a bare strip, inset from the frame edge.
+            lv_obj_set_style_bg_opa(hdr, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(hdr, 0, 0);
+            lv_obj_set_style_pad_all(hdr, 0, 0);
+            lv_obj_set_style_pad_left(hdr, 6, 0);
+            lv_obj_set_style_pad_top(hdr, 0, 0);
+        }
+    } else if (hdr) {
         lv_obj_add_flag(hdr, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_height(hdr, 0);
         lv_obj_set_style_pad_all(hdr, 0, 0);
@@ -377,16 +492,22 @@ lv_obj_t *create_msgbox(lv_obj_t *parent, const char *title_txt,
 
     // Button styling. Two styles: base (muted border) and focused/pressed
     // (accent fill). Applied per-button so lv_msgbox_add_footer_button's
-    // theme defaults don't leak through.
+    // theme defaults don't leak through. Rebuilt whenever the UI style
+    // changes, since the colors below depend on the active palette.
     static lv_style_t msgbox_btn_base_style;
     static lv_style_t msgbox_btn_focus_style;
-    static bool msgbox_btn_style_inited = false;
-    if (!msgbox_btn_style_inited) {
+    static int msgbox_btn_style_for = -1;
+    int style_key = (int)ui_style_get() * 2 + (ui_dark_mode_get() ? 1 : 0);
+    if (msgbox_btn_style_for != style_key) {
+        if (msgbox_btn_style_for >= 0) {
+            lv_style_reset(&msgbox_btn_base_style);
+            lv_style_reset(&msgbox_btn_focus_style);
+        }
         lv_style_init(&msgbox_btn_base_style);
-        lv_style_set_bg_color(&msgbox_btn_base_style, UI_COLOR_BG);
+        lv_style_set_bg_color(&msgbox_btn_base_style, pal.btn_face);
         lv_style_set_bg_opa(&msgbox_btn_base_style, LV_OPA_COVER);
-        lv_style_set_border_width(&msgbox_btn_base_style, 1);
-        lv_style_set_border_color(&msgbox_btn_base_style, UI_COLOR_MUTED);
+        lv_style_set_border_width(&msgbox_btn_base_style, pal.keyline_w);
+        lv_style_set_border_color(&msgbox_btn_base_style, ui_color_outline());
         lv_style_set_text_color(&msgbox_btn_base_style, UI_COLOR_FG);
         lv_style_set_radius(&msgbox_btn_base_style, UI_RADIUS);
         lv_style_set_pad_hor(&msgbox_btn_base_style, 18);
@@ -400,9 +521,9 @@ lv_obj_t *create_msgbox(lv_obj_t *parent, const char *title_txt,
         lv_style_set_bg_opa(&msgbox_btn_focus_style, LV_OPA_COVER);
         lv_style_set_border_color(&msgbox_btn_focus_style, UI_COLOR_ACCENT);
         lv_style_set_border_width(&msgbox_btn_focus_style, 1);
-        lv_style_set_text_color(&msgbox_btn_focus_style, UI_COLOR_FG);
+        lv_style_set_text_color(&msgbox_btn_focus_style, UI_COLOR_ON_ACCENT);
         lv_style_set_radius(&msgbox_btn_focus_style, UI_RADIUS);
-        msgbox_btn_style_inited = true;
+        msgbox_btn_style_for = style_key;
     }
 
     lv_obj_t *footer = lv_msgbox_get_footer(msgbox);
@@ -436,59 +557,14 @@ lv_obj_t *create_msgbox(lv_obj_t *parent, const char *title_txt,
         lv_obj_add_state(first_btn, LV_STATE_FOCUS_KEY);
     }
 
-#else
-    msgbox = lv_msgbox_create(lv_layer_top(), title_txt, " ", btns, false);
-    lv_msgbox_t *mbox = (lv_msgbox_t *)msgbox;
-    lv_label_set_text_fmt(mbox->text, msg_txt);
-    lv_label_set_long_mode(mbox->text, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(mbox->text, lv_pct(100));
-
-    lv_obj_t *content = lv_msgbox_get_text(msgbox);
-    lv_obj_set_style_text_font(content, &lv_font_montserrat_18, LV_PART_MAIN);
-    lv_obj_set_style_text_color(content, lv_color_white(), LV_PART_MAIN);
-
-    lv_obj_t *msg_btns = lv_msgbox_get_btns(msgbox);
-    lv_btnmatrix_set_btn_ctrl(msg_btns, 0, LV_BTNMATRIX_CTRL_CHECKED);
-    lv_obj_set_style_text_color(msg_btns, lv_color_white(), 0);
-
-    static lv_style_t msgbox_btn_focus_style_v8;
-    static bool msgbox_btn_style_v8_inited = false;
-    if (!msgbox_btn_style_v8_inited) {
-        lv_style_init(&msgbox_btn_focus_style_v8);
-        lv_style_set_border_width(&msgbox_btn_focus_style_v8, 3);
-        lv_style_set_border_color(&msgbox_btn_focus_style_v8, lv_color_white());
-        lv_style_set_border_side(&msgbox_btn_focus_style_v8, LV_BORDER_SIDE_FULL);
-        lv_style_set_radius(&msgbox_btn_focus_style_v8, 5);
-        msgbox_btn_style_v8_inited = true;
-    }
-    lv_obj_add_style(msg_btns, &msgbox_btn_focus_style_v8, LV_PART_ITEMS | LV_STATE_FOCUS_KEY);
-    lv_obj_add_style(msg_btns, &msgbox_btn_focus_style_v8, LV_PART_ITEMS | LV_STATE_FOCUSED);
-
-    lv_group_add_obj(msg_group, msg_btns);
-    lv_group_focus_obj(msg_btns);
-
-    lv_obj_set_size(msgbox, lv_pct(90), lv_pct(60));
-    lv_obj_set_style_radius(msgbox, 30, LV_PART_MAIN);
-
-    lv_obj_set_style_bg_color(msgbox, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(msgbox, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(msgbox, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_border_width(msgbox, 2, LV_PART_MAIN);
-
-    lv_obj_t *title = lv_msgbox_get_title(msgbox);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
-    lv_obj_set_style_text_color(title, lv_color_white(), LV_PART_MAIN);
-
-    lv_obj_add_event_cb(msgbox, btns_event_cb, LV_EVENT_CLICKED, user_data);
-
-    lv_obj_center(msgbox);
-#endif
 
     return msgbox;
 
 }
 
-static void child_focus_cb(lv_event_t * e) {
+// Mirror a row child's focus onto the row itself so the whole menu row
+// highlights. Shared with the Settings subpages (see ui/widgets.h).
+void toggle_child_focus_cb(lv_event_t * e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t * obj = (lv_obj_t *)lv_event_get_target(e);
     lv_obj_t * parent = lv_obj_get_parent(obj);
@@ -501,38 +577,142 @@ static void child_focus_cb(lv_event_t * e) {
     }
 }
 
-lv_obj_t *create_text(lv_obj_t *parent, const char *icon, const char *txt,
-                      lv_menu_builder_variant_t builder_variant)
+bool ui_scroll_key_clamped(lv_obj_t *obj, uint32_t key, int32_t step,
+                           lv_anim_enable_t anim)
+{
+    if (key == LV_KEY_UP || key == LV_KEY_LEFT) {
+        int32_t room = lv_obj_get_scroll_y(obj);       // px above the view
+        if (room < step) step = room;
+        if (step > 0) lv_obj_scroll_by(obj, 0, step, anim);
+        return true;
+    }
+    if (key == LV_KEY_DOWN || key == LV_KEY_RIGHT) {
+        int32_t room = lv_obj_get_scroll_bottom(obj);  // px below the view
+        if (room < step) step = room;
+        if (step > 0) lv_obj_scroll_by(obj, 0, -step, anim);
+        return true;
+    }
+    return false;
+}
+
+lv_obj_t *ui_list_add_meta_row(lv_obj_t *list, const char *icon, const char *text,
+                               const char *meta, const lv_font_t *meta_font)
+{
+    lv_obj_t *btn = lv_list_add_btn(list, icon, text);
+    lv_obj_set_flex_flow(btn, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *icon_obj = lv_obj_get_child(btn, 0);
+    lv_obj_t *lbl      = lv_obj_get_child(btn, 1);
+    if (icon_obj) lv_obj_set_width(icon_obj, 20);
+    if (lbl) {
+        lv_obj_set_width(lbl, 0);
+        lv_obj_set_flex_grow(lbl, 1);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+    }
+    if (meta) {
+        lv_obj_t *m = lv_label_create(btn);
+        lv_label_set_text(m, meta);
+        lv_obj_set_style_text_color(m, UI_COLOR_MUTED, 0);
+        lv_obj_set_style_text_font(m, meta_font, 0);
+        lv_obj_set_style_pad_left(m, 8, 0);
+    }
+    return btn;
+}
+
+// ---------------------------------------------------------------------------
+// BLE volume button. See ui/widgets.h for contract.
+// ---------------------------------------------------------------------------
+
+namespace {
+struct BleVolumeSpec {
+    void (*refresh)(void);
+    bool require_connected;
+};
+} // namespace
+
+static void ble_volume_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    BleVolumeSpec *spec = (BleVolumeSpec *)lv_event_get_user_data(e);
+    if (code == LV_EVENT_DELETE) {
+        lv_free(spec);
+        return;
+    }
+    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+    lv_group_t *g = lv_obj_get_group(btn);
+    if (!g) return;
+
+    // Encoder press on a non-editable widget fires both LV_EVENT_KEY (ENTER)
+    // and LV_EVENT_CLICKED. Handle the toggle in CLICKED only (works for
+    // touch too) and ignore ENTER in the key branch to avoid double-toggle.
+    if (code == LV_EVENT_CLICKED) {
+        if (spec->require_connected && !hw_get_ble_kb_connected()) return;
+        lv_group_set_editing(g, !lv_group_get_editing(g));
+        hw_feedback();
+        if (spec->refresh) spec->refresh();
+    } else if (code == LV_EVENT_KEY) {
+        uint32_t key = lv_event_get_key(e);
+        if (key == LV_KEY_ENTER) return;
+        if (!lv_group_get_editing(g)) return;
+        if (spec->require_connected && !hw_get_ble_kb_connected()) return;
+        // Scroll wheel: clockwise (NEXT/RIGHT/UP) decreases volume on the
+        // LilyGo encoder — swap to match the physical scroll direction.
+        if (key == LV_KEY_RIGHT || key == LV_KEY_UP || key == LV_KEY_NEXT) {
+            hw_feedback();
+            hw_set_ble_key(MEDIA_VOLUME_DOWN);
+            lv_event_stop_processing(e);
+        } else if (key == LV_KEY_LEFT || key == LV_KEY_DOWN
+                   || key == LV_KEY_PREV) {
+            hw_feedback();
+            hw_set_ble_key(MEDIA_VOLUME_UP);
+            lv_event_stop_processing(e);
+        }
+    } else if (code == LV_EVENT_DEFOCUSED) {
+        lv_group_set_editing(g, false);
+        if (spec->refresh) spec->refresh();
+    }
+}
+
+void ble_volume_btn_attach(lv_obj_t *btn, void (*refresh)(void), bool require_connected)
+{
+    BleVolumeSpec *spec = (BleVolumeSpec *)lv_malloc(sizeof(BleVolumeSpec));
+    spec->refresh = refresh;
+    spec->require_connected = require_connected;
+    lv_obj_add_event_cb(btn, ble_volume_event_cb, LV_EVENT_CLICKED, spec);
+    lv_obj_add_event_cb(btn, ble_volume_event_cb, LV_EVENT_KEY, spec);
+    lv_obj_add_event_cb(btn, ble_volume_event_cb, LV_EVENT_DEFOCUSED, spec);
+    lv_obj_add_event_cb(btn, ble_volume_event_cb, LV_EVENT_DELETE, spec);
+}
+
+// Menu row: optional icon image followed by a growing text label.
+static lv_obj_t *create_row(lv_obj_t *parent, const char *icon, const char *txt)
 {
     lv_obj_t *obj = lv_menu_cont_create(parent);
 
-    lv_obj_t *img = NULL;
-    lv_obj_t *label = NULL;
-
     if (icon) {
-        img = lv_img_create(obj);
+        lv_obj_t *img = lv_img_create(obj);
         lv_img_set_src(img, icon);
     }
 
     if (txt) {
-        label = lv_label_create(obj);
+        lv_obj_t *label = lv_label_create(obj);
         lv_label_set_text(label, txt);
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
         lv_obj_set_flex_grow(label, 1);
     }
 
-    if (builder_variant == LV_MENU_ITEM_BUILDER_VARIANT_2 && icon && txt) {
-        lv_obj_add_flag(img, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
-        lv_obj_swap(img, label);
-    }
-
     return obj;
 }
 
-lv_obj_t *create_slider(lv_obj_t *parent, const char *icon, const char *txt, int32_t min, int32_t max,
-                        int32_t val, lv_event_cb_t cb, lv_event_code_t filter)
+lv_obj_t *create_text(lv_obj_t *parent, const char *txt)
 {
-    lv_obj_t *obj = create_text(parent, icon, txt, LV_MENU_ITEM_BUILDER_VARIANT_2);
+    return create_row(parent, NULL, txt);
+}
+
+lv_obj_t *create_slider(lv_obj_t *parent, const char *txt, int32_t min, int32_t max,
+                        int32_t val, lv_event_cb_t cb)
+{
+    lv_obj_t *obj = create_text(parent, txt);
 
     lv_obj_t *slider = lv_slider_create(obj);
     lv_obj_set_style_outline_width(slider, 0, 0);
@@ -544,11 +724,11 @@ lv_obj_t *create_slider(lv_obj_t *parent, const char *icon, const char *txt, int
     lv_slider_set_range(slider, min, max);
     lv_slider_set_value(slider, val, LV_ANIM_OFF);
 
-    lv_obj_add_event_cb(slider, child_focus_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(slider, child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
+    lv_obj_add_event_cb(slider, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(slider, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
 
     if (cb != NULL) {
-        lv_obj_add_event_cb(slider, cb, filter, NULL);
+        lv_obj_add_event_cb(slider, cb, LV_EVENT_VALUE_CHANGED, NULL);
     }
 
     return slider;
@@ -556,7 +736,7 @@ lv_obj_t *create_slider(lv_obj_t *parent, const char *icon, const char *txt, int
 
 lv_obj_t *create_button(lv_obj_t *parent, const char *icon, const char *txt, lv_event_cb_t cb)
 {
-    lv_obj_t *obj = create_text(parent, icon, txt, LV_MENU_ITEM_BUILDER_VARIANT_1);
+    lv_obj_t *obj = create_row(parent, icon, txt);
     lv_obj_t *btn = lv_btn_create(obj);
 
     lv_obj_set_style_outline_width(btn, 0, 0);
@@ -572,8 +752,8 @@ lv_obj_t *create_button(lv_obj_t *parent, const char *icon, const char *txt, lv_
     lv_label_set_text(label, LV_SYMBOL_RIGHT);
     lv_obj_center(label);
 
-    lv_obj_add_event_cb(btn, child_focus_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(btn, child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
+    lv_obj_add_event_cb(btn, toggle_child_focus_cb, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(btn, toggle_child_focus_cb, LV_EVENT_DEFOCUSED, NULL);
 
     if (cb) {
         lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
@@ -581,9 +761,9 @@ lv_obj_t *create_button(lv_obj_t *parent, const char *icon, const char *txt, lv_
     return btn;
 }
 
-lv_obj_t *create_dropdown(lv_obj_t *parent, const char *icon, const char *txt, const char *options, uint8_t default_sel, lv_event_cb_t cb)
+lv_obj_t *create_dropdown(lv_obj_t *parent, const char *txt, const char *options, uint8_t default_sel, lv_event_cb_t cb)
 {
-    lv_obj_t *obj = create_text(parent, icon, txt, LV_MENU_ITEM_BUILDER_VARIANT_1);
+    lv_obj_t *obj = create_text(parent, txt);
     lv_obj_t *dd = lv_dropdown_create(obj);
     lv_dropdown_set_options(dd, options);
     lv_dropdown_set_selected(dd, default_sel);
@@ -596,14 +776,6 @@ lv_obj_t *create_dropdown(lv_obj_t *parent, const char *icon, const char *txt, c
         lv_obj_add_event_cb(dd, cb, LV_EVENT_VALUE_CHANGED, NULL);
     }
     return dd;
-}
-
-
-
-static void float_button_event_cb(lv_event_t * e)
-{
-    lv_obj_t *obj = lv_event_get_target_obj(e);
-    lv_obj_send_event(obj, LV_EVENT_CLICKED, NULL);
 }
 
 lv_obj_t *create_floating_button(lv_event_cb_t event_cb, void* user_data)
@@ -623,12 +795,8 @@ lv_obj_t *create_floating_button(lv_event_cb_t event_cb, void* user_data)
 lv_obj_t *create_menu(lv_obj_t *parent, lv_event_cb_t event_cb)
 {
     lv_obj_t *menu = lv_menu_create(parent);
-#if LVGL_VERSION_MAJOR == 9
     lv_menu_set_mode_root_back_button(menu, LV_MENU_ROOT_BACK_BUTTON_DISABLED);
-#else
-    lv_menu_set_mode_root_back_btn(menu, LV_MENU_ROOT_BACK_BTN_DISABLED);
-#endif
-    lv_obj_add_event_cb(menu, event_cb, LV_EVENT_CLICKED, NULL);
+    if (event_cb) lv_obj_add_event_cb(menu, event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_set_size(menu, LV_PCT(100), LV_PCT(100));
     lv_obj_center(menu);
     return menu;
@@ -688,17 +856,6 @@ void enable_keyboard()
     s_keyboard_enabled = true;
 }
 
-bool is_screen_small()
-{
-    lv_coord_t w = lv_disp_get_hor_res(NULL);
-    lv_coord_t h = lv_disp_get_ver_res(NULL);
-    printf("Screen size: %dx%d\n", w, h);
-    if (w <= 240 || h <= 240) {
-        printf("Small screen detected.\n");
-        return true;
-    }
-    return false;
-}
 LV_FONT_DECLARE(lv_font_montserrat_10);
 LV_FONT_DECLARE(lv_font_montserrat_12);
 LV_FONT_DECLARE(lv_font_montserrat_14);

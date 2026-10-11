@@ -16,6 +16,9 @@
 namespace hal {
 
 namespace {
+// Everything in here backs the NVS-backed hardware implementation; the
+// emulator branches below return fixed stub values.
+#ifdef ARDUINO
 constexpr const char *NS = "hub";
 constexpr const char *KEY_URL = "url";
 constexpr const char *KEY_ENABLED = "enabled";
@@ -25,19 +28,18 @@ constexpr const char *KEY_ENABLED = "enabled";
 constexpr const char *LEGACY_NS = "weather";
 constexpr const char *LEGACY_KEY = "hub_url";
 
+// Whitespace-trim and drop any trailing '/' (interleaved with whitespace or
+// not), so callers can append "/api/..." directly.
 std::string trim_url(const std::string &in)
 {
-    std::string s = in;
-    while (!s.empty() && (s.back() == '/' || s.back() == ' ' || s.back() == '\r' ||
-                          s.back() == '\n' || s.back() == '\t')) {
+    std::string s = trim(in);
+    while (!s.empty() && s.back() == '/') {
         s.pop_back();
+        s = trim(s);
     }
-    size_t a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return "";
-    return s.substr(a);
+    return s;
 }
 
-#ifdef ARDUINO
 // One-shot legacy migration: if the new slot is empty but the old one has a
 // value, copy it across, force the toggle ON (preserving prior behavior —
 // having set the URL meant the user wanted hub-first), and delete the legacy
@@ -163,14 +165,25 @@ bool hub_get_enabled_pref()
 
 bool hub_is_enabled()
 {
-    if (!hub_get_enabled_pref()) return false;
-    return !hub_get_url_raw().empty();
+#ifdef ARDUINO
+    CfgLock lk;
+    cfg_ensure_locked();
+    return s_cfg_enabled && !s_cfg_url.empty();
+#else
+    return false;
+#endif
 }
 
 std::string hub_get_url()
 {
-    if (!hub_is_enabled()) return "";
-    return hub_get_url_raw();
+#ifdef ARDUINO
+    // One locked read of both fields (this used to take the mutex 3x).
+    CfgLock lk;
+    cfg_ensure_locked();
+    return s_cfg_enabled ? s_cfg_url : std::string();
+#else
+    return "";
+#endif
 }
 
 void hub_set_enabled(bool enabled)
@@ -240,37 +253,15 @@ HalError hub_upload_note(const char *name, const uint8_t *bytes, size_t len)
 bool hub_is_reachable(uint32_t timeout_ms)
 {
 #ifdef ARDUINO
-    if (!hub_is_enabled()) return false;
+    std::string url = hub_get_url();   // "" when disabled or unset
+    if (url.empty()) return false;
     if (!hw_get_wifi_connected()) return false;
 
-    std::string url = hub_get_url();
-
-    // Parse `http[s]://host[:port][/...]`. We only support http here — the
-    // hub is a LAN service. Defaults match the URL scheme: http=80.
-    size_t scheme_end = url.find("://");
-    uint16_t port = 80;
-    std::string rest;
-    if (scheme_end != std::string::npos) {
-        std::string scheme = url.substr(0, scheme_end);
-        if (scheme == "https") port = 443;
-        rest = url.substr(scheme_end + 3);
-    } else {
-        rest = url;
-    }
-    size_t slash = rest.find('/');
-    std::string hostport = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-    if (hostport.empty()) return false;
-
-    std::string host = hostport;
-    size_t colon = hostport.find(':');
-    if (colon != std::string::npos) {
-        host = hostport.substr(0, colon);
-        long p = strtol(hostport.c_str() + colon + 1, nullptr, 10);
-        if (p > 0 && p < 65536) port = (uint16_t)p;
-    }
-    if (host.empty()) return false;
-
-    return hw_ping_internet(host.c_str(), port, timeout_ms, nullptr, nullptr);
+    // `http[s]://host[:port][/...]` — a plain TCP connect to host:port, with
+    // the port defaulting from the scheme (http=80, https=443).
+    UrlParts u;
+    if (!parse_url(url, u)) return false;
+    return hw_ping_internet(u.host.c_str(), u.port, timeout_ms, nullptr, nullptr);
 #else
     (void)timeout_ms;
     return false;

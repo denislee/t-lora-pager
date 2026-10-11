@@ -66,9 +66,6 @@ void AppManager::update() {
         _pendingParent = nullptr;
         switchApp(name, parent);
     }
-    if (_activeApp) {
-        _activeApp->onUpdate();
-    }
 }
 
 } // namespace core
