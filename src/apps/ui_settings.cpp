@@ -21,6 +21,7 @@
 #include "../hal/notes_crypto.h"
 #include "../core/app_manager.h"
 #include "../core/system.h"
+#include "../core/input_profile.h"
 #include "app_registry.h"
 #include "../ui_list_picker.h"
 #include "settings_internal.h"
@@ -543,6 +544,7 @@ lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_t
 
 void ui_sys_enter(lv_obj_t *parent)
 {
+    INPUT_PROF_SPAN("ui_sys_enter");
     if (menu != NULL) return;
     menu_g = lv_group_get_default();
 

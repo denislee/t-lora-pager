@@ -5,6 +5,7 @@
  * @copyright Copyright (c) 2026
  */
 #include "app_manager.h"
+#include "input_profile.h"
 #include "../hal/types.h"  // log_d/i/e macros (Arduino on hardware, printf on emulator)
 
 namespace core {
@@ -35,8 +36,10 @@ void AppManager::switchApp(const std::string& name, lv_obj_t* parent) {
             return;
         }
 
+        INPUT_PROF_SPAN("switchApp");
         if (_activeApp) {
             log_d("Stopping active app: %s", _activeApp->getName().c_str());
+            INPUT_PROF_SPAN("switchApp.onStop");
             _activeApp->onStop();
         }
 
@@ -44,9 +47,16 @@ void AppManager::switchApp(const std::string& name, lv_obj_t* parent) {
         log_i("Switching to app: %s", _activeApp->getName().c_str());
         
         // Ensure root is cleaned and set to the new app
-        lv_obj_clean(parent);
+        {
+            INPUT_PROF_SPAN("switchApp.clean");
+            lv_obj_clean(parent);
+        }
         _activeApp->setRoot(parent);
-        _activeApp->onStart(parent);
+        {
+            INPUT_PROF_SPAN("switchApp.onStart");
+            _activeApp->onStart(parent);
+        }
+        INPUT_PROF(prof::dump_group(name.c_str()));
     } else {
         log_e("App not found: %s", name.c_str());
     }

@@ -35,6 +35,7 @@
 #include "display.h"
 #include "str_encode.h"
 #include "task_util.h"
+#include "../core/input_profile.h"
 #include "../core/scoped_lock.h"
 
 namespace {
@@ -42,6 +43,9 @@ namespace {
 struct KeyEvent {
     int  state;  // KB_PRESSED / KB_RELEASED
     char c;
+#ifdef INPUT_PROFILE
+    uint64_t t_us;  // enqueue time, for the key-latency histogram (IS.0)
+#endif
 };
 
 constexpr UBaseType_t kTaskPriority     = configMAX_PRIORITIES - 2;
@@ -80,8 +84,9 @@ inline bool is_pingkey(char c) { return c == '\b' || c == 0x17; }
 // held-char tracking so the synthesized repeat below never engages.
 inline bool is_no_repeat_key(char c) { return c == '\n'; }
 
-void enqueue_event(const KeyEvent &ev)
+void enqueue_event(KeyEvent ev)
 {
+    INPUT_PROF(ev.t_us = core::prof::now_us());
     // Drop oldest if the UI somehow falls behind the queue depth. Called
     // with the instance mutex held by the drain loop — see
     // hw_input_event_wake() for why the wake is still safe.
@@ -226,6 +231,7 @@ void kb_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
     }
 
     bool more = uxQueueMessagesWaiting(s_event_queue) > 0;
+    INPUT_PROF(core::prof::key_latency(core::prof::now_us() - ev.t_us));
 
     if (ev.state == KB_PRESSED) {
         if (ev.c == 0x17) {  // Alt+Backspace

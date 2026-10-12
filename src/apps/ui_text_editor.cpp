@@ -17,6 +17,7 @@
  */
 #include "../ui_define.h"
 #include "../core/app_manager.h"
+#include "../core/input_profile.h"
 #include "../core/system.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/storage.h"
@@ -58,6 +59,7 @@ static bool save_content(bool show_error_popup, bool allow_prune = true)
 {
     if (!text_area) return true;
     if (!content_dirty) return true;
+    INPUT_PROF_SPAN("save_content");
 
     const char *txt = lv_textarea_get_text(text_area);
 

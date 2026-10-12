@@ -16,6 +16,7 @@
 #include "menu_app.h"
 #include "../core/system.h"
 #include "../core/one_shot_job.h"
+#include "../core/input_profile.h"
 #include "../ui_define.h"
 #include "../hal/wireless.h"
 #include "../hal/link.h"
@@ -558,6 +559,7 @@ void MenuApp::onStop() {
 }
 
 void MenuApp::onStart(lv_obj_t* parent) {
+    INPUT_PROF_SPAN("MenuApp::onStart");
     // Parent column: toggle strip on top, tile grid filling the rest.
     ui_apply_backdrop(parent);
     lv_obj_set_style_border_width(parent, 0, 0);

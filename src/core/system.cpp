@@ -6,6 +6,7 @@
  */
 #include "system.h"
 #include "input_focus.h"
+#include "input_profile.h"
 #include "notify.h"
 #include "../ui_define.h"
 #include "../hal/hub.h"
@@ -545,6 +546,7 @@ void System::loop() {
     // call from any task; actual banner creation has to happen here so it
     // runs under the instance lock held by the LVGL task.
     notify::pump();
+    INPUT_PROF(prof::report_tick());
 }
 
 // Drop every event callback currently registered on the status-bar back

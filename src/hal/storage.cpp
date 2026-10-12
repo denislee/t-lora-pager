@@ -10,6 +10,7 @@
 #include "fs_util.h"
 #include "evict.h"
 #include "../core/spi_lock.h"
+#include "../core/input_profile.h"
 
 #include <atomic>
 #include <cstring>
@@ -765,7 +766,10 @@ bool hw_save_preferred_file(const char *path, const char *content, std::string *
     /* Encode once so the internal and SD copies share identical bytes (and
      * therefore an identical salt when encrypted). */
     std::vector<uint8_t> payload;
-    if (!encode_for_write(path, content, payload, error)) return false;
+    {
+        INPUT_PROF_SPAN("save.encode");
+        if (!encode_for_write(path, content, payload, error)) return false;
+    }
 
     char str[256];
     normalize_path(path, str, sizeof(str));
@@ -776,12 +780,17 @@ bool hw_save_preferred_file(const char *path, const char *content, std::string *
     if (strncmp(str, NOTES_DIR, dlen) == 0 && str[dlen] == '/') {
         ensure_notes_dir();
     }
-    bool ok_int = hal::fs_write_all(FFat, str, payload.data(), payload.size());
+    bool ok_int;
+    {
+        INPUT_PROF_SPAN("save.ffat");
+        ok_int = hal::fs_write_all(FFat, str, payload.data(), payload.size());
+    }
     if (!ok_int && error) {
         *error = "Cannot write to Internal.";
     }
 
     if (HW_SD_ONLINE & hw_get_device_online()) {
+        INPUT_PROF_SPAN("save.sd");
         core::ScopedSpiLock lock;
         hal::fs_write_all(SD, str, payload.data(), payload.size());
     }

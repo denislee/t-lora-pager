@@ -22,6 +22,7 @@ public:
     void loop();
 
     lv_obj_t* getAppPanel() { return _appPanel; }
+    lv_obj_t* getMenuPanel() { return _menuPanel; }
 
     void showMenu();
     void hideMenu();

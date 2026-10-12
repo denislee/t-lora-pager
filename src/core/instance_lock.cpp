@@ -9,6 +9,7 @@
  * is usable unconditionally from shared code.
  */
 #include "system_hooks.h"
+#include "input_profile.h"
 
 #ifdef ARDUINO
 
@@ -37,15 +38,20 @@ void instance_lock_init()
 void instanceLockTake()
 {
     if (s_instance_mutex == nullptr) return;
+#ifdef INPUT_PROFILE
+    uint64_t t0 = core::prof::now_us();
+#endif
     if (xSemaphoreTake(s_instance_mutex, portMAX_DELAY) != pdTRUE) {
         log_e("instanceLockTake: xSemaphoreTake failed");
         assert(0);
     }
+    INPUT_PROF(core::prof::lock_acquired(core::prof::now_us() - t0));
 }
 
 void instanceLockGive()
 {
     if (s_instance_mutex == nullptr) return;
+    INPUT_PROF(core::prof::lock_released());
     if (xSemaphoreGive(s_instance_mutex) != pdTRUE) {
         log_e("instanceLockGive: xSemaphoreGive failed");
         assert(0);

@@ -1,0 +1,59 @@
+/**
+ * @file      input_profile.h
+ * @brief     Input-stutter profiling (plan item IS.0).
+ *
+ * Records where the input path spends time so we can find the source of
+ * UI stutter: how long the top-level instance lock is held and by whom,
+ * the keyboard reader's own lock wait, key enqueue->dequeue latency in
+ * the LVGL keypad read_cb, whole `lv_timer_handler()` passes, and named
+ * spans. All recording happens with the instance lock held or on the
+ * single LVGL thread, so it adds no locking of its own.
+ *
+ * Compiled in only when `INPUT_PROFILE` is defined. Enable it with:
+ *
+ *     pio run -e tlora_pager_profile
+ *
+ * (that env adds `-D INPUT_PROFILE`). Output goes to the serial monitor
+ * with the prefix `[prof]`. When the macro is off every entry point and
+ * the `INPUT_PROF_SPAN` / `INPUT_PROF` macros collapse to nothing, so
+ * call sites can stay in the tree at zero cost.
+ */
+#pragma once
+#include <stdint.h>
+#ifdef INPUT_PROFILE
+namespace core { namespace prof {
+uint64_t now_us();
+// Instance-lock tracker. Called by instanceLockTake() right after the take
+// succeeds (wait_us = time spent blocked) and by instanceLockGive() right
+// before the give.
+void lock_acquired(uint64_t wait_us);
+void lock_released();
+// Keyboard reader's own lock wait (after IS.1 it takes core::ScopedKbLock).
+void kb_lock_wait(uint64_t wait_us);
+// Key enqueue->dequeue latency, recorded by the LVGL keypad read_cb.
+void key_latency(uint64_t us);
+// One lv_timer_handler() pass.
+void frame(uint64_t us);
+// Named span, logged when >= 5 ms.
+void span(const char *name, uint64_t us);
+// Dump the default group's members (why = short label).
+void dump_group(const char *why);
+// Called once per LVGL loop; prints a summary every 10 s if anything was recorded.
+void report_tick();
+class Span {
+public:
+    explicit Span(const char *name) : name_(name), t0_(now_us()) {}
+    ~Span() { span(name_, now_us() - t0_); }
+    Span(const Span &) = delete; Span &operator=(const Span &) = delete;
+private:
+    const char *name_; uint64_t t0_;
+};
+}} // namespace core::prof
+#define INPUT_PROF_CAT2(a, b) a##b
+#define INPUT_PROF_CAT(a, b) INPUT_PROF_CAT2(a, b)
+#define INPUT_PROF_SPAN(name) ::core::prof::Span INPUT_PROF_CAT(input_prof_span_, __LINE__)(name)
+#define INPUT_PROF(stmt) do { stmt; } while (0)
+#else
+#define INPUT_PROF_SPAN(name) ((void)0)
+#define INPUT_PROF(stmt) ((void)0)
+#endif

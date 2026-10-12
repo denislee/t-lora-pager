@@ -18,6 +18,7 @@
 #include <lvgl.h>
 #include <LV_Helper.h>
 
+#include "../core/input_profile.h"
 #include "../core/scoped_lock.h"
 #include "../core/system.h"
 #include "task_util.h"
@@ -65,7 +66,11 @@ void lvgl_task_fn(void *)
         uint32_t next;
         {
             core::ScopedInstanceLock lock;
+#ifdef INPUT_PROFILE
+            uint64_t f0 = core::prof::now_us();
+#endif
             next = lv_timer_handler();
+            INPUT_PROF(core::prof::frame(core::prof::now_us() - f0));
             core::System::getInstance().loop();
         }
 
