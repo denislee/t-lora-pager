@@ -300,6 +300,87 @@ IS.5 hold already delivers in-transition scrolls to the new screen.
   This is the biggest structural render win but needs vendor-driver work. Plan it
   separately if IS.0 shows flush dominates frame time.
 
+### IS.8: Idle 1 s UI freezes from the PagerLink mutex and an I2C read race (found on hardware)
+
+**Status: DONE (working tree, uncommitted).** Seen on the pager with a phone connected
+and USB power: a ~1 s locked frame every ~4 s on an idle home screen. Chain, each step
+measured with `tlora_pager_profile`:
+1. `menu_app.cpp` `media_visibility_tick` (1 s, LVGL thread) → `hw_link_connected()` →
+   `pagerlink::service_connected()` took the link `g_mutex` just to read a bool.
+2. `link_task` held `g_mutex` through `service_tick` → `hw_get_monitor_params` →
+   `instance.gauge.refresh()`. That call was normally 14 ms but **1012 ms ~1 in 20 times**.
+3. Cause: SensorLib reads are `requestFrom()` + `readBytes()`. Wire only locks inside
+   `requestFrom`, and the bytes come out of its shared `rxBuffer` unlocked. `kb_reader`
+   (priority MAX-2, core 0, polling the TCA8418 every 100 ms with no instance lock
+   since IS.1) preempts the low-priority `link_task` in that window, the gauge read
+   comes up short, and `readBytes` waits out Stream's 1000 ms timeout. Negative
+   control: 150 s per phase, kb lock around the gauge read off/on/off → 3 / **0** / 1
+   failures; reads on the instance-locked tasks (lvgl 314, loopTask 46) never failed.
+   The IS.1 assumption that Wire's per-transaction lock is enough was wrong
+   (`core/kb_lock.h` now says so).
+
+Fix: `service_connected()` reads a lock-free `std::atomic<bool>` mirror (`g_connected`);
+`hw_get_monitor_params` holds `core::ScopedKbLock` across the sweep (that also guards its
+cache from concurrent callers); `hw_init` sets `Wire.setTimeout(20)` as a backstop.
+After: idle windows show frame max 0–5 ms over 3 min (section 7).
+Still open: any other I2C *read* that can run concurrently with `kb_reader` has the
+same window. The 20 ms Wire timeout bounds the cost, but the full fix is a bus-wide
+I2C lock.
+
+### IS.9: Journal background reconcile ran on the LVGL thread (found on hardware)
+
+**Status: DONE (working tree, uncommitted).** `bg_refresh_timer_cb` ran
+`refresh_journal_entries` (directory walk 423 ms / 51 notes, plus preview decrypts and
+the encrypted index rewrite) inside an lv_timer, which produced an **8023 ms frame**
+during the owner's live session. It now hands a snapshot to a `core::OneShotJob`
+worker (`journal_bg`, core 0, prio 1). `bg_refresh_done` applies the result on the
+LVGL thread and drops it if `s_entries_gen` moved (delete). It rechecks
+`hw_get_filesystem_generation()` (allowing for its own index write) and reschedules if
+stale. After: the reconcile ran 10.8 s on the worker while the owner navigated, with key
+p95 59 ms / max 105 ms and frame max 159 ms.
+
+### IS.10: PBKDF2 is ~2 s per derivation, not "tens of ms" (OPEN)
+
+Measured on the pager: PBKDF2-HMAC-SHA256 x10000 (`derive_key_iv`) = **1900–2682 ms
+at 240 MHz**. `notes_crypto.cpp`/`.h` comments assume tens of ms. Each key-cache miss on
+the LVGL thread is therefore a ~2 s freeze:
+- Journal cold open: `load_index_file` decrypt, measured 2289 ms.
+- Telegram open: `reload_config` → `hal::secret_load` token decrypt, 1837 ms.
+- Probably the first open of each encrypted note too.
+
+Options, to decide (security-sensitive, needs review):
+- (a) A faster PBKDF2. Cache the HMAC ipad/opad states (2 compressions per iteration
+  instead of 4) and use the SHA engine without per-call setup. Output must be identical;
+  prove it against OpenSSL `enc` vectors.
+- (b) Prewarm the read-side key cache for the known fixed salts (journal index,
+  secret slots) on a worker right after unlock.
+- (c) Move those decrypts to workers.
+
+Lowering `NC_ITERATIONS` would break compatibility with existing ciphertext, so it is not an option.
+
+### IS.11: Render-bound frames (OPEN, = IS.7 flush item)
+
+With the stalls above gone, the remaining slow frames are render plus flush: Settings
+200–336 ms per frame while idle on the page, Journal 120–160 ms while scrolling, and the
+first frame back on home 267–336 ms. This is the evidence the IS.7 DMA-flush and
+P6.12 items were waiting for.
+
+### Profiling tools added (profile build only)
+
+`core/input_profile.cpp` additions:
+- Slow-frame timer census: every frame ≥ 100 ms lists the callbacks that ran;
+  resolve them with `addr2line`.
+- `LinkLock` in `link_service.cpp` reports `g_mutex` holds ≥ 50 ms with the holding
+  function.
+- USB-serial console for scripted runs: `k` type, `r` rotary, `b` burst, `a` open
+  app, `f` mark FS dirty, `j` time the notes scan, `p` time a PBKDF2, `g` group
+  dump, `s` summary.
+
+Flashing note: after an esptool RTS reset this S3 sits in ROM download mode
+(`303a:1001`). Boot the app with an RTC-watchdog reset, i.e. write
+`0x600080B0=0x50D83AA1`, `0x6000809C=2000`, `0x60008098=0xD0000102` via
+`esptool write_mem`. The app enumerates as `303a:82d4`.
+
 ## 5. Order of work
 
 1. **IS.0.** Instrument and fill the measurement table. Re-rank section 3.
@@ -348,3 +429,7 @@ kb wait, key latency p95/max, worst frame, group size._
 | | | | | | | | |
 | 2026-10-12 | 2cb5f80 | emulator sweep, group dump only (no lock/latency on emulator) | — | — | — | — | MainMenu 13, Editor 5, Tasks 4, Settings 22, Files 10, SSH 12, Remote 8, Chat 5, others 1–2 |
 | 2026-10-12 | fe3736b | emulator xdotool flow, group dump after IS.3/IS.4 | — | — | — | — | MainMenu 13, Tasks 4, Editor 5, Journal 2 (app group holds only the app + back) |
+| 2026-10-12 | 6bcf603 | **pager**, home idle, phone on PagerLink, USB charging, no input | 1172 ms (lvgl, `media_visibility_tick` → `hw_link_connected` waiting on link `g_mutex`) | 0 | — | 300–1171 ms every ~4 s | home 10 |
+| 2026-10-12 | 6bcf603 | **pager**, live use by the owner (home → Editor → Journal) | 1930 ms (lvgl, Journal `onStart`) / 8024 ms (lvgl, Journal bg reconcile in an lv_timer) | 12 ms | p95 12 / max 1700 ms | 8023 ms | Editor 5, Journal 8 |
+| 2026-10-12 | working tree (IS.8) | **pager**, home idle 3 min, phone on PagerLink | 5 ms (one 83 ms) | 6 ms | — | 0–5 ms per window | home 9 |
+| 2026-10-12 | working tree (IS.8+IS.9) | **pager**, live use: Tasks, Telegram, Weather, Settings×2, Editor×5, Journal (bg reconcile ran 10.8 s on the worker) | 2289 ms (lvgl, Journal cold `onStart`, index decrypt) / 1837 ms (Telegram `onStart`, token decrypt) | 10 ms | p95 ≤ 172 / max 172 ms | 422 ms (render) | Tasks 38, Settings 22, Journal 8, Editor 5 |
