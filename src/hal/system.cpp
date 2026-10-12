@@ -7,6 +7,7 @@
 #include "internal.h"
 #include "notes_crypto.h"
 #include "sensors.h"
+#include "storage.h"
 #include "keyboard_task.h"
 #include "radio_chip.h"
 #include "../core/spi_lock.h"
@@ -747,6 +748,7 @@ uint32_t hw_get_device_online()
 void hw_shutdown()
 {
 #ifdef ARDUINO
+    hw_save_flush();  // IS.2: never cut power under a background note save
     instance.decrementBrightness(0, 5, false);
 #if defined(USING_PPM_MANAGE)
     instance.ppm.shutdown();
@@ -905,6 +907,7 @@ void hw_low_power_loop()
     /* Drop the in-RAM passphrase before suspending, on both the deep-sleep and
      * the light-sleep path — a device found asleep should be
      * indistinguishable from one that's been off. */
+    hw_save_flush();  // IS.2: finish a background note save (it may still need the key).
     notes_crypto_lock();
     {
         core::ScopedKbLock kb_lock;  // lightSleep()/sleep() call kb.end()/begin()

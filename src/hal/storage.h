@@ -87,6 +87,28 @@ uint32_t hw_get_filesystem_generation();
 bool hw_save_preferred_file(const char *path, const char *content, std::string *error = nullptr,
                             bool allow_prune = true);
 
+// Failure callback for hw_save_preferred_file_async(). Runs on the save
+// worker task (not the LVGL thread): only thread-safe calls such as
+// core::notify::post().
+typedef void (*hw_save_fail_cb_t)(const char *path, const std::string &error);
+
+// IS.2: save a note on a background worker (core 0, low priority) so leaving
+// the editor never waits for encode + FFat + SD. `content` is moved into the
+// job. At most one save is in flight: a second call first waits for the
+// previous one, so writes stay ordered. Every reader/lister/deleter below
+// waits for a pending save first, so nothing observes a half-written note.
+// If the worker cannot be spawned the save runs synchronously. Returns false
+// only when that synchronous fallback failed.
+bool hw_save_preferred_file_async(const char *path, std::string content,
+                                  hw_save_fail_cb_t on_fail = nullptr);
+
+// Block until a pending background save has finished. Called by the sleep,
+// power-off and light-sleep paths so a note is never lost to a power cut.
+void hw_save_flush();
+
+// True while a background save is running.
+bool hw_save_pending();
+
 // Partial read: stops after `max_bytes` so callers can build previews cheaply.
 // `truncated` (if non-null) is set to true when the file was longer than max_bytes.
 bool hw_read_preferred_file_snippet(const char *path, std::string &content,

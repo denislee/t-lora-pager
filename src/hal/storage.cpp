@@ -37,6 +37,13 @@ using hal::NOTES_DIR;
 using hal::NOTES_PREFIX;
 
 #ifdef ARDUINO
+// IS.2 background save. Defined below hw_save_preferred_file.
+static void wait_pending_save();
+#else
+static inline void wait_pending_save() {}
+#endif
+
+#ifdef ARDUINO
 /* Cheap on every save — FFat.mkdir is a no-op when the entry exists. The SD
  * branch only fires when the card is mounted; without a card the FFat copy
  * is the user's only home. */
@@ -208,6 +215,7 @@ void hw_set_filesystem_dirty(bool dirty)
 
 bool hw_delete_file(const char *path)
 {
+    wait_pending_save();
     hw_set_filesystem_dirty(true);
 #ifdef ARDUINO
     char str[256];
@@ -265,6 +273,7 @@ bool hw_delete_path(const char *path, bool use_sd)
 {
     hw_set_filesystem_dirty(true);
 #ifdef ARDUINO
+    wait_pending_save();
     if (!path || !path[0]) return false;
     char buf[256];
     normalize_path(path, buf, sizeof(buf));
@@ -285,6 +294,7 @@ bool hw_delete_path(const char *path, bool use_sd)
 bool hw_read_file(const char *path, std::string &content)
 {
 #ifdef ARDUINO
+    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
     File f;
@@ -325,6 +335,7 @@ bool hw_read_file(const char *path, std::string &content)
 size_t hw_get_file_size(const char *path)
 {
 #ifdef ARDUINO
+    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
     File f;
@@ -356,6 +367,7 @@ bool hw_read_internal_bytes_raw(const char *path, std::vector<uint8_t> &buf)
 {
     buf.clear();
 #ifdef ARDUINO
+    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
     return hal::fs_read_all(FFat, str, buf);
@@ -369,6 +381,7 @@ bool hw_read_sd_bytes_raw(const char *path, std::vector<uint8_t> &buf)
 {
     buf.clear();
 #ifdef ARDUINO
+    wait_pending_save();
     if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
     char str[256];
     normalize_path(path, str, sizeof(str));
@@ -385,6 +398,7 @@ bool hw_read_sd_stream(const char *path, size_t chunk_bytes,
                        void *user)
 {
 #ifdef ARDUINO
+    wait_pending_save();
     if (!sink || chunk_bytes == 0) return false;
     if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
     char str[256];
@@ -460,6 +474,7 @@ void hw_get_internal_txt_files(std::vector<std::string> &list)
 {
     list.clear();
 #ifdef ARDUINO
+    wait_pending_save();
     std::vector<FileInfo> file_infos;
     list_files(file_infos, FFat, NOTES_DIR, ".txt");
 
@@ -483,6 +498,7 @@ void hw_get_sd_txt_files(std::vector<std::string> &list)
 {
     list.clear();
 #ifdef ARDUINO
+    wait_pending_save();
     if (HW_SD_ONLINE & hw_get_device_online()) {
         std::vector<FileInfo> file_infos;
         {
@@ -551,6 +567,7 @@ void hw_list_internal_entries(std::vector<HwDirEntry> &list, const char *filter_
     list.clear();
     if (!dirname || !dirname[0]) dirname = "/";
 #ifdef ARDUINO
+    wait_pending_save();
     list_entries(list, FFat, dirname, filter_ext);
 #else
     bool all = !(filter_ext && filter_ext[0]);
@@ -579,6 +596,7 @@ void hw_list_sd_entries(std::vector<HwDirEntry> &list, const char *filter_ext,
     list.clear();
     if (!dirname || !dirname[0]) dirname = "/";
 #ifdef ARDUINO
+    wait_pending_save();
     if (HW_SD_ONLINE & hw_get_device_online()) {
         core::ScopedSpiLock lock;
         list_entries(list, SD, dirname, filter_ext);
@@ -757,7 +775,7 @@ static void prune_internal_storage()
 }
 #endif
 
-bool hw_save_preferred_file(const char *path, const char *content, std::string *error,
+static bool save_preferred_file_impl(const char *path, const char *content, std::string *error,
                             bool allow_prune)
 {
     hw_set_filesystem_dirty(true);
@@ -805,11 +823,87 @@ bool hw_save_preferred_file(const char *path, const char *content, std::string *
 #endif
 }
 
+bool hw_save_preferred_file(const char *path, const char *content, std::string *error,
+                            bool allow_prune)
+{
+    wait_pending_save();   // keep write order behind a background save
+    return save_preferred_file_impl(path, content, error, allow_prune);
+}
+
+#ifdef ARDUINO
+namespace {
+struct AsyncSave {
+    std::string       path;
+    std::string       content;
+    hw_save_fail_cb_t on_fail;
+};
+volatile bool s_save_pending = false;
+TaskHandle_t  s_save_task    = nullptr;
+
+void save_task(void *arg)
+{
+    AsyncSave *job = static_cast<AsyncSave *>(arg);
+    std::string err;
+    // Off the UI thread, so the eviction sweep may run (it spawns its own task).
+    bool ok = save_preferred_file_impl(job->path.c_str(), job->content.c_str(), &err, true);
+    if (!ok && job->on_fail) job->on_fail(job->path.c_str(), err);
+    delete job;
+    s_save_task = nullptr;
+    s_save_pending = false;
+    vTaskDelete(nullptr);
+}
+} // namespace
+
+// Readers poll rather than block on a semaphore: a save is tens to a few
+// hundred ms and this only runs when something touches storage right after
+// leaving the editor. The worker's own nested calls must not wait on itself.
+static void wait_pending_save()
+{
+    if (s_save_pending && xTaskGetCurrentTaskHandle() == s_save_task) return;
+    while (s_save_pending) vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+bool hw_save_preferred_file_async(const char *path, std::string content,
+                                  hw_save_fail_cb_t on_fail)
+{
+    wait_pending_save();
+    hw_set_filesystem_dirty(true);   // caches see the change before the write lands
+    AsyncSave *job = new AsyncSave{path, std::move(content), on_fail};
+    s_save_pending = true;
+    // 10 KB: AES-CBC + a possible PBKDF2 derive + FFat/SD writes; no TLS.
+    if (xTaskCreatePinnedToCore(save_task, "note_save", 10240, job, 2, &s_save_task, 0) != pdPASS) {
+        s_save_task = nullptr;
+        s_save_pending = false;
+        std::string err;
+        bool ok = save_preferred_file_impl(job->path.c_str(), job->content.c_str(), &err, false);
+        if (!ok && on_fail) on_fail(job->path.c_str(), err);
+        delete job;
+        return ok;
+    }
+    return true;
+}
+
+void hw_save_flush() { wait_pending_save(); }
+bool hw_save_pending() { return s_save_pending; }
+#else
+bool hw_save_preferred_file_async(const char *path, std::string content,
+                                  hw_save_fail_cb_t on_fail)
+{
+    std::string err;
+    bool ok = hw_save_preferred_file(path, content.c_str(), &err, false);
+    if (!ok && on_fail) on_fail(path, err);
+    return ok;
+}
+void hw_save_flush() {}
+bool hw_save_pending() { return false; }
+#endif
+
 bool hw_read_preferred_file_snippet(const char *path, std::string &content, size_t max_bytes, bool *truncated)
 {
     content.clear();
     if (truncated) *truncated = false;
 #ifdef ARDUINO
+    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
 
@@ -877,6 +971,7 @@ void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t
 {
     list.clear();
 #ifdef ARDUINO
+    wait_pending_save();
     std::vector<FileInfo> infos;
 
     // Scan Internal

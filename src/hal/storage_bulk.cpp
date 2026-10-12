@@ -33,6 +33,7 @@ bool hw_copy_all_notes_to_hub(int *copied, int *failed, std::string *error,
     if (copied) *copied = 0;
     if (failed) *failed = 0;
 #ifdef ARDUINO
+    hw_save_flush();  // IS.2: copy the note a background save is still writing
     if (!hal::hub_is_enabled()) {
         if (error) *error = "Hub is not enabled.";
         return false;
@@ -118,6 +119,7 @@ bool hw_copy_internal_to_sd(int *copied, int *failed, std::string *error, void (
     if (copied) *copied = 0;
     if (failed) *failed = 0;
 #ifdef ARDUINO
+    hw_save_flush();  // IS.2: copy the note a background save is still writing
     if (!(HW_SD_ONLINE & hw_get_device_online())) {
         // Attempt to mount before giving up.
         hw_mount_sd();

@@ -11,6 +11,7 @@
  *   widgets: pending_editor_parent      — nulled (was deferred-build pointer)
  *   timers:  sync_pill_wifi_timer       — lv_timer_del + null
  *            word_count_debounce_timer  — lv_timer_del + null
+ *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
  * If you add a new cached LVGL pointer or timer, list it above AND
  * extend editor_exit() — the debounce timer in particular will fire
  * into a destroyed textarea if leaked.
@@ -19,6 +20,7 @@
 #include "../core/app_manager.h"
 #include "../core/input_profile.h"
 #include "../core/system.h"
+#include "../core/notify.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/storage.h"
 #include "../hal/wireless.h"
@@ -52,27 +54,33 @@ static void ui_text_editor_exit(lv_obj_t *parent);
 static void update_word_count();
 static void schedule_word_count_update();
 
-// `allow_prune` forwards to hw_save_preferred_file: the exit/teardown path
-// passes false so returning to the menu is never delayed by the internal-storage
-// eviction sweep, which runs on the next ordinary save instead.
-static bool save_content(bool show_error_popup, bool allow_prune = true)
+// Runs on the save worker: post a banner instead of a popup (LVGL is not
+// ours to touch from there).
+static void save_failed_cb(const char *path, const std::string &err)
 {
-    if (!text_area) return true;
-    if (!content_dirty) return true;
-    INPUT_PROF_SPAN("save_content");
+    (void)path;
+    core::notify::Notification n;
+    n.title    = "Save failed";
+    n.body     = err.empty() ? std::string("Note was not saved.") : err;
+    n.icon     = LV_SYMBOL_WARNING;
+    n.severity = core::notify::Severity::Error;
+    n.duration_ms = 0;
+    n.haptic   = true;
+    core::notify::post(n);
+}
 
+// IS.2: leaving the editor snapshots the text and saves it on a worker, so
+// the switch back to the menu does not wait for encode + FFat + SD. Same
+// skip rules as save_content().
+static void save_content_async()
+{
+    if (!text_area || !content_dirty) return;
     const char *txt = lv_textarea_get_text(text_area);
-
     bool only_whitespace = true;
-    size_t len = lv_strlen(txt);
-    for (size_t i = 0; i < len; i++) {
-        if (!isspace((unsigned char)txt[i])) {
-            only_whitespace = false;
-            break;
-        }
+    for (const char *p = txt; p && *p; ++p) {
+        if (!isspace((unsigned char)*p)) { only_whitespace = false; break; }
     }
-    if (only_whitespace) return true;
-
+    if (only_whitespace) return;
     string target_path = current_file_path;
     if (target_path.empty()) {
         struct tm timeinfo;
@@ -83,17 +91,9 @@ static bool save_content(bool show_error_popup, bool allow_prune = true)
                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
         target_path = filename;
     }
-
-    string err;
-    bool success = hw_save_preferred_file(target_path.c_str(), txt, &err, allow_prune);
-    if (success) {
-        content_dirty = false;
-        if (current_file_path.empty()) current_file_path = target_path;
-    } else if (show_error_popup) {
-        string msg = "Failed to save file: " + err;
-        ui_msg_pop_up("Save", msg.c_str());
-    }
-    return success;
+    content_dirty = false;
+    current_file_path = target_path;
+    hw_save_preferred_file_async(target_path.c_str(), string(txt), save_failed_cb);
 }
 
 static void update_word_count()
@@ -141,7 +141,7 @@ static void schedule_word_count_update()
 
 static void do_exit()
 {
-    save_content(true);
+    save_content_async();
     menu_show_deferred();  // switchApp → onStop → ui_text_editor_exit
 }
 
@@ -505,13 +505,11 @@ void ui_text_editor_open_file(const char *path)
 
 static void ui_text_editor_exit(lv_obj_t *parent)
 {
-    // Persist the buffer on every teardown path, not just do_exit(): the
-    // AppManager can stop us from app-switching, sleep, or any code that
-    // calls switchApp() without routing through our back button. Save
-    // silently here — the UI is already going away so a popup would race
-    // with the destruction. Skip the eviction sweep (allow_prune=false): the
-    // teardown must return promptly, and the sweep will run on the next save.
-    save_content(false, /*allow_prune=*/false);
+    // Persist on every teardown path (app switch, sleep, any switchApp that
+    // bypasses the back button); the save runs on a worker (IS.2) so teardown
+    // returns at once; a failure surfaces as a notify banner; sleep/power-off
+    // paths call hw_save_flush().
+    save_content_async();
 
     ui_hide_back_button();
 

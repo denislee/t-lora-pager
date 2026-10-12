@@ -11,6 +11,7 @@
 #include "ui_define.h"
 #include "core/system.h"
 #include "core/scoped_lock.h"
+#include "hal/storage.h"
 
 static bool fake_sleep_active = false;
 // Tracks whether hw_power_down_all() has been called for the current fake-sleep
@@ -73,6 +74,9 @@ void ui_pause_timers()
     // rail teardown on the second call to avoid a double hw_power_down_all().
     if (s_power_down_active) return;
     s_power_down_active = true;
+    // IS.2: a note saved on leaving the editor may still be writing; let it
+    // land before the rails and CPU clock drop.
+    hw_save_flush();
     disable_keyboard();
     hw_power_down_all();
     // Fake-sleep just began — let the charge task start watching VBUS so a
