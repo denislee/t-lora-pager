@@ -50,7 +50,7 @@ LEGACY_DEVICE = $(shell command -v ios-deploy >/dev/null 2>&1 && \
 m = [re.search(r'Found (\S+) .*?, iphoneos, [^,]*, (\d+)\.(\d+)', l) for l in sys.stdin]; \
 print(next((f'{x.group(1)} {x.group(2)}.{x.group(3)}' for x in m if x and int(x.group(2)) < 17), ''))")
 
-.PHONY: gen test test-linux sim device device-run device-console clean clean-device help
+.PHONY: gen test test-linux sim device device-run device-console device-log clean clean-device help
 
 # Regenerate PagerCompanion.xcodeproj from project.yml. The .xcodeproj is not
 # committed, so run this after any change to project.yml or to the file layout.
@@ -115,12 +115,27 @@ device-run: device device-console
 # Launch the installed app with its stdout/stderr streamed here (not os_log).
 # The bundle id is read from the built app, since BUNDLE_ID_PREFIX is per
 # developer.
+#
+# An iOS 16 phone (no CoreDevice, and current Xcode has no iOS 16 disk image
+# for ios-deploy's debugger) falls back to device-log: launch the app from the
+# Home screen.
 device-console:
-	@test -n "$(DEVICE)" || { echo "No connected iOS 17+ device."; exit 1; }
 	@test -d $(APP) || { echo "No device build yet; run make device first."; exit 1; }
-	@echo "==> Launching with console attached (ctrl-C to detach; the app keeps running)"
-	@xcrun devicectl device process launch --console --terminate-existing \
-		--device $(DEVICE) $$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' $(APP)/Info.plist)
+	@dev='$(DEVICE)'; \
+	if [ -n "$$dev" ]; then \
+		echo "==> Launching with console attached (ctrl-C to detach; the app keeps running)"; \
+		xcrun devicectl device process launch --console --terminate-existing \
+			--device "$$dev" $$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' $(APP)/Info.plist); \
+	else \
+		$(MAKE) --no-print-directory device-log; \
+	fi
+
+# The app's session log (os_log "[pagerlink] ...") from the phone's syslog over
+# USB, any iOS version. Needs libimobiledevice (brew install libimobiledevice).
+device-log:
+	@command -v idevicesyslog >/dev/null || { echo "Needs: brew install libimobiledevice"; exit 1; }
+	@echo "==> Streaming PagerCompanion log (launch the app on the phone; ctrl-C to stop)"
+	@idevicesyslog -p PagerCompanion | grep --line-buffered '\[pagerlink\]'
 
 clean-device:
 	rm -rf $(DD)

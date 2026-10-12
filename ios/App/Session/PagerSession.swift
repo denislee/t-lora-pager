@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import PagerKit
 
 /// The observable state the UI sees for one companion link
@@ -29,6 +30,12 @@ final class PagerSession: ObservableObject {
     private var eventsTask: Task<Void, Never>?
     /// Tears the active transport down (TCP or BLE).
     private var stopTransport: (() async -> Void)?
+    private var weather: WeatherService?
+    private let location = LocationProvider()
+
+    /// The weather key the pager last asked for (`"auto"` or a city), pushed
+    /// again on every connect so the pager's cache is fresh before it asks.
+    nonisolated private static let weatherKeyDefault = "PagerLink.weatherKey"
 
     /// Open the emulator TCP transport and bring the link up.
     func connectTCP(host: String = "127.0.0.1", port: UInt16 = 7600) async {
@@ -92,12 +99,13 @@ final class PagerSession: ObservableObject {
     private func bringUp(_ transport: PacketTransport) async {
         let session = LinkSession(transport: transport)
         self.session = session
+        await registerWeather(on: session)
         await session.start()
         watchEvents(of: session)
 
         let sys = SysService(session: session)
         do {
-            let hello = try await sys.hello(app: "0.1", caps: ["sys"])
+            let hello = try await sys.hello(app: "0.1", caps: ["sys", "weather"])
             state = .connected(hello: hello)
             appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
 
@@ -109,10 +117,45 @@ final class PagerSession: ObservableObject {
             appendLog("time synced (\(TimeZone.current.identifier))")
 
             await refresh()
+            location.requestAuthorizationIfNeeded()
+            if let key = UserDefaults.standard.string(forKey: Self.weatherKeyDefault) {
+                await pushWeather(key: key)
+            }
         } catch {
             await disconnect()
             state = .failed(String(describing: error))
             appendLog("connect failed: \(error)")
+        }
+    }
+
+    /// Answer the pager's `weather.get` (PROTOCOL.md §6.3).
+    private func registerWeather(on session: LinkSession) async {
+        let location = self.location
+        let service = WeatherService(session: session, locator: { try await location.place() })
+        weather = service
+        await service.register { [weak self] key in
+            UserDefaults.standard.set(key, forKey: PagerSession.weatherKeyDefault)
+            Task { @MainActor in self?.appendLog("weather.get for \"\(key)\"") }
+        }
+    }
+
+    /// `weather.push` — fetch the forecast for `key` and send it to the pager.
+    func pushWeather(key: String? = nil) async {
+        guard let weather else {
+            appendLog("weather push: not connected")
+            return
+        }
+        // The pager's key ("auto", a city, or the "Sao Paulo" first-boot
+        // default) is only known once it has asked.
+        guard let key = key ?? UserDefaults.standard.string(forKey: Self.weatherKeyDefault) else {
+            appendLog("weather push: open Weather on the pager once so the phone learns its location")
+            return
+        }
+        do {
+            try await weather.push(key: key)
+            appendLog("weather pushed for \"\(key)\"")
+        } catch {
+            appendLog("weather push failed: \(error)")
         }
     }
 
@@ -170,6 +213,7 @@ final class PagerSession: ObservableObject {
         // Detach first so the events watcher doesn't report this as a drop.
         let session = self.session
         self.session = nil
+        weather = nil
         eventsTask?.cancel()
         eventsTask = nil
         if let session {
@@ -207,9 +251,14 @@ final class PagerSession: ObservableObject {
         return String(format: "%.1f ms", seconds * 1000)
     }
 
+    private static let logger = Logger(subsystem: "PagerCompanion", category: "session")
+
     private func appendLog(_ line: String) {
         let stamp = Date().formatted(date: .omitted, time: .standard)
         log.append("[\(stamp)] \(line)")
+        // Mirror to the unified log so the Mac can read it: Console.app,
+        // `make device-console` (iOS 17+) or `make device-log` (any iOS).
+        Self.logger.notice("[pagerlink] \(line, privacy: .public)")
         if log.count > 200 {
             log.removeFirst(log.count - 200)
         }

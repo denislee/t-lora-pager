@@ -96,6 +96,10 @@ struct DashboardView: View {
                 Task { await session.syncTime() }
             }
             .disabled(!isConnected)
+            Button("Push weather") {
+                Task { await session.pushWeather() }
+            }
+            .disabled(!isConnected)
             Button("Disconnect", role: .destructive) {
                 Task { await session.disconnect() }
             }

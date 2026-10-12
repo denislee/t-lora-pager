@@ -26,6 +26,8 @@
 	<string>Pager Companion talks to your LilyGo pager over Bluetooth.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Debug builds can connect to the pager emulator on this network.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Pager Companion uses your location for the pager's "auto" weather forecast.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
