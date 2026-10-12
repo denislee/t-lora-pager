@@ -72,6 +72,7 @@ struct DashboardView: View {
     @ViewBuilder
     private var actionsSection: some View {
         Section {
+            Toggle("Auto-connect via Bluetooth", isOn: $session.autoConnect)
             Button("Connect via Bluetooth") {
                 Task { await session.connectBLE() }
             }
@@ -101,7 +102,7 @@ struct DashboardView: View {
             }
             .disabled(!isConnected)
             Button("Disconnect", role: .destructive) {
-                Task { await session.disconnect() }
+                Task { await session.userDisconnect() }
             }
             .disabled(!isConnected && !isConnecting)
         }

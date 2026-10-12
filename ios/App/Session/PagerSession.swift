@@ -23,6 +23,20 @@ final class PagerSession: ObservableObject {
     @Published private(set) var info: JSONValue?
     @Published private(set) var lastRTT: Duration?
 
+    /// Connect over Bluetooth on launch / foreground and keep retrying (with
+    /// backoff) after a failed connect or a dropped link. Persisted; on by default.
+    @Published var autoConnect: Bool = UserDefaults.standard.object(forKey: PagerSession.autoConnectDefault) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(autoConnect, forKey: Self.autoConnectDefault)
+            if autoConnect {
+                userDisconnected = false
+                autoConnectIfNeeded()
+            } else {
+                cancelReconnect()
+            }
+        }
+    }
+
     /// Rolling session log, newest last, capped at 200 lines.
     @Published private(set) var log: [String] = []
 
@@ -32,6 +46,15 @@ final class PagerSession: ObservableObject {
     private var stopTransport: (() async -> Void)?
     private var weather: WeatherService?
     private let location = LocationProvider()
+    /// Pending auto-connect retry, if any.
+    private var reconnectTask: Task<Void, Never>?
+    /// Next retry delay in seconds; doubles per failure up to 60, reset on connect.
+    private var reconnectDelay: Double = 2
+    /// The user pressed Disconnect: no auto-connect until they connect again
+    /// (or re-enable the toggle, or relaunch the app).
+    private var userDisconnected = false
+    /// Whether the current/last link is BLE (only BLE links auto-reconnect).
+    private var linkIsBLE = false
     /// The phone's own Telegram login; answers tg.* while logged in.
     private let telegram: TelegramNative?
 
@@ -42,11 +65,55 @@ final class PagerSession: ObservableObject {
     /// The weather key the pager last asked for (`"auto"` or a city), pushed
     /// again on every connect so the pager's cache is fresh before it asks.
     nonisolated private static let weatherKeyDefault = "PagerLink.weatherKey"
+    nonisolated private static let autoConnectDefault = "PagerLink.autoConnect"
+
+    /// Called on launch and whenever the app becomes active: connect over
+    /// Bluetooth right away if auto-connect is on and no link is up.
+    func autoConnectIfNeeded() {
+        guard autoConnect, !userDisconnected else { return }
+        switch state {
+        case .connected, .connecting: return
+        case .disconnected, .failed: break
+        }
+        cancelReconnect()
+        reconnectDelay = 2
+        Task { await connectBLE() }
+    }
+
+    /// Retry the BLE connect after a backoff delay, if auto-connect wants it.
+    private func scheduleReconnect() {
+        guard autoConnect, !userDisconnected, linkIsBLE, reconnectTask == nil else { return }
+        let delay = reconnectDelay
+        reconnectDelay = min(reconnectDelay * 2, 60)
+        appendLog("auto-connect: retrying in \(Int(delay)) s")
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectTask = nil
+            await self.connectBLE()
+        }
+    }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+    }
+
+    /// The Disconnect button: drop the link and stop auto-connect from
+    /// immediately bringing it back.
+    func userDisconnect() async {
+        userDisconnected = true
+        cancelReconnect()
+        await disconnect()
+    }
 
     /// Open the emulator TCP transport and bring the link up.
     func connectTCP(host: String = "127.0.0.1", port: UInt16 = 7600) async {
         #if canImport(Network)
+            cancelReconnect()
+            userDisconnected = false
             guard await beginConnect("TCP connecting to \(host):\(port)…") else { return }
+            linkIsBLE = false
             let transport = TCPTransport(host: host, port: port)
             stopTransport = { await transport.stop() }
             do {
@@ -66,7 +133,10 @@ final class PagerSession: ObservableObject {
     /// iOS already holds it) and bring the link up.
     func connectBLE() async {
         #if canImport(CoreBluetooth)
+            cancelReconnect()
+            userDisconnected = false
             guard await beginConnect("BLE: looking for the pager…") else { return }
+            linkIsBLE = true
             let transport = BLETransport { [weak self] line in
                 Task { @MainActor in self?.appendLog("BLE: \(line)") }
             }
@@ -87,6 +157,9 @@ final class PagerSession: ObservableObject {
     /// Common pre-connect: drop any old link, enter `.connecting`.
     private func beginConnect(_ line: String) async -> Bool {
         if case .connecting = state { return false }
+        // Claim the slot before suspending so a concurrent caller (launch +
+        // foreground auto-connect) backs off instead of racing this one.
+        state = .connecting
         await disconnect()
         state = .connecting
         appendLog(line)
@@ -98,6 +171,7 @@ final class PagerSession: ObservableObject {
         stopTransport = nil
         state = .failed(String(describing: error))
         appendLog("connect failed: \(error)")
+        scheduleReconnect()
     }
 
     /// Start the RPC session on an open transport: `sys.hello`, time sync,
@@ -114,6 +188,7 @@ final class PagerSession: ObservableObject {
         do {
             let hello = try await sys.hello(app: "0.1", caps: ["sys", "weather", "tg"])
             state = .connected(hello: hello)
+            reconnectDelay = 2
             appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
 
             // Auto time sync on connect (plan §4.5: sys.time.set).
@@ -132,6 +207,7 @@ final class PagerSession: ObservableObject {
             await disconnect()
             state = .failed(String(describing: error))
             appendLog("connect failed: \(error)")
+            scheduleReconnect()
         }
     }
 
@@ -248,6 +324,7 @@ final class PagerSession: ObservableObject {
             await self.disconnect()
             self.state = .failed("link dropped")
             self.appendLog("link dropped")
+            self.scheduleReconnect()
         }
     }
 

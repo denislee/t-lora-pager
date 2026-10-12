@@ -27,9 +27,8 @@ targets:
     platform: iOS
     sources:
       - App
-    resources:
-      # Nothing ships as a bundle resource yet: Info.plist is wired through
-      # `info.path` below, so it must be excluded from the copy phase.
+      # The asset catalog (app icon). Info.plist is wired through `info.path`
+      # below, so it must stay out of the copy phase.
       - path: Resources
         excludes:
           - Info.plist
@@ -66,6 +65,7 @@ targets:
       - package: TDLibFramework
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).pagercompanion"
