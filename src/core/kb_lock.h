@@ -22,10 +22,14 @@
  * `ScopedKbLock`; never the reverse. Nothing under `ScopedKbLock` may take
  * the instance lock.
  *
- * The Wire (I2C) bus itself stays safe for other users (PMIC, RTC, sensors):
- * arduino-esp32 builds Wire with its per-transaction HAL lock
- * (CONFIG_DISABLE_HAL_LOCKS unset), so a keyboard transaction cannot corrupt
- * a concurrent PMIC/RTC/sensor transaction on the same bus.
+ * The Wire (I2C) bus is NOT fully safe for other users on its own.
+ * arduino-esp32's HAL lock (CONFIG_DISABLE_HAL_LOCKS unset) covers each
+ * transaction, but a read's bytes are then taken from Wire's shared rxBuffer
+ * with no lock held. A kb_reader poll that lands between another task's
+ * requestFrom() and its read() leaves that read short, and readBytes() then
+ * waits out its timeout. On the pager this stalled the battery-gauge read
+ * for 1 s. So any I2C READ that can run concurrently with the reader must
+ * also hold this lock (hw_get_monitor_params does). Writes are safe without it.
  *
  * Declared here without pulling in FreeRTOS so the header is cheap to include
  * from HAL and UI TUs; the implementation lives in kb_lock.cpp.

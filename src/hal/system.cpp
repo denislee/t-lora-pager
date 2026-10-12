@@ -416,6 +416,11 @@ void hw_init()
         }
     }, POWER_EVENT, NULL);
 
+    // Wire's readBytes() inherits Stream's 1000 ms timeout and only waits when
+    // a read came back short (bus race or NACK). Cap it so a failed I2C read
+    // costs milliseconds, not a second inside a locked UI frame.
+    Wire.setTimeout(20);
+
     // Drive the keyboard from a dedicated high-priority task so it stays
     // responsive even when the main loop is held up by radio / NFC /
     // display flush / WiFi work. Must run after beginLvglHelper() so the

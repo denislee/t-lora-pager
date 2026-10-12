@@ -9,6 +9,7 @@
  */
 #include "hal/link/link_service.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -19,6 +20,7 @@
 #include "hal/link/link_xfer.h"
 #include "hal/power.h"
 #include "hal/storage.h"
+#include "core/input_profile.h"
 
 #ifdef ARDUINO
 #include <esp32-hal-log.h>
@@ -32,6 +34,35 @@ namespace pagerlink {
 namespace {
 
 std::recursive_mutex g_mutex;
+
+/* Lock-free mirror of State::connected, so UI code (the home screen polls
+ * hw_link_connected() every second from inside the LVGL frame) never waits for
+ * g_mutex while the link task holds it for I2C/BLE work. Written only with
+ * g_mutex held, next to every write of State::connected. */
+std::atomic<bool> g_connected{false};
+
+/* g_mutex guard. The profile build (INPUT_PROFILE) reports holds >= 50 ms
+ * with the holder's function, so a stalled link can be told from a slow UI. */
+struct LinkLock {
+#ifdef INPUT_PROFILE
+    explicit LinkLock(const char *who) : who_(who) {
+        g_mutex.lock();
+        t0_ = core::prof::now_us();
+    }
+    ~LinkLock() {
+        const uint64_t us = core::prof::now_us() - t0_;
+        g_mutex.unlock();
+        if (us >= 50000) core::prof::span(who_, us);
+    }
+    const char *who_;
+    uint64_t t0_;
+#else
+    explicit LinkLock(const char *) { g_mutex.lock(); }
+    ~LinkLock() { g_mutex.unlock(); }
+#endif
+    LinkLock(const LinkLock &) = delete;
+    LinkLock &operator=(const LinkLock &) = delete;
+};
 
 struct State {
     bool connected = false;
@@ -286,7 +317,7 @@ Reassembler &reassembler() {
 }  // namespace
 
 void service_on_connect(const TransportOps &ops) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
 
     reassembler().reset();
@@ -296,6 +327,7 @@ void service_on_connect(const TransportOps &ops) {
      * for (defensive; normally service_on_disconnect() already did this). */
     if (s.rpc) {
         s.connected = false; /* done() callbacks must not start a new transfer */
+        g_connected.store(false);
         outbound_reset();
         inbound_reset();
         fs_reset();
@@ -374,11 +406,12 @@ void service_on_connect(const TransportOps &ops) {
     s.have_batt = true;
 
     s.connected = true;
+    g_connected.store(true);
     LINK_LOG("connected: %s", s.peer_name.c_str());
 }
 
 void service_on_packet(const uint8_t *pkt, size_t len) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     if (!s.connected) {
         return;
@@ -388,10 +421,11 @@ void service_on_packet(const uint8_t *pkt, size_t len) {
 }
 
 void service_on_disconnect() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
 
     s.connected = false; /* refuse new calls; done() must not restart a transfer */
+    g_connected.store(false);
     outbound_reset();
     inbound_reset();
 
@@ -409,7 +443,7 @@ void service_on_disconnect() {
 }
 
 void service_tick() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     if (!s.connected || !s.rpc) {
         return;
@@ -471,18 +505,17 @@ void service_tick() {
 }
 
 bool service_connected() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
-    return state().connected;
+    return g_connected.load();
 }
 
 std::string service_peer_name() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     return s.connected ? s.peer_name : std::string();
 }
 
 void service_get_stats(HwLinkStats &out) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     out.rx_packets = s.rx_packets;
     out.tx_packets = s.tx_packets;
@@ -493,13 +526,13 @@ void service_get_stats(HwLinkStats &out) {
 }
 
 size_t service_packet_size() {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     return state().packet_size;
 }
 
 bool service_call(const std::string &method, const std::string &params_json, uint32_t timeout_ms,
                   Rpc::ResponseFn cb) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     if (!s.connected || !s.rpc) {
         return false;
@@ -509,7 +542,7 @@ bool service_call(const std::string &method, const std::string &params_json, uin
 
 bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t stall_ms,
                         std::function<void(bool ok)> done) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     if (!s.connected || !s.rpc) {
         return false;
@@ -560,7 +593,7 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
 }
 
 uint16_t service_accept_open(uint32_t max_size) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     if (!s.connected || !s.rpc) {
         return 0;
@@ -590,7 +623,7 @@ uint16_t service_accept_open(uint32_t max_size) {
 
 bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_t stall_ms,
                            std::function<void(bool ok, std::string &bytes)> done) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     const long idx = inbound_find(xfer);
     if (idx < 0) return false;
@@ -646,7 +679,7 @@ bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_
 }
 
 void service_accept_close(uint16_t xfer) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     const long idx = inbound_find(xfer);
     if (idx < 0) return;
     State &s = state();
@@ -654,12 +687,12 @@ void service_accept_close(uint16_t xfer) {
 }
 
 bool service_accept_owns(uint16_t xfer) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     return inbound_find(xfer) >= 0;
 }
 
 bool service_emit(const std::string &event, const std::string &params_json) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     State &s = state();
     if (!s.connected || !s.rpc) {
         return false;
@@ -669,7 +702,7 @@ bool service_emit(const std::string &event, const std::string &params_json) {
 
 int service_subscribe(const std::string &event,
                       std::function<void(const std::string &params_json)> fn) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     Subscribers &subs = subscribers();
     const int token = subs.next_token++;
     subs.subs.emplace_back(token, std::make_pair(event, std::move(fn)));
@@ -677,7 +710,7 @@ int service_subscribe(const std::string &event,
 }
 
 void service_unsubscribe(int token) {
-    std::lock_guard<std::recursive_mutex> lock(g_mutex);
+    LinkLock lock(__func__);
     Subscribers &subs = subscribers();
     for (size_t i = 0; i < subs.subs.size(); ++i) {
         if (subs.subs[i].first == token) {

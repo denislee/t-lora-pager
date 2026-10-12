@@ -2,6 +2,7 @@
  * @file      power.cpp
  * @brief     Battery, charger, OTG, monitor.
  */
+#include "../core/kb_lock.h"
 #include "power.h"
 #include "system.h"
 #include "internal.h"
@@ -249,6 +250,16 @@ void hw_get_monitor_params(monitor_params_t &params)
         return;
     }
     s_monitor_last_refresh = millis();
+
+    // The keyboard reader polls the TCA8418 on the same Wire bus without the
+    // instance mutex (IS.1), and the link task calls this without it too.
+    // Wire only locks inside each requestFrom(); the bytes are then read by
+    // its shared rxBuffer unlocked, so a kb_reader poll landing in that window
+    // made the gauge read come up short and readBytes() block for its full
+    // timeout (measured: 1012 ms, ~1 in 20 link-task reads). Serialise the
+    // whole sweep with the keyboard lock (order instance -> kb is allowed);
+    // this also guards s_cached_monitor_params against concurrent callers.
+    core::ScopedKbLock kb_lock;
 
     params = monitor_params_t{};
 
