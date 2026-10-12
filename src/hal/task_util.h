@@ -85,8 +85,7 @@ inline void queue_send_drop_oldest(QueueHandle_t q, const T &item)
 // the LVGL task immediately so it renders without waiting for its kMaxTickMs
 // (200 ms) fallback sleep. xTaskNotifyGive is cheap and idempotent — several
 // gives before the task's ulTaskNotifyTake collapse to one — and is safe
-// while the caller holds the instance mutex (the LVGL task simply blocks on
-// it until released).
+// while the caller holds a lock (the LVGL task simply runs once it is free).
 inline void hw_input_event_wake()
 {
     hw_cpu_boost_for_input();

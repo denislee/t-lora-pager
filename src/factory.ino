@@ -16,6 +16,7 @@
 #include "event_define.h"
 #include "core/system_hooks.h"
 #include "core/input_focus.h"
+#include "core/kb_lock.h"
 
 // Vendor entry point: sets a volatile flag consumed by the rotary task to run
 // perform_fake_sleep_toggle() — the same path as a long-press. Declared here
@@ -77,6 +78,7 @@ void setup()
     Serial.begin(115200);
 
     core::instance_lock_init();
+    core::kb_lock_init();
 
     hw_load_setting();
     user_setting_params_t settings;

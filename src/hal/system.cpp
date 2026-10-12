@@ -10,6 +10,7 @@
 #include "keyboard_task.h"
 #include "radio_chip.h"
 #include "../core/spi_lock.h"
+#include "../core/kb_lock.h"
 
 #include "../core/system_hooks.h"
 
@@ -905,10 +906,13 @@ void hw_low_power_loop()
      * the light-sleep path — a device found asleep should be
      * indistinguishable from one that's been off. */
     notes_crypto_lock();
-    if (user_setting.sleep_mode == 1) {
-        hw_sleep();
-    } else {
-        instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_BOOT_BUTTON));
+    {
+        core::ScopedKbLock kb_lock;  // lightSleep()/sleep() call kb.end()/begin()
+        if (user_setting.sleep_mode == 1) {
+            hw_sleep();
+        } else {
+            instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_BOOT_BUTTON));
+        }
     }
 #endif
 }

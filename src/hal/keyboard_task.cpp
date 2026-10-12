@@ -14,11 +14,11 @@
  * into a queue. We then replace the keypad indev's read_cb with one that
  * only drains the queue — zero I2C work on the LVGL task.
  *
- * Lock behaviour: reads still go through the shared `instance` mutex, but
- * (a) we hold it only for the duration of a getKey() burst and (b) the
- * mutex has priority inheritance (xSemaphoreCreateMutex), so if a
- * low-priority holder is running while we block, it gets boosted to our
- * priority and releases sooner.
+ * Lock behaviour: reads take core::ScopedKbLock (kb_lock.h), a keyboard-only
+ * mutex, NOT the instance mutex the LVGL task holds for each whole frame — so
+ * keys are read and queued even while a long frame (app build, save, flush)
+ * runs, and applied in one burst when it ends (continue_reading), same as the
+ * rotary path.
  */
 #include "keyboard_task.h"
 
@@ -36,7 +36,7 @@
 #include "str_encode.h"
 #include "task_util.h"
 #include "../core/input_profile.h"
-#include "../core/scoped_lock.h"
+#include "../core/kb_lock.h"
 
 namespace {
 
@@ -88,7 +88,7 @@ void enqueue_event(KeyEvent ev)
 {
     INPUT_PROF(ev.t_us = core::prof::now_us());
     // Drop oldest if the UI somehow falls behind the queue depth. Called
-    // with the instance mutex held by the drain loop — see
+    // with the keyboard lock held by the drain loop — see
     // hw_input_event_wake() for why the wake is still safe.
     hal::queue_send_drop_oldest(s_event_queue, ev);
     hw_input_event_wake();
@@ -99,7 +99,7 @@ void keyboard_task_fn(void *)
     for (;;) {
         // While the display is off (fake-sleep) hw_power_down_all() cuts the
         // keyboard rail and instance.kb.end() detaches the TCA8418 ISR, so
-        // this loop would take the instance mutex and I2C-poll a dead chip —
+        // this loop would take the keyboard lock and I2C-poll a dead chip —
         // burning power and contending with LVGL/NFC exactly when we mean to
         // be idle. Block on a task notify instead; ui_resume_timers() kicks us
         // via hw_keyboard_task_notify_wake() so the first keypress after wake
@@ -127,7 +127,11 @@ void keyboard_task_fn(void *)
         // thrash the mutex on bursts (fast typing can emit several events
         // per poll).
         {
-            core::ScopedInstanceLock lock;
+#ifdef INPUT_PROFILE
+            uint64_t wait0 = core::prof::now_us();
+#endif
+            core::ScopedKbLock lock;
+            INPUT_PROF(core::prof::kb_lock_wait(core::prof::now_us() - wait0));
             for (int i = 0; i < 16; ++i) {
                 char c = '\0';
                 int state = instance.kb.getKey(&c);
@@ -289,7 +293,7 @@ void hw_keyboard_task_start()
     // handle goes stale, and the vendor's begin()/end() cycle re-attaches/detaches the ISR so no spurious
     // notifies can reach a dead handle between end() and the next begin().
     {
-        core::ScopedInstanceLock lock;
+        core::ScopedKbLock lock;
         instance.kb.setNotifyTask(s_task);
     }
 }
