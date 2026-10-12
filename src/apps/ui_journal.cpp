@@ -8,17 +8,25 @@
  *                                       — nulled (not owned)
  *   paging:  target_focus_index, current_page — reset
  *   cache:   journal_entries / cache_valid    — kept on purpose (warm reopen)
- *   timers:  bg_refresh_timer           — the deferred one-shot rescan queued
- *                                         when the FS changed; cancelled via
+ *   timers:  bg_refresh_timer           — the deferred one-shot that starts the
+ *                                         rescan when the FS changed; cancelled via
  *                                         cancel_bg_refresh() on exit/rebuild.
- * No tasks or hardware sessions are held here. If you add any, list them
- * above AND extend the exit path.
+ *   tasks:   s_bg_job (journal_bg)      — OneShotJob worker running the rescan on a
+ *                                         snapshot; s_bg_job.teardown() on exit
+ *                                         detaches it (it frees its own result).
+ *                                         bg_refresh_done applies the result on the
+ *                                         LVGL thread, dropped if s_entries_gen moved.
+ * No hardware sessions are held here. If you add any, list them above AND extend
+ * the exit path.
  */
 #include "../ui_define.h"
 #include "app_registry.h"
 #include "../core/app_manager.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/notes_path.h"
+#include "../core/one_shot_job.h"
+#include "../core/input_profile.h"
+#include "../hal/storage.h"
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -191,18 +199,26 @@ static void report(ProgressFn cb, void *ud, const char *phase, int cur, int tota
     }
 }
 
-void refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb = nullptr, void *ud = nullptr)
+bool refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb = nullptr, void *ud = nullptr)
 {
     static ProgressFn g_cb = nullptr;
     static void *g_ud = nullptr;
-    g_cb = cb;
-    g_ud = ud;
+    if (cb) {
+        g_cb = cb;
+        g_ud = ud;
+    }
 
     report(cb, ud, "Scanning files...", 0, 0, nullptr);
     std::vector<std::pair<std::string, uint32_t>> current;
-    hw_get_preferred_txt_files_info(current, [](int cur, int total, const char *name) {
-        if (g_cb) g_cb(g_ud, "Scanning files...", cur, 0, name);
-    });
+    // The worker passes no callback and must never reach g_cb (it is LVGL-thread
+    // progress UI).
+    if (cb) {
+        hw_get_preferred_txt_files_info(current, [](int cur, int total, const char *name) {
+            if (g_cb) g_cb(g_ud, "Scanning files...", cur, 0, name);
+        });
+    } else {
+        hw_get_preferred_txt_files_info(current, nullptr);
+    }
 
     current.erase(std::remove_if(current.begin(), current.end(),
                                  [](const std::pair<std::string, uint32_t> &p) {
@@ -270,6 +286,9 @@ void refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb =
         if (total > 0 && cb) {
             report(cb, ud, needs_rebuild ? "Reading previews..." : "Processing...", done, total, name.c_str());
         }
+#ifdef ARDUINO
+        if (!cb) vTaskDelay(1);  // worker: let IDLE0 run between notes (PBKDF2/AES per note)
+#endif
     }
 
     // `next` is already filename-descending: it was built by walking the
@@ -282,6 +301,7 @@ void refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb =
     }
 
     entries = std::move(next);
+    return dirty;
 }
 
 static lv_obj_t *menu = NULL;
@@ -333,6 +353,7 @@ static void loader_hide()
 void ui_journal_enter(lv_obj_t *parent);
 void ui_journal_exit(lv_obj_t *parent);
 static void journal_build_ui(lv_obj_t *parent);
+static void schedule_bg_refresh();
 
 static lv_obj_t *pending_journal_parent = NULL;
 static void journal_unlock_result_cb(bool ok, void *ud)
@@ -378,10 +399,26 @@ static void teardown_menu_for_rerender()
 
 // --- Background refresh -----------------------------------------------------
 // Opening the journal renders the cached list immediately; when the filesystem
-// has changed since the last scan we reconcile in the background instead of
+// has changed since the last scan we reconcile off the LVGL thread instead of
 // blocking the app open on a directory walk of every note (seconds, with
-// hundreds of synced notes). bg_refresh_timer holds the queued one-shot pass.
+// hundreds of synced notes). bg_refresh_timer holds the queued one-shot that
+// hands the pass to the s_bg_job worker — the scan itself no longer runs inside
+// the timer callback (that froze the UI and keyboard for seconds).
 static lv_timer_t *bg_refresh_timer = nullptr;
+
+struct BgRefreshResult {
+    std::vector<JournalEntry> entries;
+    uint32_t entries_gen = 0;  // s_entries_gen when the snapshot was taken
+    uint32_t fs_gen = 0;       // hw_get_filesystem_generation() at snapshot time
+    bool saved_index = false;  // the worker rewrote the index (bumps fs_gen once)
+};
+// Bumped whenever journal_entries is replaced or edited on the LVGL thread, so a
+// worker result computed from an older snapshot is dropped instead of applied.
+static uint32_t s_entries_gen = 0;
+static void bg_refresh_done(BgRefreshResult &r);
+// The reconcile (directory walk + preview decrypts + index rewrite) runs here,
+// off the LVGL thread. The worker only touches its own snapshot.
+static core::OneShotJob<BgRefreshResult> s_bg_job(bg_refresh_done);
 
 // Cheap FNV-1a over (filename, mtime) so a completed refresh can tell whether
 // anything actually changed before tearing down and re-rendering the page —
@@ -415,14 +452,48 @@ static void bg_refresh_timer_cb(lv_timer_t *t)
     bg_refresh_timer = nullptr;
     lv_timer_del(t);
     if (menu == NULL || parent_obj == NULL) return;  // app closed before we ran
+    // A worker is already running (or its result is waiting to drain): it lands
+    // through bg_refresh_done, which reschedules if that result is stale.
+    if (s_bg_job.busy()) return;
+    BgRefreshResult *seed = new BgRefreshResult();
+    seed->entries = journal_entries;  // copy: the worker owns it, the page keeps journal_entries
+    seed->entries_gen = s_entries_gen;
+    seed->fs_gen = hw_get_filesystem_generation();
+    auto started = s_bg_job.start([seed]() {
+        INPUT_PROF_SPAN("journal_bg");
+        seed->saved_index = refresh_journal_entries(seed->entries, nullptr, nullptr);
+        return seed;
+    }, 10240, "journal_bg", 1, 0);
+    if (started != core::OneShotJob<BgRefreshResult>::Start::Started) {
+        // Task could not be created (Failed), or Attached to a stale worker
+        // that busy() missed: run inline like before so the list still updates.
+        seed->saved_index = refresh_journal_entries(seed->entries, bg_progress_cb, nullptr);
+        bg_refresh_done(*seed);
+        delete seed;
+    }
+}
 
+static void bg_refresh_done(BgRefreshResult &r)
+{
+    // journal_entries changed (a delete) since the snapshot: drop this result.
+    // cache_valid stays false, so the next open reconciles again.
+    if (r.entries_gen != s_entries_gen) return;
     uint32_t before = entries_signature(journal_entries);
-    refresh_journal_entries(journal_entries, bg_progress_cb, nullptr);
-    cache_valid = true;
-
+    journal_entries = std::move(r.entries);
+    s_entries_gen++;
+    // Any write besides our own index rewrite may be missing from this scan.
+    uint32_t expect = r.fs_gen + (r.saved_index ? 1u : 0u);
+    bool fresh = (hw_get_filesystem_generation() == expect);
+    cache_valid = fresh;
+    // Our own index write set the dirty flag; clear it so the next open does not
+    // rescan for nothing (delete_confirm_cb does the same).
+    if (fresh && r.saved_index) hw_set_filesystem_dirty(false);
+    if (menu == NULL || parent_obj == NULL) return;  // closed: keep the warm cache
     if (entries_signature(journal_entries) != before) {
         teardown_menu_for_rerender();
         journal_build_ui(parent_obj);
+    } else if (!fresh) {
+        schedule_bg_refresh();
     }
 }
 
@@ -508,9 +579,12 @@ static void delete_confirm_cb(bool yes, void *ud)
             journal_entries.erase(std::remove_if(journal_entries.begin(), journal_entries.end(),
                                               [&](const JournalEntry &be) { return be.filename == path; }),
                                journal_entries.end());
+            s_entries_gen++;
             save_index_file(journal_entries);
             cache_valid = true;
-            hw_set_filesystem_dirty(false);
+            // A running worker may still rewrite the index from its older
+            // snapshot after this save; leave the flag set so the next open rescans.
+            if (!s_bg_job.busy()) hw_set_filesystem_dirty(false);
             deleted = true;
         }
     } else {
@@ -639,6 +713,7 @@ static void journal_build_ui(lv_obj_t *parent)
         std::vector<JournalEntry> snapshot;
         if (load_index_file(snapshot) && !snapshot.empty()) {
             journal_entries = std::move(snapshot);
+            s_entries_gen++;
             if (!was_dirty) cache_valid = true;
         }
     }
@@ -654,6 +729,7 @@ static void journal_build_ui(lv_obj_t *parent)
     menu = create_menu(parent, nullptr);
     if (show_loader) {
         refresh_journal_entries(journal_entries, loader_update, nullptr);
+        s_entries_gen++;
         cache_valid = true;
         need_refresh = false;
     }
@@ -876,6 +952,7 @@ static void journal_build_ui(lv_obj_t *parent)
 void ui_journal_exit(lv_obj_t *parent)
 {
     cancel_bg_refresh();
+    s_bg_job.teardown();  // detach a running worker; it frees its own result
     loader_hide();
     ui_hide_back_button();
     disable_keyboard();
