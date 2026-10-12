@@ -7,6 +7,7 @@
  *
  */
 #include "ui_define.h"
+#include "hal/keyboard_task.h"
 
 static lv_group_t *msg_group = NULL;
 static lv_group_t *prev_group;
@@ -836,7 +837,10 @@ lv_indev_t *lv_get_keyboard_indev()
 // caused a brief backlight flash on home entry (the vendor init applies a
 // non-zero default before our user-configured brightness is restored), and
 // also risked re-attaching the TCA8418 ISR which can hang the chip.
+// enable_keyboard() drops a stale backlog (IS.6).
 static bool s_keyboard_enabled = false;
+static uint32_t s_keyboard_disabled_tick = 0;
+static constexpr uint32_t kStaleKeyMs = 300;
 
 void disable_keyboard()
 {
@@ -844,6 +848,7 @@ void disable_keyboard()
     if (hw_has_keyboard()) {
         lv_indev_enable(lv_get_keyboard_indev(), false);
     }
+    s_keyboard_disabled_tick = lv_tick_get();
     s_keyboard_enabled = false;
 }
 
@@ -852,6 +857,15 @@ void enable_keyboard()
     if (s_keyboard_enabled) return;
     if (hw_has_keyboard()) {
         lv_indev_enable(lv_get_keyboard_indev(), true);
+    }
+    // IS.6: the reader keeps queueing while the indev is off. Keys typed
+    // during a normal transition (disable+enable in the same frame, or a
+    // frame or two apart) are kept so they reach the new screen (IS.1/IS.5);
+    // a backlog older than kStaleKeyMs (an app without keyboard input, fake
+    // sleep, boot) belongs to a previous screen and is dropped instead of
+    // replaying into whatever is now focused.
+    if (lv_tick_elaps(s_keyboard_disabled_tick) > kStaleKeyMs) {
+        hw_keyboard_flush_queue();
     }
     s_keyboard_enabled = true;
 }

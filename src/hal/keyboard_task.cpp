@@ -269,6 +269,16 @@ void kb_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 
 void hw_keyboard_task_notify_wake() { hal::notify_task(s_task); }
 
+void hw_keyboard_flush_queue()
+{
+    if (!s_event_queue) return;
+    // Under the keyboard lock so the reader can't be mid-burst between
+    // dequeue-able events and its held-char update.
+    core::ScopedKbLock lock;
+    xQueueReset(s_event_queue);
+    s_held_char = '\0';
+}
+
 void hw_keyboard_task_start()
 {
     if (s_task) return;
@@ -310,5 +320,6 @@ void hw_keyboard_task_start()
 
 void hw_keyboard_task_start() {}
 void hw_keyboard_task_notify_wake() {}
+void hw_keyboard_flush_queue() {}
 
 #endif  // ARDUINO && USING_INPUT_DEV_KEYBOARD

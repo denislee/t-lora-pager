@@ -11,3 +11,9 @@
 #pragma once
 
 void hw_keyboard_task_start();
+
+// Drop every key event still queued for LVGL and forget the held key (no
+// stale auto-repeat). Called by enable_keyboard() when the keypad indev was
+// disabled long enough that the backlog belongs to a previous screen
+// (INPUT_STUTTER_PLAN.md IS.6). LVGL thread.
+void hw_keyboard_flush_queue();
