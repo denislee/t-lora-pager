@@ -37,6 +37,7 @@ constexpr uint32_t TG_LINK_MAX_BODY = 64 * 1024;
 //          link down / dropped ("disconnected")      -> "Phone disconnected", 0
 //          ERR unauthorized                          -> "HTTP 401", 401
 //          ERR http_error, msg = decimal HTTP status -> "HTTP <n>", n
+//          ERR http_error, msg = transport reason    -> "phone: <msg>", 0
 //          ERR timeout                               -> "Phone timeout", 0
 //          a bad reply / failed bulk transfer        -> "phone: bad reply" or
 //                                                       "phone: transfer failed", 0

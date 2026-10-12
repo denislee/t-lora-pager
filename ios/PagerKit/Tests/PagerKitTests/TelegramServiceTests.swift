@@ -437,6 +437,17 @@ final class TelegramServiceTests: XCTestCase {
         await pager.stop()
     }
 
+    // MARK: - Transport failure reasons (shown on the pager as "phone: <msg>")
+
+    func testTransportReason() {
+        XCTAssertEqual(TelegramService.transportReason(URLError(.timedOut)), "bridge timeout")
+        XCTAssertEqual(TelegramService.transportReason(URLError(.cannotConnectToHost)), "bridge unreachable")
+        XCTAssertEqual(TelegramService.transportReason(URLError(.appTransportSecurityRequiresSecureConnection)),
+                       "bridge needs https")
+        XCTAssertEqual(TelegramService.transportReason(URLError(.serverCertificateUntrusted)), "bridge TLS error")
+        XCTAssertEqual(TelegramService.transportReason(CancellationError()), "network error")
+    }
+
     // MARK: - 10. Param helpers
 
     func testParamHelpers() throws {

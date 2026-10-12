@@ -39,7 +39,11 @@ targets:
         LSRequiresIPhoneOS: true
         NSBluetoothAlwaysUsageDescription: Pager Companion talks to your LilyGo pager over Bluetooth.
         NSLocationWhenInUseUsageDescription: Pager Companion uses your location for the pager's "auto" weather forecast.
-        NSLocalNetworkUsageDescription: Debug builds can connect to the pager emulator on this network.
+        NSLocalNetworkUsageDescription: Pager Companion reaches your Telegram bridge (and, in debug builds, the pager emulator) on this network.
+        # The tg-bridge URL is user-configured and often plain http:// on a LAN
+        # box or VPS; without this ATS refuses every tg.* call (RH9).
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
         UIBackgroundModes:

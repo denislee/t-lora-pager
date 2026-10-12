@@ -133,7 +133,7 @@ public struct TelegramService: Sendable {
         do {
             reply = try await HTTP.send(request, using: http)
         } catch {
-            throw RPCError(code: "http_error", msg: "network error")
+            throw RPCError(code: "http_error", msg: Self.transportReason(error))
         }
         switch reply.status {
         case 200..<300:
@@ -148,6 +148,27 @@ public struct TelegramService: Sendable {
             throw RPCError(code: "unauthorized", msg: "\(reply.status)")
         default:
             throw RPCError(code: "http_error", msg: "\(reply.status)")
+        }
+    }
+
+    /// Short, token-free reason for a request that got no HTTP reply; the
+    /// pager shows it as "phone: <reason>" (non-numeric `http_error` msg).
+    static func transportReason(_ error: Error) -> String {
+        guard let code = (error as? URLError)?.code else { return "network error" }
+        switch code {
+        case .timedOut:
+            return "bridge timeout"
+        case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+             .networkConnectionLost, .notConnectedToInternet:
+            return "bridge unreachable"
+        case .appTransportSecurityRequiresSecureConnection:
+            return "bridge needs https"
+        case .secureConnectionFailed, .serverCertificateUntrusted,
+             .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+             .serverCertificateHasUnknownRoot:
+            return "bridge TLS error"
+        default:
+            return "network error"
         }
     }
 

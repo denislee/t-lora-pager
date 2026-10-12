@@ -28,8 +28,10 @@ static void tg_link_fail(const HwLinkResult &r, int &status, std::string &err)
         char *end = nullptr;
         const long v = strtol(r.msg.c_str(), &end, 10);
         if (end == r.msg.c_str() || *end != '\0' || v <= 0) {
+            // No HTTP reply: the phone's msg is a short transport reason
+            // ("bridge unreachable", ...).
             status = 0;
-            err = "HTTP error";
+            err = r.msg.empty() ? "HTTP error" : "phone: " + r.msg;
         } else {
             status = static_cast<int>(v);
             err = "HTTP " + std::to_string(status);

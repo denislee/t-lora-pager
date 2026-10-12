@@ -186,7 +186,11 @@ Both sides reset `seq` to 0 on each new TCP connection.
 
 tg.* errors: a bridge 401/403 → `unauthorized`; any other non-2xx →
 `http_error` whose `msg` is the decimal HTTP status (e.g. `"502"`), which the
-pager shows as `HTTP <status>`, the same text as its direct Wi-Fi path.
+pager shows as `HTTP <status>`, the same text as its direct Wi-Fi path. When
+the bridge gives no HTTP reply at all, `http_error`'s `msg` is a short,
+token-free reason instead (`"bridge unreachable"`, `"bridge timeout"`,
+`"bridge needs https"`, `"bridge TLS error"`, `"network error"`), shown as
+`phone: <msg>`.
 
 ## 6.1 Methods — Phase 2 (file service, `caps` `"fs"`)
 
