@@ -279,6 +279,15 @@ void hw_keyboard_flush_queue()
     s_held_char = '\0';
 }
 
+#ifdef INPUT_PROFILE
+void hw_keyboard_inject(int state, char c)
+{
+    if (!s_event_queue) return;
+    core::ScopedKbLock lock;
+    enqueue_event({state, c});
+}
+#endif
+
 void hw_keyboard_task_start()
 {
     if (s_task) return;
@@ -321,5 +330,8 @@ void hw_keyboard_task_start()
 void hw_keyboard_task_start() {}
 void hw_keyboard_task_notify_wake() {}
 void hw_keyboard_flush_queue() {}
+#ifdef INPUT_PROFILE
+void hw_keyboard_inject(int, char) {}
+#endif
 
 #endif  // ARDUINO && USING_INPUT_DEV_KEYBOARD

@@ -17,3 +17,9 @@ void hw_keyboard_task_start();
 // disabled long enough that the backlog belongs to a previous screen
 // (INPUT_STUTTER_PLAN.md IS.6). LVGL thread.
 void hw_keyboard_flush_queue();
+
+#ifdef INPUT_PROFILE
+// Profile build only: queue a key event exactly as the TCA8418 reader would
+// (serial console in core/input_profile.cpp). state = KB_PRESSED/KB_RELEASED.
+void hw_keyboard_inject(int state, char c);
+#endif

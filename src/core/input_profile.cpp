@@ -23,6 +23,16 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <LilyGoLib.h>      // KB_PRESSED / KB_RELEASED
+#include <lvgl_private.h>   // lv_timer_t fields for the slow-frame census
+#include "../hal/keyboard_task.h"
+#include "../hal/rotary_task.h"
+#include "../hal/storage.h"
+#include "../hal/notes_crypto.h"
+#include <mbedtls/md.h>
+#include <mbedtls/pkcs5.h>
+#include <string>
+#include <vector>
 #else
 #include <chrono>
 #endif
@@ -91,6 +101,20 @@ uint32_t s_frame_count = 0;
 const char *s_span_max_name = "?";
 uint64_t s_span_max_us = 0;
 
+// --- slow-frame timer census (device only) --------------------------------
+#ifdef ARDUINO
+static const uint32_t kCensusMax = 64;
+lv_timer_t *s_census_t[kCensusMax];
+uint32_t s_census_run[kCensusMax];
+uint32_t s_census_n = 0;
+#endif
+
+// --- serial console requests, served on the LVGL thread -------------------
+volatile bool s_req_group = false;
+volatile bool s_req_report = false;
+volatile bool s_req_dirty = false;  // console 'f': hw_set_filesystem_dirty(true)
+char s_req_app[24] = {0};  // console 'a <App>': queueEnterApp on the LVGL thread
+
 // --- report cadence --------------------------------------------------------
 uint64_t s_last_report_us = 0;
 bool s_report_started = false;
@@ -145,7 +169,35 @@ void key_latency(uint64_t us) {
     if (us > s_key_max_us) s_key_max_us = us;
 }
 
+void frame_begin() {
+#ifdef ARDUINO
+    s_census_n = 0;
+    for (lv_timer_t *t = lv_timer_get_next(NULL); t && s_census_n < kCensusMax;
+         t = lv_timer_get_next(t)) {
+        s_census_t[s_census_n] = t;
+        s_census_run[s_census_n] = t->last_run;
+        s_census_n++;
+    }
+#endif
+}
+
 void frame(uint64_t us) {
+#ifdef ARDUINO
+    // Name the timers that ran in a slow frame: last_run moved, or the timer
+    // is new. A timer deleted during the frame is not listed. Resolve cb with
+    // addr2line -fe .pio/build/tlora_pager_profile/firmware.elf <cb>.
+    if (us >= 100000) {
+        PROF_LOG("slow frame %u ms, timers that ran:", (unsigned)(us / 1000));
+        for (lv_timer_t *t = lv_timer_get_next(NULL); t; t = lv_timer_get_next(t)) {
+            bool seen = false, ran = true;
+            for (uint32_t i = 0; i < s_census_n; i++) {
+                if (s_census_t[i] == t) { seen = true; ran = s_census_run[i] != t->last_run; break; }
+            }
+            if (ran) PROF_LOG("  cb=%p period=%u%s", (void *)t->timer_cb,
+                              (unsigned)t->period, seen ? "" : " (new)");
+        }
+    }
+#endif
     if (us > s_frame_max_us) s_frame_max_us = us;
     if (us > 33000) s_frame_gt33++;
     if (us > 100000) s_frame_gt100++;
@@ -160,14 +212,151 @@ void span(const char *name, uint64_t us) {
     }
 }
 
+#ifdef ARDUINO
+namespace {
+
+void inject_char(char c) {
+    hw_keyboard_inject(KB_PRESSED, c);
+    vTaskDelay(pdMS_TO_TICKS(15));
+    hw_keyboard_inject(KB_RELEASED, c);
+    vTaskDelay(pdMS_TO_TICKS(25));
+}
+
+void run_command(char *line) {
+    char *arg = line + 1;
+    while (*arg == ' ') arg++;
+    switch (line[0]) {
+    case 'k':
+        for (char *p = arg; *p; p++) {
+            char c = *p;
+            if (c == '\\' && p[1]) {
+                p++;
+                switch (*p) {
+                case 'e': c = 27; break;
+                case 'n': c = '\n'; break;
+                case 't': c = '\t'; break;
+                case 'b': c = '\b'; break;
+                default: c = *p; break;
+                }
+            }
+            inject_char(c);
+        }
+        break;
+    case 'r': {
+        char d = *arg;
+        int n = atoi(arg + 1);
+        if (n <= 0) n = 1;
+        for (int i = 0; i < n; i++) {
+            hw_rotary_inject(d == 'u' ? 1 : d == 'd' ? -1 : 0, d == 'c');
+            vTaskDelay(pdMS_TO_TICKS(40));
+        }
+        break;
+    }
+    case 'b': {
+        int n = atoi(arg);
+        char *sp = strchr(arg, ' ');
+        int ms = sp ? atoi(sp + 1) : 0;
+        for (int i = 0; i < n; i++) {
+            char c = 'a' + (i % 26);
+            hw_keyboard_inject(KB_PRESSED, c);
+            hw_keyboard_inject(KB_RELEASED, c);
+            if (ms > 0) vTaskDelay(pdMS_TO_TICKS(ms));
+        }
+        break;
+    }
+    case 'g': s_req_group = true; break;
+    case 'f': s_req_dirty = true; break;
+    case 'p': {
+        // Time one PBKDF2-HMAC-SHA256 x10000 / 48 B, the derive_key_iv() work.
+        const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+        mbedtls_md_context_t md;
+        mbedtls_md_init(&md);
+        mbedtls_md_setup(&md, info, 1);
+        const unsigned char salt[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        unsigned char out[48];
+        uint64_t t0 = now_us();
+        mbedtls_pkcs5_pbkdf2_hmac(&md, (const unsigned char *)"benchmark-pw", 12, salt, 8,
+                                  10000, sizeof(out), out);
+        uint64_t us = now_us() - t0;
+        mbedtls_md_free(&md);
+        PROF_LOG("pbkdf2 x10000: %u ms at %u MHz (task prio %u)", (unsigned)(us / 1000),
+                 (unsigned)getCpuFrequencyMhz(), (unsigned)uxTaskPriorityGet(NULL));
+        break;
+    }
+    case 'j': {
+        PROF_LOG("crypto enabled=%d unlocked=%d", (int)notes_crypto_is_enabled(),
+                 (int)notes_crypto_is_unlocked());
+        std::vector<std::pair<std::string, uint32_t>> files;
+        uint64_t t0 = now_us();
+        hw_get_preferred_txt_files_info(files, nullptr);
+        PROF_LOG("scan: %u files in %u ms", (unsigned)files.size(),
+                 (unsigned)((now_us() - t0) / 1000));
+        break;
+    }
+    case 'a':
+        strncpy(s_req_app, arg, sizeof(s_req_app) - 1);
+        s_req_app[sizeof(s_req_app) - 1] = '\0';
+        break;
+    case 's': s_req_report = true; break;
+    default: break;
+    }
+    PROF_LOG("cmd done: %c", line[0]);
+}
+
+void console_task(void *) {
+    char line[256];
+    size_t n = 0;
+    for (;;) {
+        while (Serial.available()) {
+            int ch = Serial.read();
+            if (ch < 0) break;
+            if (ch == '\r') continue;
+            if (ch == '\n') {
+                line[n] = '\0';
+                if (n > 0) run_command(line);
+                n = 0;
+            } else if (n < sizeof(line) - 1) {
+                line[n++] = (char)ch;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+} // namespace
+#endif
+
 void report_tick() {
     uint64_t now = now_us();
     if (!s_report_started) {
         s_last_report_us = now;
         s_report_started = true;
+#ifdef ARDUINO
+        xTaskCreatePinnedToCore(console_task, "prof_console", 4096, NULL, 2,
+                                NULL, 0);
+#endif
         return;
     }
-    if (now - s_last_report_us < 10000000ULL) return;
+    if (s_req_app[0]) {
+        PROF_LOG("console: enter app %s", s_req_app);
+        // queueEnterApp keeps the pointer until System::loop applies it.
+        static char s_app_name[24];
+        memcpy(s_app_name, s_req_app, sizeof(s_app_name));
+        s_req_app[0] = '\0';
+        core::System::getInstance().queueEnterApp(s_app_name);
+    }
+    if (s_req_dirty) {
+        s_req_dirty = false;
+        hw_set_filesystem_dirty(true);
+        PROF_LOG("console: filesystem marked dirty");
+    }
+    if (s_req_group) {
+        s_req_group = false;
+        dump_group("console");
+    }
+    bool forced = s_req_report;
+    s_req_report = false;
+    if (!forced && now - s_last_report_us < 10000000ULL) return;
     s_last_report_us = now;
 
     if (s_slow_pending) {

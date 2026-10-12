@@ -154,6 +154,7 @@ static void format_badge_text(int n, char *buf, size_t cap) {
 
 static void update_badges(lv_timer_t *t) {
     (void)t;
+    INPUT_PROF_SPAN("badges");
     for (Badge &b : s_badges) {
         lv_obj_t *lbl = b.label;
         if (!lbl) continue;
@@ -445,6 +446,7 @@ static void apply_wifi_gated_state(bool wifi, bool link) {
 
 static void media_visibility_tick(lv_timer_t* t) {
     (void)t;
+    INPUT_PROF_SPAN("media_vis");
     bool now = media_controls_should_show();
     if (now != s_media_last_visible) {
         set_media_buttons_visible(now);

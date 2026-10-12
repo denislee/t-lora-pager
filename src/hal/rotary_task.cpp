@@ -40,6 +40,7 @@
 
 #include "str_encode.h"
 #include "task_util.h"
+#include "../core/input_profile.h"
 #include "../core/system_hooks.h"
 
 namespace {
@@ -213,6 +214,17 @@ void rotary_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 
 void hw_rotary_task_notify_wake() { hal::notify_task(s_task); }
 
+#ifdef INPUT_PROFILE
+void hw_rotary_inject(int dir, bool center)
+{
+    if (!s_event_queue) return;
+    RotaryMsg_t msg;
+    msg.dir = dir > 0 ? ROTARY_DIR_UP : dir < 0 ? ROTARY_DIR_DOWN : ROTARY_DIR_NONE;
+    msg.centerBtnPressed = center;
+    enqueue_event(msg);
+}
+#endif
+
 void hw_rotary_task_start()
 {
     if (s_task) return;
@@ -240,5 +252,8 @@ void hw_rotary_task_start()
 
 void hw_rotary_task_start() {}
 void hw_rotary_task_notify_wake() {}
+#ifdef INPUT_PROFILE
+void hw_rotary_inject(int, bool) {}
+#endif
 
 #endif  // ARDUINO && USING_INPUT_DEV_ROTARY

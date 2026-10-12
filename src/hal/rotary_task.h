@@ -10,3 +10,9 @@
 #pragma once
 
 void hw_rotary_task_start();
+
+#ifdef INPUT_PROFILE
+// Profile build only: queue a rotary event as the vendor reader would.
+// dir: +1 up, -1 down, 0 none; center = center-button click.
+void hw_rotary_inject(int dir, bool center);
+#endif

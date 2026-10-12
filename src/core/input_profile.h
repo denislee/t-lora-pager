@@ -32,6 +32,9 @@ void lock_released();
 void kb_lock_wait(uint64_t wait_us);
 // Key enqueue->dequeue latency, recorded by the LVGL keypad read_cb.
 void key_latency(uint64_t us);
+// Snapshot every LVGL timer's last_run right before lv_timer_handler(), so
+// frame() can name the timers that ran in a slow (>= 100 ms) frame.
+void frame_begin();
 // One lv_timer_handler() pass.
 void frame(uint64_t us);
 // Named span, logged when >= 5 ms.
@@ -39,6 +42,16 @@ void span(const char *name, uint64_t us);
 // Dump the default group's members (why = short label).
 void dump_group(const char *why);
 // Called once per LVGL loop; prints a summary every 10 s if anything was recorded.
+// The first call also starts the serial input console (device only): one
+// command per line on the USB serial port, so a host script can drive the UI
+//   k <text>      type <text> (press+release per char); escapes \e ESC,
+//                 \n Enter, \t Tab, \b Backspace, \\ backslash
+//   r u|d|c [n]   rotary up / down / center click, n times (default 1)
+//   b <n> <ms>    burst: n letters, one every <ms> ms
+//   a <App>       open an app (System::queueEnterApp)
+//   f             mark the filesystem dirty (forces a Journal rescan)
+//   g             dump the focus group now
+//   s             print the window summary now
 void report_tick();
 class Span {
 public:

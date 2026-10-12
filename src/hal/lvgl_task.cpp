@@ -67,6 +67,7 @@ void lvgl_task_fn(void *)
         {
             core::ScopedInstanceLock lock;
 #ifdef INPUT_PROFILE
+            core::prof::frame_begin();
             uint64_t f0 = core::prof::now_us();
 #endif
             next = lv_timer_handler();
