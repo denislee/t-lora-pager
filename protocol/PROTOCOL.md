@@ -184,6 +184,14 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | `tg.read` | D→P | `{"bridge","token","chat_id","up_to"}` → `{}`. `POST /v1/chats/{chat_id}/read {"up_to"}` |
 | `tg.send` | D→P | `{"bridge","token","chat_id","text"}` → `{}`. `POST /v1/chats/{chat_id}/messages {"text"}` |
 
+`bridge`/`token` are optional (both or neither). When the phone holds its own
+Telegram login (the companion app's TDLib session) it answers every tg.* from
+that, ignoring any bridge, with the same result shapes; message `id`s are
+server message ids (TDLib id `>> 20`). With no login and no bridge sent the
+phone answers `unsupported` "log in on phone", shown as `phone: <msg>`. The
+pager sends tg.* to the phone whenever the link is up and goes direct to the
+bridge only without one.
+
 tg.* errors: a bridge 401/403 → `unauthorized`; any other non-2xx →
 `http_error` whose `msg` is the decimal HTTP status (e.g. `"502"`), which the
 pager shows as `HTTP <status>`, the same text as its direct Wi-Fi path. When

@@ -7,12 +7,20 @@ import SwiftUI
 /// screens land in later phases; see `IOS_COMPANION_PLAN.md`.
 @main
 struct PagerCompanionApp: App {
-    @StateObject private var session = PagerSession()
+    @StateObject private var telegram: TelegramAccount
+    @StateObject private var session: PagerSession
+
+    init() {
+        let telegram = TelegramAccount()
+        _telegram = StateObject(wrappedValue: telegram)
+        _session = StateObject(wrappedValue: PagerSession(telegram: telegram.native))
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(session)
+                .environmentObject(telegram)
         }
     }
 }

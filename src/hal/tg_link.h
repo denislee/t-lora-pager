@@ -25,6 +25,8 @@ constexpr uint32_t TG_LINK_MAX_BODY = 64 * 1024;
 //   method       "tg.chats" | "tg.messages" | "tg.read" | "tg.send"
 //   params_json  the typed params object text, e.g.
 //                {"bridge":"https://b","token":"t","chat_id":7,"limit":20}
+//                (bridge/token omitted when none is configured: the phone
+//                then answers from its own Telegram login)
 //                (no "xfer"; the caller scrubs its own copy afterwards).
 // For tg.chats / tg.messages a receiver is opened (hw_link_accept_open) and
 // its odd id is added to the params as "xfer"; it is closed on every exit.
@@ -39,6 +41,7 @@ constexpr uint32_t TG_LINK_MAX_BODY = 64 * 1024;
 //          ERR http_error, msg = decimal HTTP status -> "HTTP <n>", n
 //          ERR http_error, msg = transport reason    -> "phone: <msg>", 0
 //          ERR timeout                               -> "Phone timeout", 0
+//          ERR unsupported (no login, no bridge)     -> "phone: <msg>", 0
 //          a bad reply / failed bulk transfer        -> "phone: bad reply" or
 //                                                       "phone: transfer failed", 0
 //          any other ERR                             -> "phone: <code>: <msg>", 0

@@ -33,10 +33,12 @@ ios/
     Local.xcconfig.example        template for per-developer signing
   Resources/Info.plist            app Info.plist (build-setting variables)
   App/
-    PagerCompanionApp.swift       @main, injects PagerSession
+    PagerCompanionApp.swift       @main, injects PagerSession + TelegramAccount
     Session/PagerSession.swift    @Observable @MainActor link state
-    Features/RootView.swift       Dashboard / Diagnostics tabs
+    Telegram/…                    TDLib JSON client + the phone's Telegram login
+    Features/RootView.swift       Dashboard / Telegram / Diagnostics tabs
     Features/Dashboard/…          connection + sys.info
+    Features/Telegram/…           api keys, phone/code/2FA login, log out
     Features/Diagnostics/…        ping + session log
   PagerKit/                       Swift package (no UIKit/SwiftUI)
     Sources/PagerKit/…            Transport / Link / RPC / Services / Model
@@ -124,6 +126,17 @@ go run ./cmd/pagerlink smoke
 ```
 
 `smoke` walks every Phase‑1 method and error path over the TCP transport.
+
+## Telegram
+
+The app can hold its own Telegram login (TDLib, via the `TDLibFramework`
+package, a prebuilt ~300 MB xcframework fetched on first build), so the
+pager's Telegram app works through the phone with no tg-bridge server. In the
+Telegram tab enter an `api_id`/`api_hash` from my.telegram.org (API
+development tools), then your phone number, the login code and any 2FA
+password. While logged in, `TelegramService` answers `tg.*` from that session
+(`PagerKit/…/TDTelegram.swift` maps TDLib to the pager's shapes); otherwise it
+falls back to the bridge the pager sends, if any.
 
 ## Status
 

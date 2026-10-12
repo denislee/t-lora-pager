@@ -32,6 +32,12 @@ final class PagerSession: ObservableObject {
     private var stopTransport: (() async -> Void)?
     private var weather: WeatherService?
     private let location = LocationProvider()
+    /// The phone's own Telegram login; answers tg.* while logged in.
+    private let telegram: TelegramNative?
+
+    init(telegram: TelegramNative? = nil) {
+        self.telegram = telegram
+    }
 
     /// The weather key the pager last asked for (`"auto"` or a city), pushed
     /// again on every connect so the pager's cache is fresh before it asks.
@@ -100,7 +106,7 @@ final class PagerSession: ObservableObject {
         let session = LinkSession(transport: transport)
         self.session = session
         await registerWeather(on: session)
-        await TelegramService(session: session).register()
+        await TelegramService(session: session, native: telegram).register()
         await session.start()
         watchEvents(of: session)
 

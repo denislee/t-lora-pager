@@ -20,6 +20,10 @@ import FoundationNetworking
 /// otherwise it streams as DATA under the pager's `xfer` and the RES is
 /// `{xfer, size, crc32}`. A bridge 401/403 is `unauthorized`; any other
 /// non-2xx is `http_error` whose msg is the decimal status.
+///
+/// When the phone holds its own Telegram session (`native`, TDLib) and it is
+/// logged in, that answers instead and `bridge`/`token` are ignored, so they
+/// become optional. With neither, a call is `unsupported` "log in on phone".
 public struct TelegramService: Sendable {
     /// Largest RES payload (PROTOCOL.md §3).
     public static let inlineLimit = PagerLink.maxPayload
@@ -30,10 +34,12 @@ public struct TelegramService: Sendable {
 
     private let session: LinkSession
     private let http: URLSession
+    private let native: TelegramNative?
 
-    public init(session: LinkSession, urlSession: URLSession = .shared) {
+    public init(session: LinkSession, urlSession: URLSession = .shared, native: TelegramNative? = nil) {
         self.session = session
         self.http = urlSession
+        self.native = native
     }
 
     /// Install the `tg.*` handlers on the session.
@@ -48,41 +54,80 @@ public struct TelegramService: Sendable {
     // MARK: - Handlers
 
     func chats(_ params: JSONValue) async throws -> JSONValue {
-        let call = try Self.common(params)
+        let route = try await route(params)
         let limit = try Self.limit(params)
         let xfer = try Self.xfer(params)
-        let body = try await request(call, "GET", "/v1/chats?limit=\(limit)")
-        return try await reply(Self.trimChats(body), xfer: xfer)
+        switch route {
+        case .native(let native):
+            return try await reply(native.chats(limit: Int(limit)), xfer: xfer)
+        case .bridge(let call):
+            let body = try await request(call, "GET", "/v1/chats?limit=\(limit)")
+            return try await reply(Self.trimChats(body), xfer: xfer)
+        }
     }
 
     func messages(_ params: JSONValue) async throws -> JSONValue {
-        let call = try Self.common(params)
+        let route = try await route(params)
         let limit = try Self.limit(params)
         let chatID = try Self.integer(params, "chat_id")
         let xfer = try Self.xfer(params)
-        let body = try await request(call, "GET", "/v1/chats/\(chatID)/messages?limit=\(limit)")
-        return try await reply(Self.trimMessages(body), xfer: xfer)
+        switch route {
+        case .native(let native):
+            return try await reply(native.messages(chatID: chatID, limit: Int(limit)), xfer: xfer)
+        case .bridge(let call):
+            let body = try await request(call, "GET", "/v1/chats/\(chatID)/messages?limit=\(limit)")
+            return try await reply(Self.trimMessages(body), xfer: xfer)
+        }
     }
 
     func read(_ params: JSONValue) async throws -> JSONValue {
-        let call = try Self.common(params)
+        let route = try await route(params)
         let chatID = try Self.integer(params, "chat_id")
         let upTo = try Self.integer(params, "up_to")
         _ = try Self.xfer(params)
-        _ = try await request(call, "POST", "/v1/chats/\(chatID)/read",
-                              json: ["up_to": .number(Double(upTo))])
+        switch route {
+        case .native(let native):
+            try await native.read(chatID: chatID, upTo: upTo)
+        case .bridge(let call):
+            _ = try await request(call, "POST", "/v1/chats/\(chatID)/read",
+                                  json: ["up_to": .number(Double(upTo))])
+        }
         return .object([:])
     }
 
     func send(_ params: JSONValue) async throws -> JSONValue {
-        let call = try Self.common(params)
+        let route = try await route(params)
         let chatID = try Self.integer(params, "chat_id")
         guard let text = params["text"]?.stringValue, !text.isEmpty else {
             throw RPCError(code: "invalid_argument", msg: "text must be a non-empty string")
         }
         _ = try Self.xfer(params)
-        _ = try await request(call, "POST", "/v1/chats/\(chatID)/messages", json: ["text": .string(text)])
+        switch route {
+        case .native(let native):
+            try await native.send(chatID: chatID, text: text)
+        case .bridge(let call):
+            _ = try await request(call, "POST", "/v1/chats/\(chatID)/messages", json: ["text": .string(text)])
+        }
         return .object([:])
+    }
+
+    // MARK: - Routing
+
+    enum Route {
+        case native(TelegramNative)
+        case bridge(Call)
+    }
+
+    /// The phone's own session when it is logged in; else the pager's bridge.
+    /// With neither `bridge` nor `token` sent there is nothing to call.
+    func route(_ params: JSONValue) async throws -> Route {
+        if let native, await native.isReady() {
+            return .native(native)
+        }
+        if params["bridge"] == nil, params["token"] == nil {
+            throw RPCError(code: "unsupported", msg: "log in on phone")
+        }
+        return .bridge(try Self.common(params))
     }
 
     // MARK: - Reply

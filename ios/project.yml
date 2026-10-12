@@ -15,6 +15,11 @@ options:
 packages:
   PagerKit:
     path: PagerKit
+  # TDLib (Telegram's client library) as a prebuilt xcframework, for the
+  # phone's own Telegram login (App/Telegram). Large (~300 MB download).
+  TDLibFramework:
+    url: https://github.com/Swiftgram/TDLibFramework
+    exactVersion: 1.8.68-c15d3f5a
 
 targets:
   PagerCompanion:
@@ -58,6 +63,7 @@ targets:
       Release: Config/Base.xcconfig
     dependencies:
       - package: PagerKit
+      - package: TDLibFramework
     settings:
       base:
         SWIFT_VERSION: "6.0"

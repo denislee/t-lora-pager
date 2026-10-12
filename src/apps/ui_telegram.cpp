@@ -3,17 +3,19 @@
  * @brief     Telegram client via tg-bridge (HTTPS + bearer), direct or via
  *            the phone.
  *
- * Single-account polling client. The bridge (a Go service the user runs on
- * a Raspberry Pi or VPS) holds the MTProto session; this app only speaks
- * a narrow JSON/bearer API to it. No WebSocket client on-device — we poll
- * /v1/chats and /v1/chats/{id}/messages on an LVGL timer while the
- * relevant view is open.
+ * Single-account polling client. The MTProto session lives either in the
+ * phone companion app (its own Telegram login, TDLib) or in a tg-bridge (a
+ * Go service the user runs on a Pi or VPS); this app only speaks a narrow
+ * JSON/bearer API. No WebSocket client on-device — we poll /v1/chats and
+ * /v1/chats/{id}/messages on an LVGL timer while the relevant view is open.
  *
- * Uplink (tg_uplink(), HUB_REMOVAL_PLAN.md §2.2 / H2.6): Direct when Wi-Fi is
- * up and the internet probe passed (hardware only), else Phone when a
+ * Uplink (tg_uplink(), HUB_REMOVAL_PLAN.md §2.2 / H2.6): Phone whenever a
  * PagerLink peer is connected (tg_http_request maps each bridge call onto its
  * typed tg.* method, hal/tg_link.h; the status pill says "via phone"), else
- * None ("Offline"). The phone path also runs on the emulator.
+ * Direct to the bridge when Wi-Fi is up and the internet probe passed
+ * (hardware only), else None ("Offline"). The phone answers from its own
+ * login and only falls back to the bridge, so with a phone the bridge URL and
+ * token are optional. The phone path also runs on the emulator.
  *
  * Bridge URL and bearer token are managed from the Settings app
  * (Settings → Telegram). The cfg helpers at the bottom of this file are
@@ -425,9 +427,15 @@ static void reload_config()
     if (!s_favorites_loaded) load_favorites();
 }
 
-static bool configured()
+static bool bridge_configured()
 {
     return !s_base_url.empty() && !s_auth_header.empty();
+}
+
+// Something to talk to: a bridge, or a phone (its own Telegram login).
+static bool configured()
+{
+    return bridge_configured() || hw_link_connected();
 }
 
 // Floating label with a surface background behind the text only, used for
@@ -593,17 +601,19 @@ enum TgUplink { TG_UP_NONE, TG_UP_DIRECT, TG_UP_PHONE };
 static std::atomic<bool> s_test_link_down{false};
 #endif
 
-// Worker-safe uplink verdict from cached state only: Direct when Wi-Fi is up
-// and the last internet probe passed (hardware only — the emulator has no
-// Wi-Fi), Phone when a PagerLink peer is connected, None otherwise.
+// Worker-safe uplink verdict from cached state only: Phone when a PagerLink
+// peer is connected (it holds its own Telegram login, falling back to the
+// bridge), Direct when Wi-Fi is up and the last internet probe passed
+// (hardware only — the emulator has no Wi-Fi), None otherwise.
 static TgUplink tg_uplink_now()
 {
-#ifdef ARDUINO
-    if (hw_get_wifi_connected() && s_inet_ok) return TG_UP_DIRECT;
-#else
+#ifndef ARDUINO
     if (s_test_link_down) return TG_UP_NONE;
 #endif
     if (hw_link_connected()) return TG_UP_PHONE;
+#ifdef ARDUINO
+    if (hw_get_wifi_connected() && s_inet_ok) return TG_UP_DIRECT;
+#endif
     return TG_UP_NONE;
 }
 
@@ -634,7 +644,9 @@ static bool tg_parse_ll(const std::string &s, long long &out)
 // Phone path of tg_http_request: map one of the four bridge calls this file
 // builds onto its typed tg.* method. The phone gets the bridge base URL and
 // typed params and builds the /v1/... path itself, so it never fetches a
-// path the pager made up; anything else is refused here.
+// path the pager made up; anything else is refused here. With no bridge
+// configured (empty base URL / auth) bridge and token are left out and the
+// phone answers from its own Telegram login.
 static bool tg_phone_request(const std::string &url, const char *method,
                              const char *body, size_t body_len,
                              const char *auth_header, std::string &out_body,
@@ -645,8 +657,9 @@ static bool tg_phone_request(const std::string &url, const char *method,
     if (out_code) *out_code = 0;
 
     const size_t at = url.find(kChats);
-    if (at == std::string::npos || !auth_header ||
-        strncmp(auth_header, kBearer, sizeof(kBearer) - 1) != 0) {
+    const bool has_auth = auth_header && *auth_header;
+    if (at == std::string::npos ||
+        (has_auth && strncmp(auth_header, kBearer, sizeof(kBearer) - 1) != 0)) {
         if (err) *err = "Bad request";
         return false;
     }
@@ -655,9 +668,11 @@ static bool tg_phone_request(const std::string &url, const char *method,
     const char *tg = nullptr;
 
     pagerlink::JsonWriter w;
-    w.begin_object()
-        .key("bridge").str_val(url.substr(0, at))
-        .key("token").str_val(auth_header + sizeof(kBearer) - 1);
+    w.begin_object();
+    if (at > 0 && has_auth) {
+        w.key("bridge").str_val(url.substr(0, at))
+         .key("token").str_val(auth_header + sizeof(kBearer) - 1);
+    }
 
     long long n = 0;
     if (get && rest.compare(0, 7, "?limit=") == 0 && tg_parse_ll(rest.substr(7), n)) {
@@ -716,6 +731,11 @@ static bool tg_http_request(const std::string &url, const char *method,
     const TgUplink up = tg_uplink_now();
 #ifdef ARDUINO
     if (up == TG_UP_DIRECT) {
+        if (url.compare(0, 4, "http") != 0) {   // no bridge, phone gone
+            if (out_code) *out_code = 0;
+            if (err) *err = TG_OFFLINE;
+            return false;
+        }
         return hw_http_request(url.c_str(), method, body, body_len,
                                content_type, auth_header, out_body, out_code, err);
     }
@@ -857,10 +877,18 @@ static void tg_drain_tick(lv_timer_t *t);   // fwd (defined after the kickers)
 // safe). On failure `auth` is empty and *err says what is missing; the token
 // plaintext never outlives this call except inside `auth`, which the caller
 // must hal::secret_scrub().
+// With a phone connected a missing bridge is fine (true, url/auth empty): the
+// phone answers from its own Telegram login.
 static bool load_bridge_auth(std::string &url, std::string &auth, std::string *err)
 {
     url = load_pref("url");
     std::string tok = load_token_plain();
+    if ((url.empty() || tok.empty()) && hw_link_connected()) {
+        hal::secret_scrub(tok);
+        url.clear();
+        auth.clear();
+        return true;
+    }
     if (url.empty()) {
         hal::secret_scrub(tok);
         if (err) *err = "Bridge URL not set.";
@@ -1264,8 +1292,7 @@ static void stop_timer()
 
 static void poll_tick(lv_timer_t *t)
 {
-    if (!configured()) return;
-    if (tg_uplink() == TG_UP_NONE) {
+    if (!configured() || tg_uplink() == TG_UP_NONE) {
         set_status(TG_OFFLINE, UI_COLOR_MUTED);
         return;
     }
@@ -1608,7 +1635,8 @@ static void show_not_configured()
     lv_label_set_long_mode(msg, LV_LABEL_LONG_WRAP);
     lv_label_set_text(msg,
         "Not configured.\n\n"
-        "Open Settings \xC2\xBB Telegram to set the bridge URL "
+        "Connect the phone companion app (logged into Telegram), "
+        "or open Settings \xC2\xBB Telegram to set a bridge URL "
         "and bearer token.");
     lv_obj_set_width(msg, lv_pct(100));
     lv_obj_set_style_text_color(msg, UI_COLOR_MUTED, 0);

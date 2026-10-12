@@ -38,6 +38,9 @@ static void tg_link_fail(const HwLinkResult &r, int &status, std::string &err)
         }
     } else if (r.code == "timeout") {
         err = "Phone timeout";
+    } else if (r.code == "unsupported" && !r.msg.empty()) {
+        // The phone has no Telegram login and we sent no bridge.
+        err = "phone: " + r.msg;
     } else {
         err = "phone: " + r.code + ": " + r.msg;
     }

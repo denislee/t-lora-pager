@@ -116,16 +116,23 @@ func newTgBridge() *tgBridge {
 }
 
 // tgParams decodes a tg.* request. Numbers are kept as json.Number so integer
-// fields can insist on integer syntax, and the two fields every method carries
-// are validated up front: a missing/empty bridge or token is invalid_argument,
-// and the literal token "bad" stands in for the bridge answering 401. The
-// token is only ever compared here — never logged, never stored.
+// fields can insist on integer syntax, and the bridge fields are validated up
+// front: with neither bridge nor token the stub answers as the phone's own
+// Telegram login (the real phone's native session); one without the other is
+// invalid_argument, and the literal token "bad" stands in for the bridge
+// answering 401. The token is only ever compared here — never logged, never
+// stored.
 func tgParams(params json.RawMessage) (map[string]any, *pagerlink.RPCError) {
 	dec := json.NewDecoder(bytes.NewReader(params))
 	dec.UseNumber()
 	var m map[string]any
 	if err := dec.Decode(&m); err != nil {
 		return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "bad params"}
+	}
+	_, hasBridge := m["bridge"]
+	_, hasToken := m["token"]
+	if !hasBridge && !hasToken {
+		return m, nil
 	}
 	bridge, _ := m["bridge"].(string)
 	token, _ := m["token"].(string)
