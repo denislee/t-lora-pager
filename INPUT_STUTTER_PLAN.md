@@ -6,7 +6,7 @@ item, it names that item.
 
 **Status (2026-10-12):** IS.0 instrumentation, IS.1, IS.2 (async save; the SD clock
 is not changed), IS.3, IS.4, IS.5 and IS.6 are implemented on `master`
-(`d1abbae`..`88299dd`), and the builds, native tests and emulator checks pass.
+(`2cb5f80`..`fe3736b`), and the builds, native tests and emulator checks pass.
 **Still open:** the IS.0 hardware measurement table, the hardware feel test
 (section 6), the SD clock raise (P6.19, needs a CRC read-back on the device), and
 IS.7, which waits for the hardware numbers. Each item below has its own status line.
@@ -81,7 +81,7 @@ can make a key that *was* delivered appear to do nothing.
 
 ### IS.0: Measure and reproduce first (no behaviour change)
 
-**Status: instrumentation DONE `d1abbae`; hardware table OPEN.** `core/input_profile.{h,cpp}`
+**Status: instrumentation DONE `2cb5f80`; hardware table OPEN.** `core/input_profile.{h,cpp}`
 is built by `pio run -e tlora_pager_profile` (`-D INPUT_PROFILE`, `[prof]` lines on
 serial). It reports the lock hold histogram and holder, the kb_reader lock wait, key
 enqueue→dequeue p50/p95/max, frame time, spans, and a group dump on each switch.
@@ -125,7 +125,7 @@ before/after comparison.
 
 ### IS.1: Decouple the keyboard reader from the UI mutex (fixes A)
 
-**Status: DONE `3fd1de6`.** `core::ScopedKbLock` (`core/kb_lock.{h,cpp}`) is a recursive
+**Status: DONE `4721a8b`.** `core::ScopedKbLock` (`core/kb_lock.{h,cpp}`) is a recursive
 keyboard-only mutex. It is taken by the reader, `setNotifyTask`, `hw_set_kb_backlight`,
 `hw_enable_keyboard`, `hw_disable_keyboard`, `hw_set_keyboard_read_callback`, and
 around `lightSleep()`/`hw_sleep()` in `hw_low_power_loop`. `graft grep "instance.kb"`
@@ -157,7 +157,7 @@ Open: soak test on hardware (WiFi scan, NFC, charging, sleep/wake).
 
 ### IS.2: Take the note save off the exit path (fixes B)
 
-**Status: DONE `6e14ff3`, except the SD clock.** `hw_save_preferred_file_async()`
+**Status: DONE `4952a60`, except the SD clock.** `hw_save_preferred_file_async()`
 (`hal/storage`) saves on a `note_save` task (core 0, prio 2, 10 KB stack). It allows
 one save in flight, and any later call waits behind it. Every public reader, lister,
 deleter and bulk copy in `storage.cpp`/`storage_bulk.cpp`, plus the sync
@@ -196,7 +196,7 @@ LVGL thread can wait on it safely. Not done:
 
 ### IS.3: Stop rebuilding the home screen on every return (fixes C)
 
-**Status: DONE `88299dd`.** `MenuApp::persistentUi()` makes AppManager skip the clean.
+**Status: DONE `fe3736b`.** `MenuApp::persistentUi()` makes AppManager skip the clean.
 `onStop` pauses the timers and remembers focus. `onStart` resumes unless the layout
 key changes (style, dark mode, home font, visible-tile mask, panel size). This
 replaces the planned dirty flag/`applyChromeStyle` hook: `ui_sys_exit` calls
@@ -220,7 +220,7 @@ restored to the same tile.
 
 ### IS.4: Separate focus groups per screen (fixes E, H)
 
-**Status: DONE `88299dd`.** It was needed once IS.3 kept the home widgets alive.
+**Status: DONE `fe3736b`.** It was needed once IS.3 kept the home widgets alive.
 `System::enterApp()` is the single entry point: it empties `_appGroup`, clears
 editing, makes it the default, then switches. `showMenu()` restores `_menuGroup`
 with editing cleared. Home tiles/shortcuts/Settings go through `queueEnterApp`, as do
@@ -246,7 +246,7 @@ change: Tasks 4, Editor 5, Journal 2 (back button + that app's own widgets only)
 
 ### IS.5: Never tear down from inside the dying widget's event (fixes F)
 
-**Status: DONE `a841aa1`** (the file-browser → editor open followed in `88299dd`).
+**Status: DONE `eb17a8b`** (the file-browser → editor open followed in `fe3736b`).
 `menu_show_deferred()` / `System::queueShowMenu()` / `queueEnterApp()` run from
 `System::loop()` after `lv_timer_handler()`. Every `menu_show()` in `src/apps/` became
 the deferred form. `do_exit` paths no longer call their `ui_*_exit` before the switch
@@ -270,7 +270,7 @@ Emulator xdotool flows give the same switch sequence as the pre-change build: ho
 
 ### IS.6: Drop stale input across transitions (fixes G)
 
-**Status: DONE `9bf377d`, keyboard only.** `hw_keyboard_flush_queue()` runs from
+**Status: DONE `9d2394c`, keyboard only.** `hw_keyboard_flush_queue()` runs from
 `enable_keyboard()` only when the indev was disabled for more than 300 ms. An
 unconditional flush would discard the keys IS.1/IS.5 now preserve during a
 transition (`disable_keyboard` and `enable_keyboard` run in the same frame on an app
@@ -346,5 +346,5 @@ kb wait, key latency p95/max, worst frame, group size._
 | Date | Commit | Scenario | Worst hold (holder) | kb wait max | key p95 / max | worst frame | group size |
 |---|---|---|---|---|---|---|---|
 | | | | | | | | |
-| 2026-10-12 | d1abbae | emulator sweep, group dump only (no lock/latency on emulator) | — | — | — | — | MainMenu 13, Editor 5, Tasks 4, Settings 22, Files 10, SSH 12, Remote 8, Chat 5, others 1–2 |
-| 2026-10-12 | 88299dd | emulator xdotool flow, group dump after IS.3/IS.4 | — | — | — | — | MainMenu 13, Tasks 4, Editor 5, Journal 2 (app group holds only the app + back) |
+| 2026-10-12 | 2cb5f80 | emulator sweep, group dump only (no lock/latency on emulator) | — | — | — | — | MainMenu 13, Editor 5, Tasks 4, Settings 22, Files 10, SSH 12, Remote 8, Chat 5, others 1–2 |
+| 2026-10-12 | fe3736b | emulator xdotool flow, group dump after IS.3/IS.4 | — | — | — | — | MainMenu 13, Tasks 4, Editor 5, Journal 2 (app group holds only the app + back) |
