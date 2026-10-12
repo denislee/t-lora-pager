@@ -307,8 +307,7 @@ static void exit_to_menu()
 {
     finalize_recording();
     hw_set_play_stop();
-    ui_notes_exit(NULL);
-    menu_show();
+    menu_show_deferred();
 }
 
 // Record view only exists in quick mode, so stopping always exits the app.

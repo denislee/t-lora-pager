@@ -27,6 +27,13 @@ public:
     void showMenu();
     void hideMenu();
 
+    // Show the menu after the current LVGL dispatch unwinds (run from loop()).
+    void queueShowMenu();
+    // hideMenu() + switchApp(name, appPanel), deferred the same way.
+    void queueEnterApp(const char* name);
+    // A queued switch / showMenu has not run yet.
+    bool transitionPending() const;
+
     lv_obj_t* showBackButton(lv_event_cb_t cb);
     void hideBackButton();
     void applyChromeStyle();
@@ -54,6 +61,9 @@ private:
     lv_obj_t* _statBackBtn = nullptr;
     lv_event_cb_t _backBtnCb = nullptr;
     lv_obj_t* _usbWarningBox = nullptr;
+
+    bool _pendingShowMenu = false;
+    const char* _pendingEnterApp = nullptr;
 
     lv_group_t* _menuGroup = nullptr;
     

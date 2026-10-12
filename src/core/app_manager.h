@@ -42,6 +42,9 @@ public:
      */
     void queueSwitchApp(const std::string& name, lv_obj_t* parent);
 
+    // True while a switch queued by queueSwitchApp() has not run yet.
+    bool hasPendingSwitch() const { return _hasPendingSwitch; }
+
     /**
      * @brief Run any switch queued by queueSwitchApp(). Called once per
      *        main-loop tick.

@@ -1331,7 +1331,7 @@ static void start_timer(uint32_t period_ms)
 
 // --- view switching -------------------------------------------------------
 
-static void back_to_menu_cb(lv_event_t *) { menu_show(); }
+static void back_to_menu_cb(lv_event_t *) { menu_show_deferred(); }
 static void back_to_list_cb(lv_event_t *) { show_chat_list(); }
 
 // --- inline composer ------------------------------------------------------
@@ -1673,7 +1673,7 @@ static void on_unlocked(bool ok, void *)
     if (!ok) {
         // User cancelled or got the passphrase wrong — kick back to menu
         // rather than silently sit on a screen with no token.
-        menu_show();
+        menu_show_deferred();
         return;
     }
     reload_config();

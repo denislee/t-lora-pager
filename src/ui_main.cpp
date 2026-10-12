@@ -97,6 +97,16 @@ void menu_show()
     core::System::getInstance().showMenu();
 }
 
+void menu_show_deferred()
+{
+    core::System::getInstance().queueShowMenu();
+}
+
+bool ui_transition_pending()
+{
+    return core::System::getInstance().transitionPending();
+}
+
 void set_default_group(lv_group_t *group)
 {
     lv_group_set_default(group);

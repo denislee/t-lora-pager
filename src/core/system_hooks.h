@@ -67,6 +67,16 @@ void ui_request_editor_switch();
 // Show the home menu panel. Thin wrapper over core::System.
 void menu_show();
 
+// Deferred menu_show(): runs after the current LVGL event dispatch unwinds.
+// Use this from event callbacks (back buttons, ESC handlers, unlock results)
+// so the app is not torn down under the widget that is still dispatching.
+void menu_show_deferred();
+
+// True while a queued app switch / menu_show_deferred() has not run yet.
+// The keypad and encoder read callbacks hold input while this is set, so keys
+// pressed during a transition land on the new screen instead of the old one.
+bool ui_transition_pending();
+
 // True while any SSH session (LibSshBackend or loopback stub) is in the
 // Connected state. Set/cleared by ui_ssh.cpp; read by factory.ino loop() as a
 // guard that prevents auto fake-sleep while a live terminal session is open.

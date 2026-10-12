@@ -340,7 +340,7 @@ static void journal_unlock_result_cb(bool ok, void *ud)
     lv_obj_t *parent = (lv_obj_t *)ud;
     if (!ok) {
         pending_journal_parent = NULL;
-        menu_show();
+        menu_show_deferred();
         return;
     }
     if (pending_journal_parent == parent) {
@@ -437,8 +437,7 @@ static void schedule_bg_refresh()
 
 static void do_exit()
 {
-    ui_journal_exit(NULL);
-    menu_show();
+    menu_show_deferred();  // onStop runs ui_journal_exit
 }
 
 static void next_page_cb(lv_event_t *e)

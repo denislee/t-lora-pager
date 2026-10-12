@@ -224,9 +224,7 @@ static void quick_toggle_click_cb(lv_event_t* e) {
 static void settings_click_cb(lv_event_t* e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     hw_feedback();
-    core::System::getInstance().hideMenu();
-    core::AppManager::getInstance().switchApp("Settings",
-        core::System::getInstance().getAppPanel());
+    core::System::getInstance().queueEnterApp("Settings");
 }
 
 // ---- Internet check ('p' home shortcut) ----------------------------------
@@ -455,9 +453,7 @@ static void play_pause_click_cb(lv_event_t* e) {
 //   z → NTP time sync (WiFi must be connected)
 static void launch_app_from_home(const char* appName) {
     hw_feedback();
-    core::System::getInstance().hideMenu();
-    core::AppManager::getInstance().switchApp(
-        appName, core::System::getInstance().getAppPanel());
+    core::System::getInstance().queueEnterApp(appName);
 }
 
 static void home_shortcut_key_cb(lv_event_t* e) {
@@ -520,9 +516,7 @@ void tile_click_cb(lv_event_t* e) {
         return;
     }
     hw_feedback();
-    core::System::getInstance().hideMenu();
-    core::AppManager::getInstance().switchApp(item->appName,
-        core::System::getInstance().getAppPanel());
+    core::System::getInstance().queueEnterApp(item->appName);
 }
 
 } // namespace

@@ -37,6 +37,7 @@
 #include "task_util.h"
 #include "../core/input_profile.h"
 #include "../core/kb_lock.h"
+#include "../core/system_hooks.h"
 
 namespace {
 
@@ -227,6 +228,13 @@ void handle_alt_backspace(lv_indev_t *drv)
 
 void kb_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 {
+    // IS.5: a leave-the-app event queued a transition that runs after this
+    // dispatch. Leave the remaining keys queued so they reach the new screen.
+    if (ui_transition_pending()) {
+        data->state = LV_INDEV_STATE_REL;
+        data->key   = s_last_key;
+        return;
+    }
     KeyEvent ev;
     if (!s_event_queue || xQueueReceive(s_event_queue, &ev, 0) != pdTRUE) {
         data->state = LV_INDEV_STATE_REL;

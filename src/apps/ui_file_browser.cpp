@@ -332,8 +332,7 @@ static void filter_click_cb(lv_event_t *e)
 
 static void do_exit()
 {
-    ui_file_browser_exit(NULL);
-    menu_show();
+    menu_show_deferred();  // onStop runs ui_file_browser_exit
 }
 
 static void exit_btn_cb(lv_event_t *e)

@@ -831,7 +831,7 @@ static void finish_recording()
 }
 #endif
 
-static void back_btn_cb(lv_event_t *) { menu_show(); }
+static void back_btn_cb(lv_event_t *) { menu_show_deferred(); }
 
 // While the log is focused via the encoder, UP/DOWN should scroll the log
 // itself rather than move focus to the next/prev widget. Without this the

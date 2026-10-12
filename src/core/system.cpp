@@ -540,8 +540,35 @@ void System::hideMenu() {
     lv_tileview_set_tile_by_index(_mainScreen, 0, 1, LV_ANIM_OFF);
 }
 
+void System::queueShowMenu() {
+    _pendingShowMenu = true;
+    _pendingEnterApp = nullptr;
+}
+
+void System::queueEnterApp(const char* name) {
+    _pendingEnterApp = name;
+    _pendingShowMenu = false;
+}
+
+bool System::transitionPending() const {
+    return _pendingShowMenu || _pendingEnterApp != nullptr ||
+           AppManager::getInstance().hasPendingSwitch();
+}
+
 void System::loop() {
     AppManager::getInstance().update();
+    // IS.5: transitions queued from event callbacks run here, after
+    // lv_timer_handler() has finished dispatching, so an app is never torn
+    // down from inside its own widget's event.
+    if (const char* name = _pendingEnterApp) {
+        _pendingEnterApp = nullptr;
+        hideMenu();
+        AppManager::getInstance().switchApp(name, _appPanel);
+    }
+    if (_pendingShowMenu) {
+        _pendingShowMenu = false;
+        showMenu();
+    }
     // Drain pending notifications on the LVGL thread. `post()` is safe to
     // call from any task; actual banner creation has to happen here so it
     // runs under the instance lock held by the LVGL task.
@@ -571,25 +598,15 @@ static void clear_back_button_events(lv_obj_t *btn) {
     }
 }
 
-// CLICKED on the back button tears down the current app and shows a new screen
-// synchronously. If the triggering Enter is still asserted when the next screen
-// comes up, the indev could re-fire on whatever is now focused. Enter no longer
-// auto-repeats (see keyboard_task.cpp), so the vendor emits at most one PRESS
-// per physical tap — one wait_release cycle on the indev is enough to absorb
-// the stale press/release. The old drop-until-release hook was racy (the first
-// press on the new screen could arrive in the same poll burst as the release
-// that clears the flag, swallowing the user's intended click) and is no longer
-// needed.
-static void back_btn_wait_release_cb(lv_event_t *e) {
-    lv_indev_t *indev = lv_indev_get_act();
-    if (indev) lv_indev_wait_release(indev);
-}
-
 lv_obj_t* System::showBackButton(lv_event_cb_t cb) {
     if (!_statBackBtn) return nullptr;
     clear_back_button_events(_statBackBtn);
+    // No wait-release hook any more: CLICKED fires on the key release, and
+    // every leave-the-app path is deferred (queueShowMenu / queueEnterApp,
+    // IS.5), so the next screen is built after the press has fully ended.
+    // lv_indev_wait_release() here used to swallow the first key of a fast
+    // burst on the new screen.
     if (cb) {
-        lv_obj_add_event_cb(_statBackBtn, back_btn_wait_release_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(_statBackBtn, cb, LV_EVENT_CLICKED, NULL);
     }
     _backBtnCb = cb;

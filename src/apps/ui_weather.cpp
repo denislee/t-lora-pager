@@ -135,7 +135,7 @@ static uint32_t s_seen_gen = 0;
 static void back_btn_cb(lv_event_t *e)
 {
     (void)e;
-    menu_show();
+    menu_show_deferred();
 }
 
 // Montserrat-10 (what we use here) only covers basic Latin — anything outside

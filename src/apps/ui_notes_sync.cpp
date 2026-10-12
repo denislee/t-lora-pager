@@ -482,7 +482,7 @@ static void notes_sync_bg_task(void *arg)
 
 // --- UI -------------------------------------------------------------------
 
-static void back_btn_cb(lv_event_t *) { menu_show(); }
+static void back_btn_cb(lv_event_t *) { menu_show_deferred(); }
 
 // LVGL timer: drains queued log lines from the worker and finalizes once it
 // has exited. On hardware it runs inside `lv_timer_handler()`, which already

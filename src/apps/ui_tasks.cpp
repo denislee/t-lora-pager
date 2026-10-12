@@ -266,8 +266,7 @@ static void add_ta_event_cb(lv_event_t *e) {
 // Single exit path for ESC, the status-bar back button and the touch quit
 // button.
 static void do_exit() {
-    ui_tasks_exit(NULL);
-    menu_show();
+    menu_show_deferred();  // onStop runs ui_tasks_exit
 }
 
 static void tasks_back_cb(lv_event_t *e) {

@@ -40,6 +40,7 @@
 
 #include "str_encode.h"
 #include "task_util.h"
+#include "../core/system_hooks.h"
 
 namespace {
 
@@ -130,6 +131,12 @@ void textarea_jump_word(lv_obj_t *ta, int direction)
 
 void rotary_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 {
+    // IS.5: a queued transition has not run yet — hold input on this screen.
+    if (ui_transition_pending()) {
+        data->enc_diff = 0;
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
     static uint8_t last_dir = ROTARY_DIR_NONE;
 
     // Coalesce every queued rotary event into one aggregate enc_diff. A

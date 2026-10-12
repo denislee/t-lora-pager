@@ -142,8 +142,7 @@ static void schedule_word_count_update()
 static void do_exit()
 {
     save_content(true);
-    // menu_show will trigger AppManager::switchApp which calls ui_text_editor_exit
-    menu_show();
+    menu_show_deferred();  // switchApp → onStop → ui_text_editor_exit
 }
 
 static void exit_btn_cb(lv_event_t *e)
@@ -217,7 +216,7 @@ static void float_btn_click_cb(lv_event_t *e)
         return;
     }
     hw_feedback();
-    core::AppManager::getInstance().switchApp(app_name,
+    core::AppManager::getInstance().queueSwitchApp(app_name,
         core::System::getInstance().getAppPanel());
 }
 
@@ -337,7 +336,7 @@ static void editor_unlock_result_cb(bool ok, void *ud)
     lv_obj_t *parent = (lv_obj_t *)ud;
     if (!ok) {
         pending_editor_parent = NULL;
-        menu_show();
+        menu_show_deferred();
         return;
     }
     if (pending_editor_parent == parent) {

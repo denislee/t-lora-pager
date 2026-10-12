@@ -1002,7 +1002,7 @@ void SshApp::edit_btn_cb(lv_event_t* e) {
 void SshApp::back_btn_cb(lv_event_t* e) {
     (void)e;
     hw_feedback();
-    menu_show();
+    menu_show_deferred();
 }
 
 void SshApp::term_event_cb(lv_event_t* e) {

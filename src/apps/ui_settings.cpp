@@ -401,8 +401,8 @@ static void settings_exit_cb(lv_event_t *e)
             return;
         }
     }
-    // menu_show will trigger AppManager::switchApp which calls ui_sys_exit
-    menu_show();
+    // menu_show_deferred will trigger AppManager::switchApp which calls ui_sys_exit
+    menu_show_deferred();
 }
 
 // Flips a toggle row's label to match the button's *final* checked state.
