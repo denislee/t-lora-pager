@@ -45,6 +45,9 @@ void disable_keyboard();
 void enable_keyboard();
 
 void ui_text_editor_open_file(const char *path);
+/* Open `path` in the Editor after the current event unwinds (switches to the
+ * Editor, IS.5). */
+void ui_text_editor_open_file_deferred(const char *path);
 
 /* Editor / fake-sleep / instance-lock hooks are declared in
  * core/system_hooks.h (included at top of this file). */

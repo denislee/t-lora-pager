@@ -88,6 +88,32 @@ struct Badge {
 static std::vector<Badge> s_badges;
 static lv_timer_t* s_badge_timer = nullptr;
 
+// IS.3: the home screen is built once and kept while apps run. It is rebuilt
+// only when something the layout depends on changed.
+struct LayoutKey {
+    int style; bool dark; const lv_font_t* font; uint32_t visible_mask;
+    int32_t w, h;
+    bool operator==(const LayoutKey& o) const {
+        return style == o.style && dark == o.dark && font == o.font &&
+               visible_mask == o.visible_mask && w == o.w && h == o.h;
+    }
+};
+static bool       s_built = false;
+static LayoutKey  s_layout_key{};
+static lv_obj_t*  s_last_focus = nullptr;
+static LayoutKey current_layout_key(lv_obj_t* parent) {
+    LayoutKey k{};
+    k.style = (int)ui_style_get();
+    k.dark = ui_dark_mode_get();
+    k.font = get_home_font();
+    for (int oi = 0; oi < kItemCount && oi < 32; oi++)
+        if (home_apps_is_visible(oi)) k.visible_mask |= (1u << oi);
+    lv_obj_update_layout(parent);
+    k.w = lv_obj_get_width(parent);
+    k.h = lv_obj_get_height(parent);
+    return k;
+}
+
 // Tiles whose backing app needs an active WiFi connection — greyed out and
 // click-blocked when WiFi is off or not connected — or, for tiles that also
 // work over the phone link (phone_ok), when the PagerLink link is down.
@@ -523,16 +549,17 @@ void tile_click_cb(lv_event_t* e) {
 
 MenuApp::MenuApp() : core::App("MainMenu") {}
 
-// Kill the timers and forget every cached widget pointer. Shared by onStop
-// (timers must die before the tiles are cleaned up — otherwise their next
-// tick would touch labels that lv_obj_clean just destroyed) and onStart
-// (tiles are about to be recreated, so old pointers are now invalid).
-static void reset_state() {
+// Stop the live-state timers (badges, media/WiFi gating). Widgets stay.
+static void stop_live_timers() {
     if (s_badge_timer) { lv_timer_del(s_badge_timer); s_badge_timer = nullptr; }
     if (s_media_visibility_timer) {
         lv_timer_del(s_media_visibility_timer);
         s_media_visibility_timer = nullptr;
     }
+}
+
+// Forget every cached widget pointer (tiles are about to be destroyed).
+static void forget_widgets() {
     s_badges.clear();
     s_media_buttons.clear();
     s_volume_btn = nullptr;
@@ -544,16 +571,85 @@ static void reset_state() {
     s_wifi_gated_last_state = -1;
 }
 
+// Stop + forget. onStop only stops timers (the tiles persist, IS.3); a rebuild
+// in onStart stops the timers and forgets the pointers, because lv_obj_clean
+// just destroyed every widget they referenced.
+static void reset_state() {
+    stop_live_timers();
+    forget_widgets();
+}
+
+// (Re)start the home screen's live state after a full build or a resume:
+// badges, the WiFi-gated disabled visual, and the media/WiFi poll tick.
+static void start_live_state() {
+    // Populate badges immediately, then refresh on a slow tick so the menu
+    // reflects unread counts that arrive while it's open.
+    if (!s_badges.empty()) {
+        update_badges(nullptr);
+        s_badge_timer = lv_timer_create(update_badges, 2000, nullptr);
+    }
+
+    // Apply the disabled visual to wifi-gated tiles up front so the very
+    // first frame already reflects the connection state — otherwise the
+    // tile flashes its accent color until the 1 s tick fires.
+    if (!s_wifi_gated.empty()) {
+        int state = (hw_get_wifi_connected() ? 1 : 0) | (hw_link_connected() ? 2 : 0);
+        apply_wifi_gated_state((state & 1) != 0, (state & 2) != 0);
+        s_wifi_gated_last_state = state;
+    }
+
+    // Poll BLE pairing state so media buttons appear/disappear while the
+    // menu is open (user connects from their phone without leaving home),
+    // and re-evaluate WiFi-gated tiles on the same tick.
+    if (!s_media_buttons.empty() || !s_wifi_gated.empty()) {
+        s_media_visibility_timer =
+            lv_timer_create(media_visibility_tick, 1000, nullptr);
+    }
+}
+
+// Returning home without a rebuild: refresh what may have changed while an
+// app was open, restart the live timers and put focus back where it was.
+static void resume() {
+    if (s_wifi_btn) apply_toggle_style(s_wifi_btn, hw_get_wifi_enable());
+    if (s_bt_btn)   apply_toggle_style(s_bt_btn, hw_get_bt_enable());
+    set_media_buttons_visible(media_controls_should_show());
+    for (auto& b : s_badges) b.cached_count = -1;
+    s_wifi_gated_last_state = -1;
+    start_live_state();
+    lv_group_t* g = core::System::getInstance().getMenuGroup();
+    if (!g) return;
+    lv_obj_t* target = nullptr;
+    if (s_last_focus && lv_obj_is_valid(s_last_focus) && lv_obj_get_group(s_last_focus) == g &&
+        !lv_obj_has_flag(s_last_focus, LV_OBJ_FLAG_HIDDEN)) {
+        target = s_last_focus;
+    }
+    if (target) lv_group_focus_obj(target);
+    s_last_focus = nullptr;
+}
+
 void MenuApp::onStop() {
 #ifdef ARDUINO
     inet_check_teardown();   // cancel any in-flight internet-check UI (worker self-finishes)
 #endif
-    reset_state();
-    core::App::onStop();
+    // IS.3: keep the tiles; remember focus and pause the live state.
+    lv_group_t* g = core::System::getInstance().getMenuGroup();
+    s_last_focus = g ? lv_group_get_focused(g) : nullptr;
+    stop_live_timers();
 }
 
 void MenuApp::onStart(lv_obj_t* parent) {
     INPUT_PROF_SPAN("MenuApp::onStart");
+    LayoutKey key = current_layout_key(parent);
+    if (s_built && key == s_layout_key && lv_obj_get_child_count(parent) > 0) {
+        resume();
+        return;
+    }
+    reset_state();          // timers + cached pointers die before the tiles do
+    lv_obj_clean(parent);   // persistentUi(): AppManager no longer cleans for us
+    s_built = true;
+    s_layout_key = key;
+    s_last_focus = nullptr;
+
     // Parent column: toggle strip on top, tile grid filling the rest.
     ui_apply_backdrop(parent);
     lv_obj_set_style_border_width(parent, 0, 0);
@@ -565,10 +661,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
     lv_obj_set_flex_align(parent, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Tiles are about to be recreated; old pointers are now invalid.
-    reset_state();
-
-    lv_group_t* grp = lv_group_get_default();
+    lv_group_t* grp = core::System::getInstance().getMenuGroup();
 
     // Measure available room before carving out the toggle strip. The grid
     // gets whatever remains.
@@ -854,29 +947,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_group_focus_obj(lv_obj_get_child(grid, 0));
     }
 
-    // Populate badges immediately, then refresh on a slow tick so the menu
-    // reflects unread counts that arrive while it's open.
-    if (!s_badges.empty()) {
-        update_badges(nullptr);
-        s_badge_timer = lv_timer_create(update_badges, 2000, nullptr);
-    }
-
-    // Apply the disabled visual to wifi-gated tiles up front so the very
-    // first frame already reflects the connection state — otherwise the
-    // tile flashes its accent color until the 1 s tick fires.
-    if (!s_wifi_gated.empty()) {
-        int state = (hw_get_wifi_connected() ? 1 : 0) | (hw_link_connected() ? 2 : 0);
-        apply_wifi_gated_state((state & 1) != 0, (state & 2) != 0);
-        s_wifi_gated_last_state = state;
-    }
-
-    // Poll BLE pairing state so media buttons appear/disappear while the
-    // menu is open (user connects from their phone without leaving home),
-    // and re-evaluate WiFi-gated tiles on the same tick.
-    if (!s_media_buttons.empty() || !s_wifi_gated.empty()) {
-        s_media_visibility_timer =
-            lv_timer_create(media_visibility_tick, 1000, nullptr);
-    }
+    start_live_state();
 
     // Wire the home-screen letter shortcuts ('d'/'w'/'b'/'p'/...) on every
     // focusable object — LV_EVENT_KEY fires only on the focused widget.

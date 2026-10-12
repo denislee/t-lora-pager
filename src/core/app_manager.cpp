@@ -46,8 +46,8 @@ void AppManager::switchApp(const std::string& name, lv_obj_t* parent) {
         _activeApp = it->second;
         log_i("Switching to app: %s", _activeApp->getName().c_str());
         
-        // Ensure root is cleaned and set to the new app
-        {
+        // Clean the parent for the new app unless it keeps its UI (home, IS.3).
+        if (!_activeApp->persistentUi()) {
             INPUT_PROF_SPAN("switchApp.clean");
             lv_obj_clean(parent);
         }

@@ -15,6 +15,7 @@ public:
     MenuApp();
     void onStart(lv_obj_t* parent) override;
     void onStop() override;
+    bool persistentUi() const override { return true; }
 };
 
 // Home-screen tile registry, exposed so Settings » Home Apps can list and

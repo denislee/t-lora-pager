@@ -13,6 +13,8 @@
 
 #include "../apps/menu_app.h"
 
+#include <vector>
+
 LV_FONT_DECLARE(lv_font_montserrat_18);
 LV_FONT_DECLARE(lv_font_montserrat_28);
 LV_FONT_DECLARE(lv_font_montserrat_32);
@@ -47,6 +49,12 @@ void System::setupGlobalUI() {
 
     _menuGroup = lv_group_create();
     lv_group_set_wrap(_menuGroup, false);
+
+    // IS.4: apps get their own group so the (persistent, IS.3) home widgets
+    // never sit in an app's focus order, and an app starts with an empty
+    // group whose editing flag is cleared.
+    _appGroup = lv_group_create();
+    lv_group_set_wrap(_appGroup, false);
     
     // Set legacy global
     menu_g = _menuGroup;
@@ -524,20 +532,29 @@ void System::applyChromeStyle() {
 
 void System::showMenu() {
     AppManager::getInstance().switchApp("MainMenu", _menuPanel);
-    lv_group_set_default(_menuGroup);
-    // Link all input devices to the menu group
-    lv_indev_t* indev = lv_indev_get_next(NULL);
-    while (indev) {
-        lv_indev_set_group(indev, _menuGroup);
-        indev = lv_indev_get_next(indev);
-    }
-    
+    lv_group_set_editing(_menuGroup, false);
+    // set_default_group() links every input device to the menu group.
+    set_default_group(_menuGroup);
+
     lv_tileview_set_tile_by_index(_mainScreen, 0, 0, LV_ANIM_OFF);
     enable_keyboard(); // Ensure keyboard is enabled in menu
+    // switchApp()'s dump ran before the menu group became the default again.
+    INPUT_PROF(prof::dump_group("home"));
 }
 
 void System::hideMenu() {
     lv_tileview_set_tile_by_index(_mainScreen, 0, 1, LV_ANIM_OFF);
+}
+
+void System::enterApp(const char* name) {
+    if (!name) return;
+    auto& am = AppManager::getInstance();
+    if (am.isActive(name)) { hideMenu(); return; }
+    hideMenu();
+    lv_group_remove_all_objs(_appGroup);
+    lv_group_set_editing(_appGroup, false);
+    set_default_group(_appGroup);
+    am.switchApp(name, _appPanel);
 }
 
 void System::queueShowMenu() {
@@ -562,8 +579,7 @@ void System::loop() {
     // down from inside its own widget's event.
     if (const char* name = _pendingEnterApp) {
         _pendingEnterApp = nullptr;
-        hideMenu();
-        AppManager::getInstance().switchApp(name, _appPanel);
+        enterApp(name);
     }
     if (_pendingShowMenu) {
         _pendingShowMenu = false;
@@ -619,9 +635,11 @@ lv_obj_t* System::showBackButton(lv_event_cb_t cb) {
         // order. Rebuild the group so the back button sits at index 0 while
         // every other member keeps its original relative order.
         lv_group_remove_obj(_statBackBtn);
+        // IS.4: size the snapshot from the actual member count. The old fixed
+        // 32-entry cap silently dropped members of large groups (e.g. a long
+        // Settings subpage), losing them from the nav order.
         uint32_t n = lv_group_get_obj_count(g);
-        lv_obj_t *members[32];
-        if (n > 32) n = 32;
+        std::vector<lv_obj_t*> members(n);
         for (uint32_t i = 0; i < n; i++) {
             members[i] = lv_group_get_obj_by_index(g, i);
         }

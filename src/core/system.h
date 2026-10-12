@@ -27,6 +27,16 @@ public:
     void showMenu();
     void hideMenu();
 
+    /**
+     * @brief Show an app on the app panel with its own, empty focus group
+     * (IS.4). Synchronous: call it from loop()/non-event code; event callbacks
+     * use queueEnterApp().
+     */
+    void enterApp(const char* name);
+
+    lv_group_t* getMenuGroup() const { return _menuGroup; }
+    lv_group_t* getAppGroup() const { return _appGroup; }
+
     // Show the menu after the current LVGL dispatch unwinds (run from loop()).
     void queueShowMenu();
     // hideMenu() + switchApp(name, appPanel), deferred the same way.
@@ -66,6 +76,7 @@ private:
     const char* _pendingEnterApp = nullptr;
 
     lv_group_t* _menuGroup = nullptr;
+    lv_group_t* _appGroup = nullptr;
     
     void setupGlobalUI();
 };

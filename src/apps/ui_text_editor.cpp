@@ -12,6 +12,7 @@
  *   timers:  sync_pill_wifi_timer       — lv_timer_del + null
  *            word_count_debounce_timer  — lv_timer_del + null
  *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
+ *   state:   s_pending_open_path        — consumed by editor_build_ui
  * If you add a new cached LVGL pointer or timer, list it above AND
  * extend editor_exit() — the debounce timer in particular will fire
  * into a destroyed textarea if leaked.
@@ -42,6 +43,7 @@ static lv_timer_t *sync_pill_wifi_timer = NULL;
 static int sync_pill_wifi_last_state = -1;
 static string current_file_path = "";
 static bool content_dirty = false;
+static string s_pending_open_path;
 
 // Word count is recomputed lazily through this debounce timer instead of
 // inline on every LV_EVENT_VALUE_CHANGED. Counting words walks the entire
@@ -216,8 +218,9 @@ static void float_btn_click_cb(lv_event_t *e)
         return;
     }
     hw_feedback();
-    core::AppManager::getInstance().queueSwitchApp(app_name,
-        core::System::getInstance().getAppPanel());
+    // Deferred (IS.5) and through enterApp so the next app starts with an
+    // empty, non-editing focus group (IS.4).
+    core::System::getInstance().queueEnterApp(app_name);
 }
 
 /* Sync needs WiFi to talk to GitHub, so the pill is gated on the live link
@@ -489,6 +492,12 @@ static void editor_build_ui(lv_obj_t *parent)
         do_exit();
     }, NULL);
 #endif
+
+    if (!s_pending_open_path.empty()) {
+        string p;
+        p.swap(s_pending_open_path);
+        ui_text_editor_open_file(p.c_str());
+    }
 }
 
 void ui_text_editor_open_file(const char *path)
@@ -501,6 +510,12 @@ void ui_text_editor_open_file(const char *path)
         content_dirty = false;
         update_word_count();
     }
+}
+
+void ui_text_editor_open_file_deferred(const char *path)
+{
+    s_pending_open_path = path ? path : "";
+    core::System::getInstance().queueEnterApp("Editor");
 }
 
 static void ui_text_editor_exit(lv_obj_t *parent)

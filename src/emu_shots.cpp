@@ -166,8 +166,7 @@ int emu_shots_run(lv_display_t *disp, const char *dir)
             mkdir(sw.dir.c_str(), 0755);
 
             for (const auto &name : names) {
-                sys.hideMenu();
-                am.switchApp(name, sys.getAppPanel());
+                sys.enterApp(name.c_str());
                 pump(400);
                 sw.shot(name);
                 if (lv_obj_t *menu = find_menu(sys.getAppPanel())) {

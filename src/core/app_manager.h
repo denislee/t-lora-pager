@@ -45,6 +45,9 @@ public:
     // True while a switch queued by queueSwitchApp() has not run yet.
     bool hasPendingSwitch() const { return _hasPendingSwitch; }
 
+    // True when the named app is the one currently active.
+    bool isActive(const std::string& name) const { return _activeApp && _activeApp->getName() == name; }
+
     /**
      * @brief Run any switch queued by queueSwitchApp(). Called once per
      *        main-loop tick.

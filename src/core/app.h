@@ -36,6 +36,13 @@ public:
     }
 
     /**
+     * @brief True when the app keeps its widgets across onStop()/onStart()
+     * (the home screen, IS.3). AppManager then does not lv_obj_clean() the
+     * parent before onStart(); the app decides whether to rebuild.
+     */
+    virtual bool persistentUi() const { return false; }
+
+    /**
      * @brief Get the name of the app.
      */
     const std::string& getName() const { return _name; }

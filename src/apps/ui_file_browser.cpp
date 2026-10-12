@@ -178,8 +178,8 @@ static const HwDirEntry *row_entry(lv_obj_t *btn)
 
 static void file_click_open_now(const std::string &path)
 {
-    core::AppManager::getInstance().switchApp("Editor", parent_obj);
-    ui_text_editor_open_file(path.c_str());
+    // IS.5: don't tear the browser down under the row being clicked.
+    ui_text_editor_open_file_deferred(path.c_str());
 }
 
 static void file_click_after_unlock(bool ok, void *ud)
