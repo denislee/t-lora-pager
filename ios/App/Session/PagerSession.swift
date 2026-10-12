@@ -100,12 +100,13 @@ final class PagerSession: ObservableObject {
         let session = LinkSession(transport: transport)
         self.session = session
         await registerWeather(on: session)
+        await TelegramService(session: session).register()
         await session.start()
         watchEvents(of: session)
 
         let sys = SysService(session: session)
         do {
-            let hello = try await sys.hello(app: "0.1", caps: ["sys", "weather"])
+            let hello = try await sys.hello(app: "0.1", caps: ["sys", "weather", "tg"])
             state = .connected(hello: hello)
             appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
 
