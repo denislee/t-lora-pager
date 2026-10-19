@@ -47,7 +47,7 @@ ios-device:
 
 protocol-test:
 	python3 protocol/tools/mkvectors.py --check
-	$(PIO) test -e native_test -f test_link_frame -f test_link_rpc -f test_link_json
+	$(PIO) test -e native_test -f test_link_frame -f test_link_rpc -f test_link_json -f test_link_xfer
 	cd tools/pagerlink && go test ./internal/pagerlink/
 	$(MAKE) -C ios test-linux
 

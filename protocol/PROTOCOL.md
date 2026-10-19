@@ -141,13 +141,24 @@ pager buffers it). The pager checks size and CRC once `size` bytes are in,
 and drops the receiver when the call ends.
 
 - The receiver grants credits with ACK. The initial grant is implicit:
-  **16** packets. The sender keeps at most `credits` DATA messages
-  unacknowledged.
+  **16** DATA messages (not packets: a DATA message carries up to 4092 B).
+  The sender keeps at most `credits` DATA messages unacknowledged.
 - `ACK.next_expected_offset` acknowledges every byte below it.
   `ACK.credits` replaces (not adds to) the sender's window, counting from
   that offset.
 - DATA offsets must be contiguous. A DATA message with an unexpected offset
-  is dropped and the receiver re-ACKs its current `next_expected_offset`.
+  is dropped. The receiver re-ACKs its current `next_expected_offset` once
+  per gap: it does not re-ACK again until in-order DATA has arrived. Once
+  every byte is in, it re-ACKs the final offset for any further DATA, which
+  covers a lost final ACK.
+- An ACK that makes no progress while DATA is unacknowledged rewinds the
+  sender to that offset (go-back-N), at most once per acknowledged offset.
+  An ACK above the current send point (it overtook a rewind) moves the send
+  point forward.
+- Retransmit timeout: a sender that has seen no ACK for **2 s** while bytes
+  are unacknowledged rewinds to the acknowledged offset and resends. This
+  recovers a lost last DATA, a lost re-ACK or a lost final ACK. Timer
+  granularity is up to the implementation (the pager checks once per second).
 - Completion and integrity (CRC-32/ISO-HDLC over the whole file) are
   confirmed by the operation's own RPC (`fs.write.commit`) or, for reads,
   by the receiver once `size` bytes are in.

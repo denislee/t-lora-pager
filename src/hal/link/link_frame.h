@@ -36,8 +36,11 @@ constexpr uint8_t SEQ_MASK = 0x3F;
 constexpr size_t MIN_PACKET = 20;
 /** Fixed packet size for the TCP transport (equivalent to MTU 247). */
 constexpr size_t TCP_PACKET = 244;
-/** Implicit initial bulk-transfer credit window, in packets. */
+/** Implicit initial bulk-transfer credit window, in DATA messages (up to 4092 B each), not packets. */
 constexpr uint16_t INITIAL_CREDITS = 16;
+/** Bulk sender retransmit timeout: no ACK for this long with bytes unacknowledged ->
+ * rewind (PROTOCOL.md §4). */
+constexpr uint32_t XFER_RETRANSMIT_MS = 2000;
 
 /** Message type field. */
 enum class MsgType : uint8_t { Req = 0, Res = 1, Err = 2, Evt = 3, Data = 4, Ack = 5 };

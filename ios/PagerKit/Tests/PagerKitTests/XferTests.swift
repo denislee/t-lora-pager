@@ -11,7 +11,9 @@ private struct TestError: Error {}
 // test/test_link_xfer/test_main.cpp): a Sender and a Receiver are wired together
 // over a pair of payload queues so a test can deliver, drop or reorder DATA and
 // ACK messages by hand, and a loopback helper carries the whole transfer to
-// completion.
+// completion. The `LossyLoop` harness adds the P7.29 cases: it counts every
+// send, drops a chosen one, and simulates the owner's retransmit timer when
+// both queues drain with bytes still unacknowledged.
 
 /// `xferLoop` carries encoded DATA payloads one way and encoded ACK payloads the
 /// other, mirroring the C++ Loop harness.
@@ -47,6 +49,209 @@ final class XferLoop {
         while !ack.isEmpty {
             deliverAck(tx)
         }
+    }
+}
+
+/// `LossyLoop` is the lossy loopback of the P7.29 tests: DATA payloads travel
+/// sender -> receiver and ACK payloads receiver -> sender, every send is
+/// counted, and one send can be discarded by its 0-based index.
+final class LossyLoop {
+    var data: [[UInt8]] = [] // DATA payloads: sender -> receiver
+    var ack: [[UInt8]] = []  // ACK payloads: receiver -> sender
+
+    /// Every DATA send, including retransmissions.
+    var dataSends = 0
+    /// Every ACK send, including re-ACKs.
+    var ackSends = 0
+    /// How often the harness simulated the owner's retransmit timer.
+    var timerFirings = 0
+
+    private let dropData: Int?
+    private let dropAck: Int?
+
+    init(dropData: Int? = nil, dropAck: Int? = nil) {
+        self.dropData = dropData
+        self.dropAck = dropAck
+    }
+
+    func sendData(_ payload: [UInt8]) throws {
+        let index = dataSends
+        dataSends += 1
+        if index == dropData { return }
+        data.append(payload)
+    }
+
+    func sendAck(_ payload: [UInt8]) throws {
+        let index = ackSends
+        ackSends += 1
+        if index == dropAck { return }
+        ack.append(payload)
+    }
+
+    func deliverAllData(_ rx: XferReceiver) {
+        while !data.isEmpty {
+            rx.onData(data.removeFirst())
+        }
+    }
+
+    func deliverAllAcks(_ tx: XferSender) {
+        while !ack.isEmpty {
+            tx.onAck(ack.removeFirst())
+        }
+    }
+
+    /// Interleaved mode: one queued DATA to the receiver.
+    func deliverData(_ rx: XferReceiver) {
+        rx.onData(data.removeFirst())
+    }
+
+    /// Interleaved mode: one queued ACK to the sender (the caller pumps).
+    func deliverAck(_ tx: XferSender) {
+        tx.onAck(ack.removeFirst())
+    }
+
+    /// Simulate the owner's retransmit timer expiring: rewind then pump.
+    func fireTimer(_ tx: XferSender) {
+        timerFirings += 1
+        _ = tx.retransmit()
+        tx.pump()
+    }
+}
+
+/// One completed (or bounded) lossy-loopback run.
+private struct LossyRun {
+    let loop: LossyLoop
+    let sender: XferSender
+    let receiver: XferReceiver
+    let source: [UInt8]
+    let destination: [UInt8]
+}
+
+/// Drive `size` bytes through a `LossyLoop`, bounded to `maxSteps`: deliver all
+/// queued DATA, deliver all queued ACKs then pump, and when both queues drain
+/// while the sender is not Done, fire the retransmit timer.
+private func runLossy(
+    size: UInt32,
+    dropData: Int? = nil,
+    dropAck: Int? = nil,
+    maxSteps: Int = 100_000
+) throws -> LossyRun {
+    let source = makeSource(Int(size))
+    var destination = [UInt8](repeating: 0, count: Int(size))
+    let loop = LossyLoop(dropData: dropData, dropAck: dropAck)
+    let sender = XferSender(size: size, chunk: Xfer.maxDataChunk, start: 0,
+        read: readFrom(source), send: loop.sendData)
+    let receiver = XferReceiver(size: size, window: Xfer.initialCredits, ackEvery: 4, start: 0,
+        write: { off, b in destination.replaceSubrange(Int(off)..<(Int(off) + b.count), with: b) },
+        ack: loop.sendAck)
+
+    sender.pump()
+    var steps = 0
+    while steps < maxSteps {
+        loop.deliverAllData(receiver)
+        loop.deliverAllAcks(sender)
+        sender.pump()
+        if sender.state == .done && receiver.state == .done && loop.data.isEmpty && loop.ack.isEmpty {
+            break
+        }
+        if loop.data.isEmpty && loop.ack.isEmpty && sender.state != .done {
+            loop.fireTimer(sender)
+        }
+        steps += 1
+    }
+    return LossyRun(loop: loop, sender: sender, receiver: receiver,
+                    source: source, destination: destination)
+}
+
+/// One interleaved lossy-loopback run: the completed `LossyRun`, the number of
+/// loop steps it took, and whether it stopped at the step bound instead of at
+/// Done.
+private struct InterleavedRun {
+    let run: LossyRun
+    let steps: Int
+    let hitStepBound: Bool
+}
+
+/// Drive `size` bytes through a `LossyLoop` in interleaved mode, bounded to
+/// `maxSteps`: with DATA queued, deliver exactly one DATA and then every
+/// pending ACK one at a time, pumping after each; with only ACKs queued, drain
+/// them the same way; and when both queues drain while the sender is not Done,
+/// fire the retransmit timer. Runs until both sides are Done or the step bound
+/// is reached.
+private func runLossyInterleaved(
+    size: UInt32,
+    dropData: Int? = nil,
+    dropAck: Int? = nil,
+    maxSteps: Int = 200_000
+) throws -> InterleavedRun {
+    let source = makeSource(Int(size))
+    var destination = [UInt8](repeating: 0, count: Int(size))
+    let loop = LossyLoop(dropData: dropData, dropAck: dropAck)
+    let sender = XferSender(size: size, chunk: Xfer.maxDataChunk, start: 0,
+        read: readFrom(source), send: loop.sendData)
+    let receiver = XferReceiver(size: size, window: Xfer.initialCredits, ackEvery: 4, start: 0,
+        write: { off, b in destination.replaceSubrange(Int(off)..<(Int(off) + b.count), with: b) },
+        ack: loop.sendAck)
+
+    sender.pump()
+    var steps = 0
+    while steps < maxSteps {
+        if sender.state == .done && receiver.state == .done
+            && loop.data.isEmpty && loop.ack.isEmpty {
+            break
+        }
+        if !loop.data.isEmpty {
+            // One DATA per step, then every ACK it drew, pumping after each.
+            loop.deliverData(receiver)
+            while !loop.ack.isEmpty {
+                loop.deliverAck(sender)
+                sender.pump()
+            }
+        } else if !loop.ack.isEmpty {
+            while !loop.ack.isEmpty {
+                loop.deliverAck(sender)
+                sender.pump()
+            }
+        } else if sender.state != .done {
+            loop.fireTimer(sender)
+        } else {
+            break
+        }
+        steps += 1
+    }
+    let finished = sender.state == .done && receiver.state == .done
+        && loop.data.isEmpty && loop.ack.isEmpty
+    return InterleavedRun(
+        run: LossyRun(loop: loop, sender: sender, receiver: receiver,
+                      source: source, destination: destination),
+        steps: steps,
+        hitStepBound: !finished)
+}
+
+/// Fail when an interleaved run stopped at the step bound rather than at Done,
+/// reporting the counts.
+private func assertInterleavedCompleted(
+    _ result: InterleavedRun,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertFalse(result.hitStepBound,
+                   "stopped after \(result.steps) steps: DATA sends = \(result.run.loop.dataSends), ACK sends = \(result.run.loop.ackSends), timer firings = \(result.run.loop.timerFirings)",
+                   file: file, line: line)
+}
+
+/// Assert the receiver wrote exactly the source bytes.
+private func assertReceived(
+    _ run: LossyRun,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    XCTAssertEqual(run.receiver.received, UInt32(run.source.count),
+                   "received = \(run.receiver.received), want \(run.source.count)",
+                   file: file, line: line)
+    for i in run.source.indices where run.source[i] != run.destination[i] {
+        XCTFail("byte \(i) = \(run.destination[i]), want \(run.source[i])", file: file, line: line)
+        return
     }
 }
 
@@ -155,8 +360,9 @@ final class XferTests: XCTestCase {
             return
         }
 
-        // Drop the first DATA message and deliver the rest: every one is at the
-        // wrong offset, so the receiver re-ACKs offset 0 without writing.
+        // Drop the first DATA message and deliver the rest: they are all at the
+        // wrong offset, so the receiver re-ACKs offset 0 once for the gap
+        // without writing.
         loop.data.removeFirst()
         loop.deliverAllData(rx)
         XCTAssertEqual(rx.received, 0, "received = \(rx.received), want 0")
@@ -314,6 +520,255 @@ final class XferTests: XCTestCase {
         let finalAck = Bulk.decodeAck(loop.ack[loop.ack.count - 1])
         XCTAssertNotNil(finalAck, "final ACK next = \(String(describing: finalAck?.next)), want \(size)")
         XCTAssertEqual(finalAck?.next, size, "final ACK next = \(String(describing: finalAck?.next)), want \(size)")
+    }
+
+    // MARK: - Lossy loopback (P7.29)
+
+    /// Drop DATA #6 (0-based index 5) of a 100 KB transfer. The loss lands just
+    /// after the first 4-message ACK boundary: the regular ACK reaches offset
+    /// 4*4092, then the gap's first ACK tells the sender the expected offset
+    /// 5*4092 and the duplicate that follows triggers its one rewind, so no
+    /// retransmit timer is needed.
+    func testLossyDropMidStreamData() throws {
+        let run = try runLossy(size: 102_400, dropData: 5)
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertLessThanOrEqual(run.loop.dataSends, 52,
+                                 "DATA sends = \(run.loop.dataSends), want <= 52")
+        XCTAssertEqual(run.loop.timerFirings, 0,
+                       "timer firings = \(run.loop.timerFirings), want 0")
+    }
+
+    /// Drop DATA #5 (0-based index 4) of a 100 KB transfer, the message right
+    /// after the first 4-message ACK boundary. The gap's only ACK repeats the
+    /// offset the sender already knows, so it rewinds at once; no retransmit
+    /// timer is needed either.
+    func testLossyDropOnAckBoundary() throws {
+        let run = try runLossy(size: 102_400, dropData: 4)
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertLessThanOrEqual(run.loop.dataSends, 52,
+                                 "DATA sends = \(run.loop.dataSends), want <= 52")
+        XCTAssertEqual(run.loop.timerFirings, 0,
+                       "timer firings = \(run.loop.timerFirings), want 0")
+    }
+
+    /// The last DATA of an 8 KB transfer is lost. The receiver is waiting for
+    /// it, so no re-ACK can arrive; exactly one retransmit timer firing
+    /// rewinds the sender and carries the transfer to completion.
+    func testLossyDropLastData() throws {
+        let run = try runLossy(size: 8_192, dropData: 2)
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertEqual(run.loop.timerFirings, 1,
+                       "timer firings = \(run.loop.timerFirings), want 1")
+    }
+
+    /// DATA #0 of a 256 KB transfer is lost. The first wrong-offset DATA re-ACKs
+    /// offset 0 (a duplicate of the initial acknowledged offset), so the sender
+    /// rewinds once and the transfer completes without a timer.
+    func testLossyDropFirstData() throws {
+        let run = try runLossy(size: 262_144, dropData: 0)
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertLessThanOrEqual(run.loop.dataSends, 130,
+                                 "DATA sends = \(run.loop.dataSends), want <= 130")
+        XCTAssertLessThanOrEqual(run.loop.timerFirings, 1,
+                                 "timer firings = \(run.loop.timerFirings), want <= 1")
+    }
+
+    /// The receiver's completion ACK is lost (the seventh ACK send of a 100 KB
+    /// transfer). The receiver is Done; one timer firing retransmits, the Done
+    /// receiver re-ACKs its final offset, and the sender completes.
+    func testLossyDropFinalAck() throws {
+        let run = try runLossy(size: 102_400, dropAck: 6)
+
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        assertReceived(run)
+        XCTAssertEqual(run.loop.timerFirings, 1,
+                       "timer firings = \(run.loop.timerFirings), want 1")
+    }
+
+    /// Lossless runs: the DATA-send baselines are 3, 26 and 65 for 8 KB, 100 KB
+    /// and 256 KB, and no retransmit timer fires.
+    func testLossyLosslessCounts() throws {
+        let cases: [(size: UInt32, sends: Int)] = [
+            (size: 8_192, sends: 3),
+            (size: 102_400, sends: 26),
+            (size: 262_144, sends: 65),
+        ]
+        for testCase in cases {
+            let run = try runLossy(size: testCase.size)
+
+            XCTAssertEqual(run.sender.state, .done,
+                           "size \(testCase.size): sender state = \(run.sender.state), want Done")
+            XCTAssertEqual(run.receiver.state, .done,
+                           "size \(testCase.size): receiver state = \(run.receiver.state), want Done")
+            assertReceived(run)
+            XCTAssertEqual(run.loop.dataSends, testCase.sends,
+                           "size \(testCase.size): DATA sends = \(run.loop.dataSends), want \(testCase.sends)")
+            XCTAssertEqual(run.loop.timerFirings, 0,
+                           "size \(testCase.size): timer firings = \(run.loop.timerFirings), want 0")
+        }
+    }
+
+    // MARK: - Interleaved loopback
+
+    /// Interleaved loop: drop DATA #6 (0-based index 5) of a 100 KB transfer.
+    /// One DATA per step, ACKs drained after each, so the gap's two ACKs reach
+    /// the sender promptly and its one rewind resends the lost message; no
+    /// retransmit timer is needed.
+    func testInterleavedDropMidData() throws {
+        let result = try runLossyInterleaved(size: 102_400, dropData: 5)
+        assertInterleavedCompleted(result)
+        let run = result.run
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertLessThanOrEqual(run.loop.dataSends, 52,
+                                 "DATA sends = \(run.loop.dataSends), want <= 52")
+        XCTAssertEqual(run.loop.timerFirings, 0,
+                       "timer firings = \(run.loop.timerFirings), want 0")
+    }
+
+    /// Interleaved loop: DATA #0 (0-based index 0) of a 256 KB transfer is
+    /// lost. Its first wrong-offset DATA re-ACKs offset 0, the sender rewinds
+    /// once, and the transfer completes with at most one timer firing.
+    func testInterleavedDropFirstData() throws {
+        let result = try runLossyInterleaved(size: 262_144, dropData: 0)
+        assertInterleavedCompleted(result)
+        let run = result.run
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertLessThanOrEqual(run.loop.dataSends, 130,
+                                 "DATA sends = \(run.loop.dataSends), want <= 130")
+        XCTAssertLessThanOrEqual(run.loop.timerFirings, 1,
+                                 "timer firings = \(run.loop.timerFirings), want <= 1")
+    }
+
+    /// Interleaved lossless baseline: a 100 KB transfer takes exactly 26 DATA
+    /// sends and no retransmit timer fires.
+    func testInterleavedLossless() throws {
+        let result = try runLossyInterleaved(size: 102_400)
+        assertInterleavedCompleted(result)
+        let run = result.run
+
+        XCTAssertEqual(run.sender.state, .done, "sender state = \(run.sender.state), want Done")
+        XCTAssertEqual(run.receiver.state, .done, "receiver state = \(run.receiver.state), want Done")
+        assertReceived(run)
+        XCTAssertEqual(run.loop.dataSends, 26,
+                       "DATA sends = \(run.loop.dataSends), want 26")
+        XCTAssertEqual(run.loop.timerFirings, 0,
+                       "timer firings = \(run.loop.timerFirings), want 0")
+    }
+
+    /// Two identical no-progress ACKs while bytes are in flight: the first
+    /// rewinds, the second must not rewind again.
+    func testDuplicateAckRewindsOnce() throws {
+        let size: UInt32 = 20 * 4092
+        let src = makeSource(Int(size))
+        let loop = XferLoop()
+        let tx = XferSender(size: size, chunk: 4092, start: 0, read: readFrom(src), send: loop.sendData)
+
+        tx.pump()
+        XCTAssertEqual(tx.sent, UInt32(16 * 4092), "sent = \(tx.sent), want \(16 * 4092)")
+
+        let duplicate = Bulk.encodeAck(next: 0, credits: Xfer.initialCredits)
+        tx.onAck(duplicate)
+        XCTAssertEqual(tx.sent, 0, "sent/acked = \(tx.sent)/\(tx.acked), want 0/0")
+        XCTAssertEqual(tx.acked, 0, "sent/acked = \(tx.sent)/\(tx.acked), want 0/0")
+
+        tx.pump()
+        let resent = tx.sent
+        XCTAssertGreaterThan(resent, tx.acked,
+                             "sent/acked = \(resent)/\(tx.acked), want bytes in flight")
+
+        tx.onAck(duplicate)
+        XCTAssertEqual(tx.sent, resent, "sent = \(tx.sent) (after \(resent)), want no second rewind")
+        XCTAssertGreaterThan(tx.sent, tx.acked,
+                             "sent/acked = \(tx.sent)/\(tx.acked), want bytes still in flight")
+    }
+
+    /// Three wrong-offset DATA draw exactly one re-ACK when the sender already
+    /// knows the expected offset (a fresh receiver's last ACK is `start`, 0
+    /// here); the expected DATA resets the gap, and a later wrong offset draws
+    /// the two ACKs of a fresh gap: one that tells the sender the new offset
+    /// 4092, then the duplicate that triggers its one rewind.
+    func testReceiverReAcksOncePerGap() throws {
+        let size: UInt32 = 4 * 4092
+        let loop = XferLoop()
+        let rx = XferReceiver(size: size, window: Xfer.initialCredits, ackEvery: 4, start: 0,
+            write: { _, _ in },
+            ack: loop.sendAck)
+
+        // The sender starts with acked == start, so lastAck == next == 0 and
+        // the gap's only ACK is the duplicate.
+        for _ in 0..<3 {
+            try feedData(rx, 4092, [UInt8](repeating: 0, count: 4092))
+        }
+        XCTAssertEqual(loop.ack.count, 1, "ACKs = \(loop.ack.count), want 1")
+        XCTAssertEqual(rx.received, 0, "received = \(rx.received), want 0")
+        XCTAssertEqual(Bulk.decodeAck(loop.ack[0])?.next, 0,
+                       "re-ACK next = \(String(describing: Bulk.decodeAck(loop.ack[0])?.next)), want 0")
+
+        // The expected offset arrives: the gap closes and no ACK is due yet.
+        try feedData(rx, 0, [UInt8](repeating: 1, count: 4092))
+        XCTAssertEqual(rx.received, 4092, "received = \(rx.received), want 4092")
+        XCTAssertEqual(loop.ack.count, 1, "ACKs = \(loop.ack.count), want 1")
+
+        // A fresh gap now draws two ACKs, both at the new expected offset: the
+        // first tells the sender 4092 (its last ACK was still 0), the second is
+        // the duplicate that triggers its one rewind.
+        try feedData(rx, 2 * 4092, [UInt8](repeating: 2, count: 4092))
+        XCTAssertEqual(loop.ack.count, 3, "ACKs = \(loop.ack.count), want 3")
+        XCTAssertEqual(Bulk.decodeAck(loop.ack[1])?.next, 4092,
+                       "re-ACK next = \(String(describing: Bulk.decodeAck(loop.ack[1])?.next)), want 4092")
+        XCTAssertEqual(Bulk.decodeAck(loop.ack[2])?.next, 4092,
+                       "re-ACK next = \(String(describing: Bulk.decodeAck(loop.ack[2])?.next)), want 4092")
+    }
+
+    /// `retransmit` is false with nothing unacknowledged and true with bytes in
+    /// flight, where it moves `sent` back to `acked`.
+    func testRetransmitOnlyWithBytesInFlight() throws {
+        // A fresh zero-size transfer is already Done.
+        let empty = XferSender(size: 0, chunk: 4092, start: 0,
+            read: { _, _ in [] },
+            send: { _ in })
+        XCTAssertFalse(empty.retransmit(), "retransmit() = true on a zero-size sender, want false")
+
+        // After Done there is nothing left to resend.
+        let size: UInt32 = 2 * 4092
+        let src = makeSource(Int(size))
+        let loop = XferLoop()
+        let finished = XferSender(size: size, chunk: 4092, start: 0,
+            read: readFrom(src), send: loop.sendData)
+        finished.pump()
+        finished.onAck(Bulk.encodeAck(next: size, credits: Xfer.initialCredits))
+        XCTAssertEqual(finished.state, .done, "state = \(finished.state), want Done")
+        XCTAssertFalse(finished.retransmit(), "retransmit() = true after Done, want false")
+
+        // With bytes in flight it rewinds to the acknowledged offset.
+        let loop2 = XferLoop()
+        let tx = XferSender(size: size, chunk: 4092, start: 0,
+            read: readFrom(src), send: loop2.sendData)
+        tx.pump()
+        XCTAssertGreaterThan(tx.sent, tx.acked,
+                             "sent/acked = \(tx.sent)/\(tx.acked), want bytes in flight")
+        XCTAssertTrue(tx.retransmit(), "retransmit() = false with bytes in flight, want true")
+        XCTAssertEqual(tx.sent, tx.acked,
+                       "sent/acked = \(tx.sent)/\(tx.acked), want a rewind")
     }
 
     /// `testDataAckCodec` covers the u32-offset DATA and u32+u16 ACK payload

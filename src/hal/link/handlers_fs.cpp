@@ -55,6 +55,7 @@ struct Transfer {
     uint32_t crc;      /* CRC-32/ISO-HDLC of the whole file */
     bool overwrite;
     uint32_t last_ms;  /* now_ms() at the start or the last bulk message */
+    uint32_t rto_ms;   /* now_ms() at the start, the last ACK, or the last retransmit (reads) */
     std::unique_ptr<XferSender> tx;   /* reads */
     std::unique_ptr<XferReceiver> rx; /* writes */
 };
@@ -324,6 +325,7 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
     t.path = path;
     t.crc = crc;
     t.last_ms = now_ms();
+    t.rto_ms = t.last_ms;
     t.tx.reset(new XferSender(
         st.size, MAX_DATA_CHUNK,
         [v, path](uint32_t off, uint8_t *buf, size_t n) {
@@ -405,6 +407,7 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
     t.crc = crc;
     t.overwrite = overwrite;
     t.last_ms = now_ms();
+    t.rto_ms = t.last_ms;
     t.rx.reset(new XferReceiver(
         size,
         [v, part](uint32_t off, const uint8_t *bytes, size_t n) {
@@ -567,6 +570,7 @@ bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len)
     t->last_ms = now_ms();
 
     if (type == MsgType::Ack && !t->upload && t->tx) {
+        t->rto_ms = now_ms();
         t->tx->on_ack(payload, len);
         pump_read(xfer); /* sends more DATA, or finishes the read */
     } else if (type == MsgType::Data && t->upload && t->rx) {
@@ -580,6 +584,26 @@ bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len)
 }
 
 void fs_tick(uint32_t now) {
+    /* Reads with no ACK for the retransmit window: rewind and resend. Collect
+     * the ids first because pump_read() may drop a transfer. */
+    std::vector<uint16_t> retransmit;
+    for (const Transfer &t : g_xfers) {
+        if (t.tx && !t.upload &&
+            static_cast<uint32_t>(now - t.rto_ms) >= XFER_RETRANSMIT_MS) {
+            retransmit.push_back(t.id);
+        }
+    }
+    for (uint16_t id : retransmit) {
+        Transfer *t = find(id);
+        if (!t || !t->tx || t->upload) continue;
+        t->rto_ms = now;
+        if (t->tx->retransmit()) {
+            LINK_LOG("fs.read retransmit id=%u at=%u", static_cast<unsigned>(id),
+                     static_cast<unsigned>(t->tx->acked()));
+            pump_read(id); /* may drop the transfer */
+        }
+    }
+
     for (size_t i = 0; i < g_xfers.size();) {
         if (static_cast<uint32_t>(now - g_xfers[i].last_ms) > STALL_MS) {
             LINK_LOG("fs stalled id=%u path=%s", static_cast<unsigned>(g_xfers[i].id),

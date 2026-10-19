@@ -149,8 +149,9 @@ func (c *Client) WriteFile(vol, path string, data []byte, overwrite bool, timeou
 // SendBytes streams data as DATA under transfer xfer, an id the PAGER allocated
 // (odd; e.g. the "xfer" a pager request carries for a bulk reply, PROTOCOL.md
 // section 4), honouring the pager credit window. It returns once every byte is
-// acknowledged; timeout bounds each idle wait for an ACK. Errors: "transfer
-// failed", "timeout", or ErrDisconnected.
+// acknowledged; timeout bounds each idle wait for an ACK, while a longer gap
+// with bytes unacknowledged fires the sender's retransmit timeout. Errors:
+// "transfer failed", "timeout", or ErrDisconnected.
 func (c *Client) SendBytes(xfer uint16, data []byte, timeout time.Duration) error {
 	ch := c.openXfer(xfer)
 	defer c.closeXfer(xfer)
@@ -164,6 +165,13 @@ func (c *Client) SendBytes(xfer uint16, data []byte, timeout time.Duration) erro
 		},
 	)
 
+	// One timer for the idle watchdog, one for the sender's retransmit timeout.
+	// Both are created once and restarted in place: no per-ACK allocation.
+	idle := time.NewTimer(timeout)
+	defer idle.Stop()
+	rto := time.NewTimer(RetransmitTimeout)
+	defer rto.Stop()
+
 	var ferr error
 	if s.Pump() == XferFailed {
 		ferr = errSendFailed
@@ -174,17 +182,40 @@ func (c *Client) SendBytes(xfer uint16, data []byte, timeout time.Duration) erro
 			if msg.Type != Ack {
 				continue
 			}
+			resetTimer(idle, timeout)
+			resetTimer(rto, RetransmitTimeout)
 			s.OnAck(msg.Payload)
 			if s.Pump() == XferFailed {
 				ferr = errSendFailed
 			}
-		case <-time.After(timeout):
+		case <-rto.C:
+			// No ACK for the retransmit timeout: rewind and resend. When
+			// nothing is unacknowledged there is nothing to do yet.
+			if s.Retransmit() {
+				if s.Pump() == XferFailed {
+					ferr = errSendFailed
+				}
+			}
+			rto.Reset(RetransmitTimeout)
+		case <-idle.C:
 			ferr = errSendTimeout
 		case <-c.done:
 			ferr = ErrDisconnected
 		}
 	}
 	return ferr
+}
+
+// resetTimer restarts t to fire after d, draining a firing that is already
+// pending so the new deadline is not cut short.
+func resetTimer(t *time.Timer, d time.Duration) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+	t.Reset(d)
 }
 
 // abortWrite drops a half-finished upload, best effort: a failure here must not

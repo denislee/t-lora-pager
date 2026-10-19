@@ -5,10 +5,13 @@
  * Drives an XferSender against an XferReceiver over a pair of std::deque
  * payload queues (one for DATA, one for ACK) so a test can deliver, drop or
  * reorder messages by hand. A loopback helper carries the whole transfer to
- * completion; targeted tests inspect the raw DATA/ACK payloads instead. Covers
- * the bulk-transfer contract in PROTOCOL.md §4: CRC-32, credit windows,
- * go-back-N rewind on a re-ACK, offset checking, overflow failure, resume from
- * a start offset, ack_every batching and read/write failure.
+ * completion; targeted tests inspect the raw DATA/ACK payloads instead. A
+ * lossy helper adds a drop rule (drop the k-th DATA or ACK send) and simulates
+ * the owner's retransmit timer. Covers the bulk-transfer contract in
+ * PROTOCOL.md §4: CRC-32, credit windows, one go-back-N rewind per
+ * acknowledged offset, at most two ACKs per gap, re-ACK after Done, the
+ * owner-driven retransmit timeout, offset checking, overflow failure, resume
+ * from a start offset, ack_every batching and read/write failure.
  */
 #include <unity.h>
 
@@ -64,6 +67,105 @@ struct Loop {
     }
 };
 
+/* Lossy loopback: every send is counted, and the k-th (0-based) DATA or ACK
+ * send can be discarded without failing the sender/receiver. */
+struct LossyLoop {
+    std::deque<std::string> data; /* DATA payloads: sender -> receiver */
+    std::deque<std::string> ack;  /* ACK payloads:  receiver -> sender */
+    unsigned data_sends = 0;
+    unsigned ack_sends = 0;
+    long drop_data = -1; /* drop this DATA send index, or -1 */
+    long drop_ack = -1;  /* drop this ACK send index, or -1 */
+    unsigned timers = 0; /* retransmit timer firings */
+
+    bool send_data(const std::string &payload) {
+        const unsigned k = data_sends++;
+        if (static_cast<long>(k) != drop_data) data.push_back(payload);
+        return true; /* a message lost on the link is not a send failure */
+    }
+    bool send_ack(const std::string &payload) {
+        const unsigned k = ack_sends++;
+        if (static_cast<long>(k) != drop_ack) ack.push_back(payload);
+        return true;
+    }
+
+    void deliver_data(XferReceiver &rx) {
+        std::string p = std::move(data.front());
+        data.pop_front();
+        rx.on_data(reinterpret_cast<const uint8_t *>(p.data()), p.size());
+    }
+    void deliver_ack(XferSender &tx) {
+        std::string p = std::move(ack.front());
+        ack.pop_front();
+        tx.on_ack(reinterpret_cast<const uint8_t *>(p.data()), p.size());
+    }
+    void deliver_all_data(XferReceiver &rx) {
+        while (!data.empty()) {
+            deliver_data(rx);
+        }
+    }
+    void deliver_all_acks(XferSender &tx) {
+        while (!ack.empty()) {
+            deliver_ack(tx);
+        }
+    }
+};
+
+/* Carry a lossy loop to completion. When both queues drain and the sender is
+ * not Done, the owner's retransmit timer fires: retransmit() then pump(). */
+static void run_lossy(XferSender &tx, XferReceiver &rx, LossyLoop &loop) {
+    for (int i = 0; i < 100000; ++i) {
+        loop.deliver_all_data(rx);
+        loop.deliver_all_acks(tx);
+        tx.pump();
+        if (tx.state() == XferState::Done) {
+            return;
+        }
+        if (loop.data.empty() && loop.ack.empty()) {
+            ++loop.timers;
+            tx.retransmit();
+            tx.pump();
+        }
+    }
+}
+
+/* Carry a lossy loop to completion one message at a time. The receiver gets a
+ * single DATA message per step, then every pending ACK is delivered to the
+ * sender with a pump() after each; with both queues empty the owner's
+ * retransmit timer fires: retransmit() then pump(). The first window is primed
+ * before the loop, so starting the transfer is not a timer firing. */
+static void run_lossy_interleaved(XferSender &tx, XferReceiver &rx, LossyLoop &loop) {
+    tx.pump();
+
+    for (int i = 0; i < 200000; ++i) {
+        if (tx.state() == XferState::Done && rx.state() == XferState::Done) {
+            return;
+        }
+        if (!loop.data.empty()) {
+            loop.deliver_data(rx);
+            while (!loop.ack.empty()) {
+                loop.deliver_ack(tx);
+                tx.pump();
+            }
+        } else if (!loop.ack.empty()) {
+            while (!loop.ack.empty()) {
+                loop.deliver_ack(tx);
+                tx.pump();
+            }
+        } else if (tx.state() != XferState::Done) {
+            ++loop.timers;
+            tx.retransmit();
+            tx.pump();
+        }
+    }
+
+    const std::string msg = "interleaved loopback hit the 200000 step bound: data_sends=" +
+                            std::to_string(loop.data_sends) +
+                            " ack_sends=" + std::to_string(loop.ack_sends) +
+                            " timers=" + std::to_string(loop.timers);
+    TEST_FAIL_MESSAGE(msg.c_str());
+}
+
 /* --- helpers ------------------------------------------------------------- */
 
 /* Deterministic source pattern: (i*7+3) & 0xFF. */
@@ -80,6 +182,44 @@ static void feed_data(XferReceiver &rx, uint32_t offset, const uint8_t *bytes, s
     TEST_ASSERT_TRUE(encode_data(offset, bytes, n, payload));
     rx.on_data(reinterpret_cast<const uint8_t *>(payload.data()), payload.size());
 }
+
+/* A sender + receiver over a LossyLoop, both fed from a deterministic source. */
+struct LossyRig {
+    std::vector<uint8_t> src;
+    std::vector<uint8_t> dst;
+    LossyLoop loop;
+    XferSender tx;
+    XferReceiver rx;
+
+    explicit LossyRig(uint32_t size)
+        : src(make_source(size)),
+          dst(size, 0),
+          tx(size, 4092,
+             [this](uint32_t off, uint8_t *buf, size_t n) {
+                 std::memcpy(buf, src.data() + off, n);
+                 return true;
+             },
+             [this](const std::string &p) { return loop.send_data(p); }),
+          rx(size,
+             [this](uint32_t off, const uint8_t *b, size_t n) {
+                 std::memcpy(dst.data() + off, b, n);
+                 return true;
+             },
+             [this](const std::string &p) { return loop.send_ack(p); }) {}
+
+    void run() { run_lossy(tx, rx, loop); }
+    void run_interleaved() { run_lossy_interleaved(tx, rx, loop); }
+
+    /* Every byte arrived in order and both ends finished. */
+    void check() {
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                                static_cast<uint8_t>(tx.state()));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                                static_cast<uint8_t>(rx.state()));
+        TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(src.size()), rx.received());
+        TEST_ASSERT_EQUAL_INT(0, std::memcmp(src.data(), dst.data(), src.size()));
+    }
+};
 
 /* --- tests --------------------------------------------------------------- */
 
@@ -209,12 +349,13 @@ static void test_rewind_on_duplicate_ack(void) {
     TEST_ASSERT_FALSE(loop.data.empty());
 
     /* Drop the first DATA message and deliver the rest: every one is at the
-     * wrong offset, so the receiver re-ACKs offset 0 without writing. */
+     * wrong offset, but the receiver re-ACKs offset 0 only ONCE per gap. */
     loop.data.pop_front();
     loop.deliver_all_data(rx);
     TEST_ASSERT_EQUAL_UINT32(0u, rx.received());
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(loop.ack.size()));
 
-    /* Feeding the re-ACK rewinds the sender to offset 0. */
+    /* Feeding that re-ACK rewinds the sender to offset 0. */
     TEST_ASSERT_FALSE(loop.ack.empty());
     loop.deliver_all_acks(tx);
     TEST_ASSERT_EQUAL_UINT32(0u, tx.sent());
@@ -402,6 +543,232 @@ static void test_ack_every(void) {
     TEST_ASSERT_EQUAL_UINT32(size, next);
 }
 
+/* --- lossy loopback: one dropped message -------------------------------- */
+
+static void test_lossy_drop_mid_data(void) {
+    /* 102400 B = 26 DATA. Drop the 6th message (0-based index 5): it follows
+     * the batch ACK at 16368, so the gap's single ACK duplicates that ACK and
+     * the sender rewinds without the timer. */
+    LossyRig rig(102400);
+    rig.loop.drop_data = 5;
+    rig.run();
+    rig.check();
+    TEST_ASSERT_TRUE(rig.loop.data_sends <= 52u);
+    TEST_ASSERT_EQUAL_UINT32(0u, rig.loop.timers);
+}
+
+static void test_lossy_drop_earlier_mid_data(void) {
+    /* Same shape one message earlier (0-based index 4), also recovered by the
+     * duplicate ACK rather than the retransmit timer. */
+    LossyRig rig(102400);
+    rig.loop.drop_data = 4;
+    rig.run();
+    rig.check();
+    TEST_ASSERT_TRUE(rig.loop.data_sends <= 52u);
+    TEST_ASSERT_EQUAL_UINT32(0u, rig.loop.timers);
+}
+
+static void test_lossy_drop_last_data(void) {
+    /* 8192 B = 3 DATA. Losing the last one leaves no later DATA to trigger a
+     * duplicate ACK, so only the retransmit timer can recover it. */
+    LossyRig rig(8192);
+    rig.loop.drop_data = 2;
+    rig.run();
+    rig.check();
+    TEST_ASSERT_EQUAL_UINT32(1u, rig.loop.timers);
+}
+
+static void test_lossy_drop_first_data(void) {
+    /* 262144 B = 65 DATA, first message lost: the sender's initial window has
+     * no progress to report, so the one ACK it earns rewinds it right away. */
+    LossyRig rig(262144);
+    rig.loop.drop_data = 0;
+    rig.run();
+    rig.check();
+    TEST_ASSERT_TRUE(rig.loop.data_sends <= 130u);
+    TEST_ASSERT_TRUE(rig.loop.timers <= 1u);
+}
+
+static void test_lossy_drop_final_ack(void) {
+    /* 102400 B acks after 4, 8, ... 24 messages and on completion: 7 ACKs,
+     * 0-based index 6 is the completion ACK. Losing it leaves the sender one
+     * chunk short; the timer resends, and the Done receiver re-ACKs. */
+    LossyRig rig(102400);
+    rig.loop.drop_ack = 6;
+    rig.run();
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                            static_cast<uint8_t>(rig.rx.state()));
+    rig.check();
+    TEST_ASSERT_EQUAL_UINT32(1u, rig.loop.timers);
+}
+
+static void test_lossy_lossless_counts(void) {
+    /* Lossless baseline: 102400 B is 26 DATA messages and never fires the
+     * retransmit timer. */
+    LossyRig rig(102400);
+    rig.run();
+    rig.check();
+    TEST_ASSERT_EQUAL_UINT32(26u, rig.loop.data_sends);
+    TEST_ASSERT_EQUAL_UINT32(0u, rig.loop.timers);
+}
+
+/* --- interleaved lossy loopback: one message per step -------------------- */
+
+static void test_interleaved_drop_mid_data(void) {
+    /* 102400 B = 26 DATA. Drop the 6th message (0-based index 5): a single
+     * message per step opens the gap while later DATA is still in flight, so
+     * the duplicate ACK rewinds the sender without the retransmit timer. */
+    LossyRig rig(102400);
+    rig.loop.drop_data = 5;
+    rig.run_interleaved();
+    rig.check();
+    TEST_ASSERT_TRUE(rig.loop.data_sends <= 52u);
+    TEST_ASSERT_EQUAL_UINT32(0u, rig.loop.timers);
+}
+
+static void test_interleaved_drop_first_data(void) {
+    /* 262144 B = 65 DATA, first message lost: the one ACK the wrong-offset
+     * DATA earns rewinds the sender, and one retransmit timer reopens the
+     * window; nothing beyond that. */
+    LossyRig rig(262144);
+    rig.loop.drop_data = 0;
+    rig.run_interleaved();
+    rig.check();
+    TEST_ASSERT_TRUE(rig.loop.data_sends <= 130u);
+    TEST_ASSERT_TRUE(rig.loop.timers <= 1u);
+}
+
+static void test_interleaved_lossless(void) {
+    /* Lossless baseline: 102400 B is still exactly 26 DATA messages and never
+     * fires the retransmit timer. */
+    LossyRig rig(102400);
+    rig.run_interleaved();
+    rig.check();
+    TEST_ASSERT_EQUAL_UINT32(26u, rig.loop.data_sends);
+    TEST_ASSERT_EQUAL_UINT32(0u, rig.loop.timers);
+}
+
+/* --- sender / receiver unit contracts ----------------------------------- */
+
+static void test_sender_one_rewind_per_acked(void) {
+    const uint32_t size = 20 * 4092;
+    std::vector<uint8_t> src = make_source(size);
+
+    Loop loop;
+    XferSender tx(
+        size, 4092,
+        [&](uint32_t off, uint8_t *buf, size_t n) {
+            std::memcpy(buf, src.data() + off, n);
+            return true;
+        },
+        [&](const std::string &p) { return loop.send_data(p); });
+
+    tx.pump();
+    TEST_ASSERT_EQUAL_UINT32(16u * 4092u, tx.sent());
+
+    std::string ack;
+    encode_ack(0, INITIAL_CREDITS, ack);
+    tx.on_ack(reinterpret_cast<const uint8_t *>(ack.data()), ack.size());
+
+    /* First duplicate: exactly one rewind to the acknowledged offset. */
+    TEST_ASSERT_EQUAL_UINT32(0u, tx.acked());
+    TEST_ASSERT_EQUAL_UINT32(tx.acked(), tx.sent());
+
+    tx.pump();
+    TEST_ASSERT_TRUE(tx.sent() > tx.acked());
+
+    /* Second identical ACK: credits update, the send point does not move. */
+    tx.on_ack(reinterpret_cast<const uint8_t *>(ack.data()), ack.size());
+    TEST_ASSERT_EQUAL_UINT32(0u, tx.acked());
+    TEST_ASSERT_TRUE(tx.sent() > tx.acked());
+    TEST_ASSERT_EQUAL_UINT32(16u * 4092u, tx.sent());
+}
+
+static void test_receiver_at_most_two_acks_per_gap(void) {
+    const uint32_t size = 3 * 4092;
+    std::vector<uint8_t> bytes(4092, 0xCD);
+
+    Loop loop;
+    XferReceiver rx(
+        size, [](uint32_t, const uint8_t *, size_t) { return true; },
+        [&](const std::string &p) { return loop.send_ack(p); });
+
+    /* Three wrong-offset DATA messages while next_ == last_ack_ == 0: the
+     * first earns exactly one ACK, the duplicate that triggers the rewind. */
+    for (int i = 0; i < 3; ++i) {
+        feed_data(rx, 2 * 4092, bytes.data(), bytes.size());
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(loop.ack.size()));
+
+    uint32_t next = 0;
+    uint16_t credits = 0;
+    const std::string &only = loop.ack.front();
+    TEST_ASSERT_TRUE(
+        decode_ack(reinterpret_cast<const uint8_t *>(only.data()), only.size(), next, credits));
+    TEST_ASSERT_EQUAL_UINT32(0u, next);
+
+    /* The expected DATA closes the gap: ack_every=4 keeps this one silent. */
+    feed_data(rx, 0, bytes.data(), bytes.size());
+    TEST_ASSERT_EQUAL_UINT32(1u, static_cast<uint32_t>(loop.ack.size()));
+
+    /* The next gap opens after a silent ACK, so last_ack_ (0) trails next_
+     * (4092): it earns exactly two ACKs, both for 4092 — the offset update the
+     * sender has not seen, then the duplicate that rewinds it. */
+    feed_data(rx, 2 * 4092, bytes.data(), bytes.size());
+    TEST_ASSERT_EQUAL_UINT32(3u, static_cast<uint32_t>(loop.ack.size()));
+
+    for (size_t i = 1; i <= 2; ++i) {
+        next = 0;
+        credits = 0;
+        const std::string &a = loop.ack[i];
+        TEST_ASSERT_TRUE(
+            decode_ack(reinterpret_cast<const uint8_t *>(a.data()), a.size(), next, credits));
+        TEST_ASSERT_EQUAL_UINT32(4092u, next);
+    }
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Active),
+                            static_cast<uint8_t>(rx.state()));
+}
+
+static void test_retransmit_contract(void) {
+    Loop loop;
+    int reads = 0;
+    auto read = [&](uint32_t, uint8_t *, size_t) {
+        reads++;
+        return true;
+    };
+    auto send = [&](const std::string &p) { return loop.send_data(p); };
+
+    /* Nothing sent yet: nothing unacknowledged. */
+    XferSender fresh(20 * 4092, 4092, read, send);
+    TEST_ASSERT_FALSE(fresh.retransmit());
+
+    /* After Done there is nothing left to rewind either. */
+    XferSender small(4092, 4092, read, send);
+    small.pump();
+    std::string ack;
+    encode_ack(4092, INITIAL_CREDITS, ack);
+    small.on_ack(reinterpret_cast<const uint8_t *>(ack.data()), ack.size());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                            static_cast<uint8_t>(small.state()));
+    TEST_ASSERT_FALSE(small.retransmit());
+
+    /* Bytes in flight: the owner's timer rewinds to the acknowledged offset. */
+    fresh.pump();
+    TEST_ASSERT_TRUE(fresh.sent() > fresh.acked());
+    TEST_ASSERT_TRUE(fresh.retransmit());
+    TEST_ASSERT_EQUAL_UINT32(fresh.acked(), fresh.sent());
+    TEST_ASSERT_EQUAL_UINT32(0u, fresh.sent());
+
+    /* A zero-size transfer is Done at construction. */
+    XferSender empty(0, 4092,
+                     [&](uint32_t, uint8_t *, size_t) {
+                         reads++;
+                         return true;
+                     },
+                     send);
+    TEST_ASSERT_FALSE(empty.retransmit());
+}
+
 int main(int /*argc*/, char ** /*argv*/) {
     UNITY_BEGIN();
     RUN_TEST(test_crc32_check_value);
@@ -415,5 +782,17 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN_TEST(test_resume_start_offset);
     RUN_TEST(test_read_failure_fails);
     RUN_TEST(test_ack_every);
+    RUN_TEST(test_lossy_drop_mid_data);
+    RUN_TEST(test_lossy_drop_earlier_mid_data);
+    RUN_TEST(test_lossy_drop_last_data);
+    RUN_TEST(test_lossy_drop_first_data);
+    RUN_TEST(test_lossy_drop_final_ack);
+    RUN_TEST(test_lossy_lossless_counts);
+    RUN_TEST(test_interleaved_drop_mid_data);
+    RUN_TEST(test_interleaved_drop_first_data);
+    RUN_TEST(test_interleaved_lossless);
+    RUN_TEST(test_sender_one_rewind_per_acked);
+    RUN_TEST(test_receiver_at_most_two_acks_per_gap);
+    RUN_TEST(test_retransmit_contract);
     return UNITY_END();
 }

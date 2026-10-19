@@ -102,6 +102,7 @@ public actor LinkSession {
         var sender: XferSender?
         var out: [[UInt8]] = []
         var lastActivity = ContinuousClock.now
+        var lastRetransmit = ContinuousClock.now
         var waiter: CheckedContinuation<Void, Error>?
         var watchdog: Task<Void, Never>?
     }
@@ -441,7 +442,7 @@ public actor LinkSession {
         }
         transfer.waiter = continuation
         let token = ObjectIdentifier(transfer)
-        transfer.watchdog = watchdog(timeout: timeout) { session in
+        transfer.watchdog = watchdog(timeout: timeout, initial: timeout) { session in
             await session.inboundIdle(xfer, token: token, timeout: timeout)
         }
     }
@@ -457,19 +458,26 @@ public actor LinkSession {
         }
         transfer.waiter = continuation
         let token = ObjectIdentifier(transfer)
-        transfer.watchdog = watchdog(timeout: timeout) { session in
+        // The first wake-up doubles as the retransmit check; later ones follow
+        // whatever the check asks for.
+        transfer.watchdog = watchdog(
+            timeout: timeout,
+            initial: min(timeout, Xfer.retransmitTimeout)
+        ) { session in
             await session.outboundIdle(xfer, token: token, timeout: timeout)
         }
     }
 
-    /// Re-arming idle timer: `check` returns how much longer to wait, or nil
-    /// when the transfer has finished or the timer has fired.
+    /// Re-arming idle timer: the first sleep is `initial`; afterwards `check`
+    /// returns how much longer to wait, or nil when the transfer has finished
+    /// or the timer has fired.
     private func watchdog(
         timeout: Duration,
+        initial: Duration,
         check: @escaping @Sendable (LinkSession) async -> Duration?
     ) -> Task<Void, Never> {
         Task { [weak self] in
-            var wait = timeout
+            var wait = initial
             while true {
                 do { try await Task.sleep(for: wait) } catch { return }
                 guard let self, let next = await check(self) else { return }
@@ -497,8 +505,28 @@ public actor LinkSession {
     private func outboundIdle(_ xfer: UInt16, token: ObjectIdentifier, timeout: Duration) -> Duration? {
         guard let transfer = outbound[xfer], ObjectIdentifier(transfer) == token,
               let waiter = transfer.waiter else { return nil }
+
+        // Retransmit timeout: no ACK for `Xfer.retransmitTimeout` while bytes are
+        // unacknowledged -> rewind and resend (go-back-N).
+        let now = ContinuousClock.now
+        if now - max(transfer.lastActivity, transfer.lastRetransmit) >= Xfer.retransmitTimeout {
+            transfer.lastRetransmit = .now
+            if let sender = transfer.sender, sender.retransmit() {
+                sender.pump()
+                flushData(transfer, xfer: xfer)
+                if sender.state != .active {
+                    transfer.waiter = nil
+                    waiter.resume()
+                    return nil
+                }
+            }
+        }
+
         if let remaining = idleRemaining(since: transfer.lastActivity, timeout: timeout) {
-            return remaining
+            // Wake again for the next retransmit check, but never busy-loop.
+            let sinceRetransmit = ContinuousClock.now - max(transfer.lastActivity, transfer.lastRetransmit)
+            let untilRetransmit = Xfer.retransmitTimeout - sinceRetransmit
+            return min(remaining, max(untilRetransmit, Duration.milliseconds(50)))
         }
         transfer.waiter = nil
         waiter.resume(throwing: RPCError.timeout("timeout"))

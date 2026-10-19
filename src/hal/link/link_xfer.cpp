@@ -4,9 +4,14 @@
  *
  * Standard library only; mirrors PROTOCOL.md §4. Credits count DATA messages
  * and every ACK replaces the sender's window wholesale, counted from the
- * acknowledged offset. An ACK that makes no progress while bytes are in flight
- * rewinds the sender to that offset (go-back-N), so a DATA message lost on the
- * link is retransmitted once the receiver re-ACKs the offset it is waiting for.
+ * acknowledged offset. The first ACK that makes no progress while bytes are in
+ * flight rewinds the sender to that offset (one rewind per acknowledged
+ * offset, go-back-N); the receiver sends at most two ACKs per gap — one that
+ * tells the sender the offset if it has not seen it, then the duplicate that
+ * triggers its one rewind — and re-ACKs its final offset if the completion ACK
+ * is lost. A lost DATA with no later message to trigger a duplicate ACK is
+ * recovered by the owner's retransmit timeout: it calls
+ * XferSender::retransmit() and then pump().
  */
 #include "hal/link/link_xfer.h"
 
@@ -50,6 +55,8 @@ XferSender::XferSender(uint32_t size, size_t chunk, ReadFn read, SendFn send, ui
       send_(std::move(send)),
       acked_(start > size ? size : start),
       next_(acked_),
+      high_(acked_),
+      rewound_(false),
       credits_(INITIAL_CREDITS),
       state_(acked_ >= size ? XferState::Done : XferState::Active) {}
 
@@ -83,6 +90,9 @@ XferState XferSender::pump() {
             return state_;
         }
         next_ += static_cast<uint32_t>(n);
+        if (next_ > high_) {
+            high_ = next_;
+        }
     }
     return state_;
 }
@@ -97,13 +107,23 @@ XferState XferSender::on_ack(const uint8_t *payload, size_t len) {
     if (!decode_ack(payload, len, next, credits)) {
         return state_;
     }
-    /* Below what we already know, or beyond what we have sent: ignore. */
-    if (next < acked_ || next > next_) {
+    /* Below what we already know, or beyond what we ever sent: ignore. */
+    if (next < acked_ || next > high_) {
         return state_;
     }
-    /* No progress while bytes are in flight: rewind and resend (go-back-N). */
-    if (next == acked_ && next_ > acked_) {
-        next_ = acked_;
+    if (next == acked_) {
+        /* No progress while bytes are in flight: one go-back-N rewind per
+         * acknowledged offset. Later duplicates only replace credits. */
+        if (next_ > acked_ && !rewound_) {
+            next_ = acked_;
+            rewound_ = true;
+        }
+    } else {
+        /* Progress: an ACK that overtook a rewind moves the send point on. */
+        rewound_ = false;
+        if (next_ < next) {
+            next_ = next;
+        }
     }
     acked_ = next;
     credits_ = credits;
@@ -111,6 +131,15 @@ XferState XferSender::on_ack(const uint8_t *payload, size_t len) {
         state_ = XferState::Done;
     }
     return state_;
+}
+
+bool XferSender::retransmit() {
+    if (state_ != XferState::Active || high_ == acked_) {
+        return false;
+    }
+    next_ = acked_;
+    rewound_ = true;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,15 +155,32 @@ XferReceiver::XferReceiver(uint32_t size, WriteFn write, AckFn ack, uint16_t win
       ack_every_(ack_every < 1 ? 1 : ack_every),
       since_ack_(0),
       next_(start),
+      last_ack_(start),
+      gap_acked_(false),
       state_(start >= size ? XferState::Done : XferState::Active) {}
 
 bool XferReceiver::send_ack() {
     std::string payload;
     encode_ack(next_, window_, payload);
-    return ack_(payload);
+    if (!ack_(payload)) {
+        return false;
+    }
+    last_ack_ = next_;
+    return true;
 }
 
 XferState XferReceiver::on_data(const uint8_t *payload, size_t len) {
+    if (state_ == XferState::Done) {
+        /* The sender retransmitted: our completion ACK was lost. Re-ACK the
+         * final offset (a failed send must not undo the stored bytes). */
+        uint32_t offset = 0;
+        const uint8_t *bytes = nullptr;
+        size_t n = 0;
+        if (decode_data(payload, len, offset, bytes, n)) {
+            (void)send_ack();
+        }
+        return state_;
+    }
     if (state_ != XferState::Active) {
         return state_;
     }
@@ -146,13 +192,25 @@ XferState XferReceiver::on_data(const uint8_t *payload, size_t len) {
         return state_; /* malformed: ignore */
     }
 
-    /* Not the offset we are waiting for: re-ACK it and drop the bytes. */
+    /* Not the offset we are waiting for: at most two ACKs per gap, then drop
+     * the bytes. The first — only when the last ACK we sent was below `next_`
+     * — is progress for the sender, which learns the new offset; the second is
+     * the duplicate that triggers its one rewind. Further DATA of the same gap
+     * would only storm the link. */
     if (offset != next_) {
-        if (!send_ack()) {
-            state_ = XferState::Failed;
+        if (!gap_acked_) {
+            gap_acked_ = true;
+            if (last_ack_ != next_ && !send_ack()) {
+                state_ = XferState::Failed;
+                return state_;
+            }
+            if (!send_ack()) {
+                state_ = XferState::Failed;
+            }
         }
         return state_;
     }
+    gap_acked_ = false;
     if (n > static_cast<size_t>(size_ - next_)) {
         state_ = XferState::Failed;
         return state_;

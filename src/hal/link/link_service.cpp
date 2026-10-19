@@ -100,6 +100,7 @@ struct State {
         std::unique_ptr<XferSender> tx;
         std::function<void(bool)> done;
         uint32_t last_ms;    /* steady_ms() at the start or the last ACK progress */
+        uint32_t rto_ms;     /* steady_ms() at the start, the last ACK, or the last retransmit */
         uint32_t stall_ms;   /* no-ACK-progress timeout checked by service_tick() */
         uint32_t last_acked; /* acked() at that last progress */
     };
@@ -272,6 +273,7 @@ void outbound_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_
             continue;
         }
         State::Outbound &o = s.outbound[i];
+        o.rto_ms = steady_ms();
         const uint32_t before = o.tx->acked();
         o.tx->on_ack(payload, len);
         if (o.tx->acked() != before) {
@@ -452,8 +454,31 @@ void service_tick() {
     s.rpc->tick();
     fs_tick(steady_ms());
 
-    /* Outbound sends that saw no ACK progress for their stall window fail. */
     const uint32_t now = steady_ms();
+
+    /* Outbound sends with no ACK for the retransmit window: rewind and resend. */
+    for (size_t i = 0; i < s.outbound.size();) {
+        State::Outbound &o = s.outbound[i];
+        if (static_cast<uint32_t>(now - o.rto_ms) >= XFER_RETRANSMIT_MS) {
+            o.rto_ms = now;
+            if (o.tx->retransmit()) {
+                LINK_LOG("send retransmit id=%u at=%u", static_cast<unsigned>(o.xfer),
+                         static_cast<unsigned>(o.tx->acked()));
+                const XferState st = o.tx->pump();
+                if (st == XferState::Done) {
+                    finish_outbound(i, true); /* erases index i; do not advance */
+                    continue;
+                }
+                if (st == XferState::Failed) {
+                    finish_outbound(i, false); /* erases index i; do not advance */
+                    continue;
+                }
+            }
+        }
+        ++i;
+    }
+
+    /* Outbound sends that saw no ACK progress for their stall window fail. */
     for (size_t i = 0; i < s.outbound.size();) {
         if (static_cast<uint32_t>(now - s.outbound[i].last_ms) > s.outbound[i].stall_ms) {
             LINK_LOG("send stalled id=%u", static_cast<unsigned>(s.outbound[i].xfer));
@@ -565,6 +590,7 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
     o.done = std::move(done);
     o.stall_ms = stall_ms;
     o.last_ms = steady_ms();
+    o.rto_ms = o.last_ms;
     o.last_acked = 0;
     o.tx.reset(new XferSender(
         static_cast<uint32_t>(len), MAX_DATA_CHUNK,

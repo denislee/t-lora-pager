@@ -15,10 +15,16 @@
  *  - ACK.next acknowledges every byte below it and its credits replace the
  *    sender's window, counting from that offset.
  *  - The receiver only ACKs after DATA arrives: every `ack_every` messages,
- *    on completion, and immediately (a re-ACK of its current offset) when a
- *    DATA offset is not the one it expects. A sender that gets an ACK with no
- *    progress while it has bytes in flight therefore rewinds to that offset
- *    (go-back-N) and resends from there.
+ *    on completion, at most two ACKs per gap (one that tells the sender the
+ *    offset if it has not seen it, then the duplicate that triggers its one
+ *    rewind) when a DATA offset is not the one it expects, and again after
+ *    Done so a sender whose completion ACK was lost can finish.
+ *  - The sender rewinds (go-back-N) at most ONCE per acknowledged offset: the
+ *    first ACK with no progress while bytes are in flight moves the send point
+ *    back to the acknowledged offset, later duplicates only update credits.
+ *  - The owner drives a retransmit timeout (XFER_RETRANSMIT_MS, link_frame.h):
+ *    when no ACK arrives for that long while bytes are unacknowledged it calls
+ *    retransmit() and then pump() to resend from the acknowledged offset.
  */
 #pragma once
 
@@ -61,13 +67,23 @@ public:
     XferState pump();
     /**
      * Feed one ACK payload. A malformed payload, an ACK below the current
-     * acknowledged offset, or one beyond what was sent is ignored. Does not
-     * send; call pump() next.
+     * acknowledged offset, or one beyond the highest offset ever sent is
+     * ignored. The first no-progress ACK while bytes are in flight rewinds the
+     * send point to the acknowledged offset; later duplicates only replace
+     * credits. Does not send; call pump() next.
      */
     XferState on_ack(const uint8_t *payload, size_t len);
+    /**
+     * Retransmit timeout: the owner calls it when no ACK has arrived for the
+     * retransmit timeout while bytes are unacknowledged, then calls pump().
+     * Rewinds the send point to the acknowledged offset. Returns whether it
+     * rewound (false when not Active or nothing is unacknowledged).
+     */
+    bool retransmit();
 
     XferState state() const { return state_; }
     uint32_t acked() const { return acked_; }
+    /** next offset to send (it moves back on a rewind) */
     uint32_t sent() const { return next_; }
     uint32_t size() const { return size_; }
 
@@ -78,6 +94,8 @@ private:
     SendFn send_;
     uint32_t acked_;
     uint32_t next_;
+    uint32_t high_; /* highest offset ever handed to send */
+    bool rewound_;  /* the current acked_ already used its one rewind */
     uint16_t credits_;
     XferState state_;
 };
@@ -99,9 +117,12 @@ public:
                  unsigned ack_every = 4, uint32_t start = 0);
 
     /**
-     * Feed one DATA payload. Malformed → ignored. Wrong offset → re-ACK of the
-     * current offset, bytes dropped. Bytes past `size` or a failed write /
-     * ACK → Failed. Returns the state afterwards.
+     * Feed one DATA payload. Malformed → ignored. Wrong offset → at most two
+     * ACKs per gap: one that tells the sender the offset if it has not seen
+     * it, then the duplicate that triggers its one rewind; bytes dropped.
+     * Bytes past `size` or a failed write / ACK → Failed. After Done a
+     * well-formed retransmission is re-ACKed (the sender may not have seen the
+     * completion ACK) and the state stays Done. Returns the state afterwards.
      */
     XferState on_data(const uint8_t *payload, size_t len);
 
@@ -119,6 +140,8 @@ private:
     unsigned ack_every_;
     unsigned since_ack_;
     uint32_t next_;
+    uint32_t last_ack_; /* offset of the last ACK sent (the sender's acked) */
+    bool gap_acked_;    /* a re-ACK has gone out for the current gap */
     XferState state_;
 };
 

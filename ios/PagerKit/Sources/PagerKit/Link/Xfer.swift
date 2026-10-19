@@ -14,10 +14,17 @@
 ///   - `ACK.next` acknowledges every byte below it and its credits replace the
 ///     sender's window, counting from that offset.
 ///   - The receiver only ACKs after DATA arrives: every `ackEvery` messages, on
-///     completion, and immediately (a re-ACK of its current offset) when a DATA
-///     offset is not the one it expects. A sender that gets an ACK with no
-///     progress while it has bytes in flight therefore rewinds to that offset
-///     (go-back-N) and resends from there.
+///     completion, and, for a gap (a DATA offset that is not the one it
+///     expects), at most two ACKs per gap: one that tells the sender the offset
+///     if it has not seen it, then the duplicate that triggers its one rewind.
+///     Once Done it re-ACKs its final offset for any well-formed DATA, so a lost
+///     completion ACK does not stall the sender.
+///   - The sender rewinds at most once per acknowledged offset when an ACK makes
+///     no progress while bytes are in flight, then resends from there
+///     (go-back-N). Further duplicate ACKs only update credits.
+///   - The owner drives the retransmit timeout: when no ACK has arrived for
+///     `Xfer.retransmitTimeout` with bytes unacknowledged, it calls `retransmit`
+///     and then `pump` (see `LinkSession`).
 ///
 /// The DATA/ACK payload codec is not re-implemented here: it lives in `Bulk`
 /// (Frame.swift). Neither `XferSender` nor `XferReceiver` is safe for
@@ -74,10 +81,15 @@ public enum Xfer {
     public static let maxDataChunk = 4092
     /// The implicit credit grant at the start of a transfer.
     public static let initialCredits: UInt16 = PagerLink.initialCredits
+    /// Bulk sender retransmit timeout: no ACK for this long with bytes
+    /// unacknowledged -> rewind and resend (PROTOCOL.md §4).
+    public static let retransmitTimeout: Duration = .seconds(2)
 }
 
 /// Sends `size` bytes as DATA messages under the receiver's credit window. It
-/// mirrors `link_xfer.h` `XferSender`.
+/// mirrors `link_xfer.h` `XferSender`. A no-progress ACK rewinds it at most once
+/// per acknowledged offset; the owner's retransmit timeout (see `retransmit`)
+/// recovers a lost tail or final ACK.
 public final class XferSender {
     private let size: UInt32
     private let chunk: Int
@@ -85,7 +97,9 @@ public final class XferSender {
     private let send: ([UInt8]) throws -> Void
     private var ackedValue: UInt32
     private var next: UInt32
+    private var high: UInt32
     private var credits: UInt16
+    private var rewound: Bool
     public private(set) var state: XferState
 
     /// Start a transfer of `size` bytes, `chunk` bytes per DATA message
@@ -116,15 +130,16 @@ public final class XferSender {
         self.send = send
         self.ackedValue = acked
         self.next = acked
+        self.high = acked
         self.credits = Xfer.initialCredits
+        self.rewound = false
         self.state = acked >= size ? .done : .active
     }
 
     /// The highest acknowledged offset (bytes below it are safe).
     public var acked: UInt32 { ackedValue }
 
-    /// The next offset to send — also the number of bytes handed to `send` so
-    /// far, since DATA is always sent in order from the start offset.
+    /// The next offset to send (it moves back on a rewind).
     public var sent: UInt32 { next }
 
     /// Send DATA while the window allows and return the state afterwards.
@@ -161,13 +176,27 @@ public final class XferSender {
                 return state
             }
             next = next &+ UInt32(n)
+            if next > high {
+                high = next
+            }
         }
         return state
     }
 
+    /// The retransmit timeout: the owner calls it when no ACK has arrived for
+    /// `Xfer.retransmitTimeout` while bytes are unacknowledged, then calls
+    /// `pump`. Returns whether it rewound; a rewind moves `sent` back to
+    /// `acked`.
+    public func retransmit() -> Bool {
+        guard state == .active, high != ackedValue else { return false }
+        next = ackedValue
+        rewound = true
+        return true
+    }
+
     /// Feed one ACK payload. A malformed payload, an ACK below the current
-    /// acknowledged offset, or one beyond what was sent is ignored. It does not
-    /// send; call `pump` next.
+    /// acknowledged offset, or one above the highest offset ever sent is
+    /// ignored. It does not send; call `pump` next.
     @discardableResult
     public func onAck(_ payload: [UInt8]) -> XferState {
         guard state == .active else { return state }
@@ -176,12 +205,24 @@ public final class XferSender {
             return state
         }
         // Below what we already know, or beyond what we have sent: ignore.
-        if decoded.next < ackedValue || decoded.next > next {
+        if decoded.next < ackedValue || decoded.next > high {
             return state
         }
-        // No progress while bytes are in flight: rewind and resend (go-back-N).
-        if decoded.next == ackedValue && next > ackedValue {
-            next = ackedValue
+        if decoded.next == ackedValue {
+            // No progress while bytes are in flight: rewind once per
+            // acknowledged offset (go-back-N); later duplicates only update
+            // credits.
+            if next > ackedValue && !rewound {
+                next = ackedValue
+                rewound = true
+            }
+        } else {
+            // Progress clears the rewind latch, and an ACK that overtook a
+            // rewind moves the send point forward.
+            rewound = false
+            if next < decoded.next {
+                next = decoded.next
+            }
         }
         ackedValue = decoded.next
         credits = decoded.credits
@@ -193,7 +234,11 @@ public final class XferSender {
 }
 
 /// Receives `size` bytes of DATA in order and acknowledges them. It mirrors
-/// `link_xfer.h` `XferReceiver`.
+/// `link_xfer.h` `XferReceiver`. A gap (wrong-offset DATA) draws at most two
+/// ACKs per gap: one that tells the sender the offset if it has not seen it,
+/// then the duplicate that triggers its one rewind. Once Done every well-formed
+/// DATA draws one ACK too, so a sender whose completion ACK was lost still
+/// learns the transfer finished.
 public final class XferReceiver {
     private let size: UInt32
     private let window: UInt16
@@ -201,6 +246,8 @@ public final class XferReceiver {
     private let write: (UInt32, [UInt8]) throws -> Void
     private let ack: ([UInt8]) throws -> Void
     private var sinceAck: Int
+    private var gapAcked: Bool
+    private var lastAck: UInt32
     private var next: UInt32
     public private(set) var state: XferState
 
@@ -225,6 +272,8 @@ public final class XferReceiver {
         self.write = write
         self.ack = ack
         self.sinceAck = 0
+        self.gapAcked = false
+        self.lastAck = start
         self.next = start
         self.state = start >= size ? .done : .active
     }
@@ -234,29 +283,53 @@ public final class XferReceiver {
 
     private func sendAck() throws {
         try ack(Bulk.encodeAck(next: next, credits: window))
+        lastAck = next
     }
 
-    /// Feed one DATA payload. A malformed payload is ignored. A wrong offset
-    /// makes it re-ACK the current offset and drop the bytes. Bytes past `size`
-    /// or a failed write / ACK fail the transfer. It returns the state
-    /// afterwards.
+    /// Feed one DATA payload. A malformed payload is ignored. Once Done, a
+    /// well-formed payload re-ACKs the final offset and leaves the state Done
+    /// (the sender may have missed the completion ACK). A wrong offset draws at
+    /// most two ACKs per gap — one that tells the sender the offset if it has
+    /// not seen it, then the duplicate that triggers its one rewind — and drops
+    /// the bytes. Bytes past `size` or a failed write / ACK fail the transfer.
+    /// It returns the state afterwards.
     @discardableResult
     public func onData(_ payload: [UInt8]) -> XferState {
+        if state == .done {
+            // The completion ACK may have been lost: re-ACK the final offset.
+            // A failed ACK changes nothing; the transfer is already Done.
+            if Bulk.decodeData(payload) != nil {
+                do { try sendAck() } catch {}
+            }
+            return state
+        }
         guard state == .active else { return state }
 
         guard let decoded = Bulk.decodeData(payload) else {
             return state // malformed: ignore
         }
 
-        // Not the offset we are waiting for: re-ACK it and drop the bytes.
+        // Not the offset we are waiting for: at most two ACKs per gap, then
+        // drop the bytes.
         if decoded.offset != next {
-            do {
-                try sendAck()
-            } catch {
-                state = .failed
+            if !gapAcked {
+                gapAcked = true
+                do {
+                    // First: progress for the sender (it learns `next`), unless
+                    // its last ACK was already this offset.
+                    if lastAck != next {
+                        try sendAck()
+                    }
+                    // Second (or only): the duplicate that triggers its one
+                    // rewind.
+                    try sendAck()
+                } catch {
+                    state = .failed
+                }
             }
             return state
         }
+        gapAcked = false
         let n = decoded.bytes.count
         if UInt32(n) > size &- next {
             state = .failed
