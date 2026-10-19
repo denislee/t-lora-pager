@@ -219,6 +219,15 @@ void LilyGoLoRaPager::initShareSPIPins()
     }
 }
 
+#ifdef INPUT_PROFILE
+// [LOCAL PATCH] G.1 boot markers for the profile build (src/core/input_profile.cpp).
+// Weak so the library links without it.
+extern "C" void lvh_prof_boot_mark(const char *name) __attribute__((weak));
+#define BOOT_MARK(n) do { if (lvh_prof_boot_mark) lvh_prof_boot_mark(n); } while (0)
+#else
+#define BOOT_MARK(n) do {} while (0)
+#endif
+
 uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
 {
     bool res = false;
@@ -267,6 +276,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     }
 
     _event = xEventGroupCreate();
+    BOOT_MARK("begin");
 
     devices_probe = 0x00;
 
@@ -347,6 +357,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     }
 #endif /*USING_XL9555_EXPANDS*/
 
+    BOOT_MARK("i2c pmu/xl9555");
     //BHI260AP Address: 0x28
     if (!(disable_hw_init & NO_HW_SENSOR)) {
         if (initSensor()) {
@@ -363,6 +374,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         }
     }
 
+    BOOT_MARK("bhi260");
     backlight.begin(DISP_BL);
 
     const uint8_t share_spi_pins[] = {
@@ -385,7 +397,9 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         incrementalBrightness(250, 20);
     }
 
+    BOOT_MARK("display init");
     esp_enable_slow_crystal();
+    BOOT_MARK("slow crystal");
 
 
 
@@ -402,18 +416,22 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     if (!(disable_hw_init & NO_HW_RTC)) {
         initRTC();
     }
+    BOOT_MARK("rtc");
 
     if (!(disable_hw_init & NO_HW_NFC)) {
         initNFC();
     }
+    BOOT_MARK("nfc");
 
     if (!(disable_hw_init & NO_HW_KEYBOARD)) {
         initKeyboard();
     }
+    BOOT_MARK("keyboard");
 
     if (!(disable_hw_init & NO_HW_DRV)) {
         initDrv();
     }
+    BOOT_MARK("haptic");
 
     if (!(disable_hw_init & NO_HW_GPS)) {
         initGPS();
@@ -422,6 +440,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     if (!(disable_hw_init & NO_HW_LORA)) {
         initLoRa();
     }
+    BOOT_MARK("lora");
 
     if (!(disable_hw_init & NO_HW_SD)) {
         int retry = 2;
@@ -437,6 +456,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
             }
         } while (--retry);
     }
+    BOOT_MARK("sd");
 
     if (!(disable_hw_init & NO_INIT_FATFS)) {
         // Expose the SD card over USB MSC only when the user prefers it *and* a
@@ -445,6 +465,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         bool msc_use_sd = getMSCPreferSD() && (devices_probe & HW_SD_ONLINE);
         setupMSC(_lock_callback, _unlock_callback, msc_use_sd);
     }
+    BOOT_MARK("msc");
 
 
 #ifdef USING_PDM_MICROPHONE
@@ -482,6 +503,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     // Create a rotary encoder processing task
     xTaskCreate(rotaryTask, "rotary", 2 * 1024, NULL, 10, &rotaryHandler);
 
+    BOOT_MARK("begin end");
     return devices_probe;
 }
 

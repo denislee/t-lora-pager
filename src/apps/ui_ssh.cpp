@@ -38,6 +38,7 @@
 #include "../core/system.h"
 #include "../hal/wireless.h"
 #include "../hal/secrets.h"
+#include "../hal/notes_crypto.h"
 #include "app_registry.h"
 
 #include <atomic>
@@ -333,21 +334,24 @@ private:
         state_.store(State::Connected);
         s_ssh_session_active = true;
 
-        // TEMPORARY (OPTIMIZATION_PHASE3.md P3.9 hardware session) — periodic
-        // watermark print to size the 32 KB stack from a measurement. The
+#ifdef INPUT_PROFILE
+        // Profile build only (P7.43; it shipped in production before):
+        // periodic watermark print to size the 32 KB stack (P3.9). The
         // high-water mark is a running minimum since task creation, so this
         // captures the auth/handshake peak too, not just the idle read loop.
-        // Remove once the reading is taken.
         uint32_t last_wm_ms = 0;
+#endif
 
         char buf[256];
         while (!stop_flag_.load()) {
+#ifdef INPUT_PROFILE
             uint32_t wm_now = millis();
             if (wm_now - last_wm_ms > 3000) {
                 Serial.printf("[stackwm] ssh_app free=%u B\n",
                               (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
                 last_wm_ms = wm_now;
             }
+#endif
 
             int n = ssh_channel_read_nonblocking(ch, buf, sizeof(buf), 0);
             if (n == SSH_ERROR) break;
@@ -731,7 +735,7 @@ void SshApp::onStart(lv_obj_t* parent) {
 #ifdef ARDUINO
     // Hint when an encrypted password exists but the notes session is
     // locked — tells the user why Connect will still prompt.
-    if (hal::secret_exists(SSH_NS, SSH_PW_KEY) && pw_load().empty()) {
+    if (hal::secret_exists(SSH_NS, SSH_PW_KEY) && !notes_crypto_is_unlocked()) {
         append_terminal("[i] Saved password is locked. Unlock notes "
                         "encryption to skip the prompt.\n\n");
     }

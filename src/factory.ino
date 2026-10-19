@@ -17,6 +17,7 @@
 #include "core/system_hooks.h"
 #include "core/input_focus.h"
 #include "core/kb_lock.h"
+#include "core/input_profile.h"
 
 // Vendor entry point: sets a volatile flag consumed by the rotary task to run
 // perform_fake_sleep_toggle() — the same path as a long-press. Declared here
@@ -76,6 +77,9 @@ void setup()
     hw_set_cpu_freq(240);
 
     Serial.begin(115200);
+#ifdef INPUT_PROFILE
+    core::prof::boot_mark("setup");
+#endif
 
     core::instance_lock_init();
     core::kb_lock_init();
@@ -103,6 +107,9 @@ void setup()
     instance.begin(disable_flags);
 
     beginLvglHelper(instance);
+#ifdef INPUT_PROFILE
+    core::prof::boot_mark("lvgl helper");
+#endif
 
     // Arm the SNTP and WiFi event callbacks BEFORE connectivity bring-up —
     // hw_connectivity_init() (called near the end of setup(), after the LVGL
@@ -124,9 +131,15 @@ void setup()
     tzset();
 
     hw_init();
+#ifdef INPUT_PROFILE
+    core::prof::boot_mark("hw_init");
+#endif
 
     apps::register_all();
     core::System::getInstance().init();
+#ifdef INPUT_PROFILE
+    core::prof::boot_mark("ui init");
+#endif
 
     // Passphrase-protected notes: if the session is locked, put an unlock
     // modal on top of the UI before rendering starts. The modal has no cancel
@@ -147,6 +160,9 @@ void setup()
     // so the boot-time NTP sync path is unaffected; the NFC task tolerates
     // discovery starting late (same as a runtime toggle from Settings).
     hw_connectivity_init();
+#ifdef INPUT_PROFILE
+    core::prof::boot_mark("connectivity");
+#endif
 
     Serial.println("Start done. run main loop");
 }

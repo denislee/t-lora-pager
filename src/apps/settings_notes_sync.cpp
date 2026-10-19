@@ -10,6 +10,7 @@
  */
 #include "../ui_define.h"
 #include "../hal/notes_crypto.h"
+#include "../core/one_shot_job.h"
 #include "app_registry.h"
 #include "settings_internal.h"
 
@@ -20,12 +21,39 @@ static lv_obj_t *g_branch_label = nullptr;
 static lv_obj_t *g_tok_label   = nullptr;
 static lv_obj_t *g_note_label  = nullptr;
 
+// The masked token needs a ~2 s PBKDF2 decrypt the first time per session,
+// so refresh_labels starts it on a worker and the label is filled in when
+// the result lands (P7.3).
+static core::OneShotJob<std::string> g_mask_job;
+
 void reset_state()
 {
+    // Kill the token-label drain before the widgets it writes into go away.
+    g_mask_job.teardown();
     g_repo_label = nullptr;
     g_branch_label = nullptr;
     g_tok_label = nullptr;
     g_note_label = nullptr;
+}
+
+// Fills the token/note labels from an already-resolved display string, so
+// the cheap peek path and the worker's decrypt result share one form.
+static void apply_token_labels(const std::string &display)
+{
+    settings_refresh_token_labels(
+        g_tok_label, g_note_label,
+        display, apps::nsync_cfg_token_is_encrypted(),
+        "Enable Notes encryption (Settings » Notes Security) "
+        "before saving a PAT — the token is persisted only "
+        "AES-256 wrapped, never plaintext.",
+        "Token is AES-256 wrapped with your notes passphrase. "
+        "Private repos work — use a fine-grained PAT with "
+        "Contents: read/write on just this repo.");
+}
+
+static void mask_done(std::string &display)
+{
+    if (g_tok_label) apply_token_labels(display);
 }
 
 static void refresh_labels()
@@ -39,15 +67,19 @@ static void refresh_labels()
         std::string v = apps::nsync_cfg_get_branch();
         lv_label_set_text_fmt(g_branch_label, "Branch: %s", v.c_str());
     }
-    settings_refresh_token_labels(
-        g_tok_label, g_note_label,
-        apps::nsync_cfg_get_token_display(), apps::nsync_cfg_token_is_encrypted(),
-        "Enable Notes encryption (Settings » Notes Security) "
-        "before saving a PAT — the token is persisted only "
-        "AES-256 wrapped, never plaintext.",
-        "Token is AES-256 wrapped with your notes passphrase. "
-        "Private repos work — use a fine-grained PAT with "
-        "Contents: read/write on just this repo.");
+    // The masked token needs a ~2 s PBKDF2 decrypt the first time per
+    // session, so it runs on a worker and the label is filled in when it
+    // lands (P7.3).
+    std::string display;
+    if (apps::nsync_cfg_peek_token_display(display)) {
+        apply_token_labels(display);
+    } else {
+        apply_token_labels("********");
+        g_mask_job.on_done(mask_done);
+        g_mask_job.start([] {
+            return new std::string(apps::nsync_cfg_get_token_display());
+        }, 8192, "nsync_mask", 1);
+    }
 }
 
 static void set_repo_cb(const char *text, void *)
@@ -141,19 +173,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_text_color(g_note_label, UI_COLOR_MUTED, 0);
 #endif
 
-    // Placeholder text so the page paints with content during the menu
-    // slide-in. The real refresh — NVS opens + PBKDF2/AES decrypt of the
-    // token — is deferred to a one-shot timer so it runs after the
-    // transition animation completes instead of stalling it.
-    lv_label_set_text(g_repo_label,   "Repo: \xE2\x80\xA6");
-    lv_label_set_text(g_branch_label, "Branch: \xE2\x80\xA6");
-    lv_label_set_text(g_tok_label,    "Token: \xE2\x80\xA6");
-#ifdef ARDUINO
-    if (g_note_label) lv_label_set_text(g_note_label, "");
-#endif
-    lv_timer_t *t = lv_timer_create([](lv_timer_t *) { refresh_labels(); },
-                                    1, nullptr);
-    lv_timer_set_repeat_count(t, 1);
+    // refresh_labels never decrypts on this thread (P7.3), so fill the labels now.
+    refresh_labels();
 }
 
 } // namespace notes_sync_cfg

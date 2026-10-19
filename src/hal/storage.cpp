@@ -320,6 +320,10 @@ bool hw_read_file(const char *path, std::string &content)
 
     hal::fs_read_all(f, content);
     log_d("Read %u bytes from %s (%s)", (unsigned int)content.size(), str, lock.held() ? "SD" : "Internal");
+    // Drop the bus before decrypting: a PBKDF2 miss is ~2 s, and holding the
+    // SPI lock through it stalls display flushes and every other SD user (P7.24).
+    f.close();
+    lock.release();
     if (!decode_after_read(content)) {
         content.clear();
         return false;

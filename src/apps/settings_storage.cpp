@@ -22,6 +22,7 @@
 #include "../hal/link.h"
 #include "../hal/notes_link.h"
 #include "../hal/storage.h"
+#include "../core/one_shot_job.h"
 #include "settings_internal.h"
 
 #include <memory>
@@ -103,57 +104,81 @@ void storage_prune_now_cb(lv_event_t *) {
     ui_msg_pop_up("Storage", "Internal storage pruned to\nkeep only the 50 newest files.");
 }
 
+struct CopyNotesResult { const char *title; std::string msg; };
+
+// Runs the copy off the LVGL thread — the phone path can wait up to 120 s per
+// batch, the hub path does one HTTP request per note (P7.20).
+static core::OneShotJob<CopyNotesResult> g_copy_job;
+
+static void copy_notes_done(CopyNotesResult &r) {
+    hide_storage_loader();
+    ui_msg_pop_up(r.title, r.msg.c_str());
+}
+
 // "Copy Notes -> Phone": phone first (notes.sync target "phone", internal +
 // SD notes, internal wins a shared name); without a phone the existing hub
 // upload (deleted in H4.2, D-H1); otherwise "Connect your phone".
+// Runs on g_copy_job so the UI stays live; the hub path shows an indeterminate
+// loader (no per-file progress off the LVGL thread).
 void storage_copy_notes_cb(lv_event_t *) {
-    if (hw_link_connected()) {
-        show_storage_loader("Copy Notes to Phone");
-        std::string err;
-        HalResult<NotesSyncSummary> r = notes_link_copy_to_phone(err);
-        hide_storage_loader();
+    // A copy is already running — its own completion pops the result.
+    if (g_copy_job.busy()) return;
 
-        char msg[160];
-        if (r) {
-            snprintf(msg, sizeof(msg), "Copied %d note(s) to phone.%s",
-                     r.value().uploaded + r.value().already,
-                     r.value().errors.empty() ? "" : "\nSome failed.");
-        } else {
-            snprintf(msg, sizeof(msg), "Copy failed: %s",
-                     err.empty() ? hal_error_string(r.error()) : err.c_str());
-        }
-        ui_msg_pop_up("Phone", msg);
-        return;
-    }
-
-    if (!hal::hub_is_enabled()) {
+    // Decide the path on the UI thread: the worker must not query the link or
+    // the hub config itself.
+    bool phone = hw_link_connected();
+    if (!phone && !hal::hub_is_enabled()) {
         ui_msg_pop_up("Phone",
                       "Connect your phone\n"
                       "(or set Settings " "\xC2\xBB" " Local Hub).");
         return;
     }
 
-    show_storage_loader("Upload Notes via Hub");
+    show_storage_loader(phone ? "Copy Notes to Phone" : "Upload Notes via Hub");
+    g_copy_job.on_done(copy_notes_done);
 
-    int copied = 0, failed = 0;
-    std::string err;
-    bool ok = hw_copy_all_notes_to_hub(&copied, &failed, &err, storage_progress_cb);
+    core::OneShotJob<CopyNotesResult>::Start st = g_copy_job.start(
+        [phone]() -> CopyNotesResult * {
+            char msg[160];
+            if (phone) {
+                std::string err;
+                HalResult<NotesSyncSummary> r = notes_link_copy_to_phone(err);
+                if (r) {
+                    snprintf(msg, sizeof(msg), "Copied %d note(s) to phone.%s",
+                             r.value().uploaded + r.value().already,
+                             r.value().errors.empty() ? "" : "\nSome failed.");
+                } else {
+                    snprintf(msg, sizeof(msg), "Copy failed: %s",
+                             err.empty() ? hal_error_string(r.error()) : err.c_str());
+                }
+                return new CopyNotesResult{"Phone", msg};
+            }
 
-    hide_storage_loader();
+            int copied = 0, failed = 0;
+            std::string err;
+            // nullptr, not storage_progress_cb: that cb touches LVGL and this
+            // runs on the worker.
+            bool ok = hw_copy_all_notes_to_hub(&copied, &failed, &err, nullptr);
 
-    char msg[160];
-    if (ok) {
-        snprintf(msg, sizeof(msg),
-                 "Uploaded %d note(s) via hub.%s",
-                 copied, failed > 0 ? "\nSome failed." : "");
-    } else if (!err.empty()) {
-        snprintf(msg, sizeof(msg), "Upload failed: %s\nUploaded: %d, failed: %d.",
-                 err.c_str(), copied, failed);
-    } else {
-        snprintf(msg, sizeof(msg), "Upload failed.\nUploaded: %d, failed: %d.",
-                 copied, failed);
+            if (ok) {
+                snprintf(msg, sizeof(msg),
+                         "Uploaded %d note(s) via hub.%s",
+                         copied, failed > 0 ? "\nSome failed." : "");
+            } else if (!err.empty()) {
+                snprintf(msg, sizeof(msg), "Upload failed: %s\nUploaded: %d, failed: %d.",
+                         err.c_str(), copied, failed);
+            } else {
+                snprintf(msg, sizeof(msg), "Upload failed.\nUploaded: %d, failed: %d.",
+                         copied, failed);
+            }
+            return new CopyNotesResult{"Hub", msg};
+        },
+        8192, "copy_notes", 2);
+
+    if (st == core::OneShotJob<CopyNotesResult>::Start::Failed) {
+        hide_storage_loader();
+        ui_msg_pop_up("Phone", "Could not start the copy.");
     }
-    ui_msg_pop_up("Hub", msg);
 }
 
 void storage_copy_to_sd_cb(lv_event_t *) {

@@ -603,16 +603,11 @@ static void enter(lv_obj_t *parent)
         // still says what to do if crypto is disabled so the user
         // understands why the token reads as "not set".
         const char *tok_status;
-        std::string tok = load_token_plain();
-        if (!tok.empty()) {
-            tok_status = "token: encrypted, unlocked";
-        } else if (token_is_encrypted()) {
-            tok_status = "token: locked";
-        } else {
-            tok_status = "token: not set";
-        }
-        // Scrub the scratch copy — we only fetched it to check emptiness.
-        hal::secret_scrub(tok);
+        // Status only — no decrypt here; that is ~2 s of PBKDF2 on the UI
+        // thread (P7.3).
+        if (!token_is_encrypted())               tok_status = "token: not set";
+        else if (notes_crypto_is_unlocked())     tok_status = "token: encrypted, unlocked";
+        else                                     tok_status = "token: locked";
         lv_label_set_text_fmt(status, "%s  (%s)",
                               repo.c_str(), tok_status);
     }
@@ -717,6 +712,12 @@ void nsync_cfg_set_branch(const char *v) { save_pref("branch", v ? v : ""); }
 std::string nsync_cfg_get_token_display()
 {
     return hal::secret_mask_display(NSYNC_PREFS_NS, "token_enc");
+}
+
+// Cheap form for the UI thread — see hal::secret_mask_peek.
+bool nsync_cfg_peek_token_display(std::string &out)
+{
+    return hal::secret_mask_peek(NSYNC_PREFS_NS, "token_enc", out);
 }
 
 bool nsync_cfg_set_token(const char *tok, std::string *err)

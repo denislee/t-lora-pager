@@ -116,13 +116,14 @@ static void prewarm_clear()
 }
 
 /* ---- Read-side key cache ----
- * PBKDF2 (10k iterations) is tens of ms per derivation. Encrypt always uses a
- * fresh random salt, so only the *decrypt* path can recur on a given salt: the
- * journal previews a note by decrypting the whole file, then the user opens the
- * same note, then maybe reopens it — each decrypts the identical on-disk
- * ciphertext and would otherwise re-derive the same key. Cache the derived
- * (key, iv) keyed on the 8-byte salt so repeat decrypts of an unchanged file
- * skip PBKDF2.
+ * PBKDF2 (10k iterations) costs 1.9-2.7 s per derivation on the S3 (measured,
+ * INPUT_STUTTER_PLAN.md IS.10). Encrypt always uses a fresh random salt, which
+ * is then read back: the journal previews a note by decrypting the whole file,
+ * then the user opens the same note, then maybe reopens it — each decrypts the
+ * identical on-disk ciphertext and would otherwise re-derive the same key.
+ * Cache the derived (key, iv) keyed on the 8-byte salt so repeat decrypts of an
+ * unchanged file skip PBKDF2; encrypt seeds the cache with the salt it just
+ * wrote so the first read-back after a save hits too.
  *
  * The cache holds live key material, so it is treated exactly like the cached
  * passphrase: entries are only ever stored for the current session key, the
@@ -335,6 +336,14 @@ static bool encrypt_with_pw(const char *pw,
         zeroize(iv_work, sizeof(iv_work));
     }
     mbedtls_aes_free(&ctx);
+    /* Seed the read-side cache with this fresh salt (P7.1): the next read of the
+     * file just written (reopen after edit, journal snippet, index reload) would
+     * otherwise pay a full PBKDF2 for a key we already hold. Same gate as the
+     * decrypt side, so only live-session keys are ever cached. */
+    if (ok && g_unlocked && g_passphrase == pw) {
+        PrewarmLock lk;
+        keycache_store_locked(salt, key, iv);
+    }
     zeroize(key, sizeof(key));
     zeroize(iv, sizeof(iv));
     zeroize(body.data(), body.size());

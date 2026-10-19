@@ -91,4 +91,7 @@ typedef enum { UI_TITLE_NONE = 0, UI_TITLE_BAR, UI_TITLE_TAB } ui_title_chrome_t
 // draw nothing. Either object may be NULL. Returns which chrome was drawn.
 ui_title_chrome_t ui_dress_title(lv_obj_t *bar, lv_obj_t *label, int32_t pad_hor);
 
-void theme_init();
+// Build (or rebuild) the LVGL theme for the current style, dark mode and
+// system font. Returns false without touching anything when none of the three
+// changed since the last build (P7.11).
+bool theme_init();

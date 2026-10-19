@@ -73,6 +73,18 @@ void hw_set_user_setting(user_setting_params_t &param);
 
 void hw_get_heap_info(uint32_t &total, uint32_t &free);
 
+// Internal-RAM and PSRAM heap telemetry (P7.49). The low-water marks are
+// since boot; `int_largest` is the biggest single internal block, which is
+// what TLS (~16.7 KB contiguous) actually needs, so it shows fragmentation.
+struct heap_stats_t {
+    uint32_t int_free;
+    uint32_t int_min_free;
+    uint32_t int_largest;
+    uint32_t psram_free;
+    uint32_t psram_min_free;
+};
+void hw_get_heap_stats(heap_stats_t &s);
+
 // Tracked CPU-frequency setter — calls setCpuFrequencyMhz() only when the
 // requested frequency differs from the last set value, eliminating redundant
 // PLL re-locks across the hw_power_down_all / hw_power_up_all / loop() paths.

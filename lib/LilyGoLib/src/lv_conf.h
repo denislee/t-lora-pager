@@ -331,8 +331,11 @@
 #define LV_USE_ASSERT_OBJ           0   /*Check the object's type and existence (e.g. not deleted). (Slow)*/
 
 /*Add a custom handler when assert happens e.g. to restart the MCU*/
-#define LV_ASSERT_HANDLER_INCLUDE <stdint.h>
-#define LV_ASSERT_HANDLER while(1);   /*Halt by default*/
+/* [LOCAL PATCH] P7.54: abort() instead of while(1). The LVGL task runs on
+ * core 1 and the task watchdog only watches CPU0's idle task, so a spin here
+ * hung the UI silently; abort() panics, writes the coredump and reboots. */
+#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>
+#define LV_ASSERT_HANDLER abort();
 
 /*-------------
  * Debug

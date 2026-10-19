@@ -29,6 +29,7 @@
 #include "../hal/rotary_task.h"
 #include "../hal/storage.h"
 #include "../hal/notes_crypto.h"
+#include "../hal/system.h"
 #include <mbedtls/md.h>
 #include <mbedtls/pkcs5.h>
 #include <string>
@@ -96,6 +97,41 @@ uint64_t s_frame_max_us = 0;
 uint32_t s_frame_gt33 = 0;
 uint32_t s_frame_gt100 = 0;
 uint32_t s_frame_count = 0;
+
+// --- per-stage frame timing (P7.9) ----------------------------------------
+// Refresh span comes from LVGL's REFR_START/REFR_READY events; swap and push
+// come from the vendor disp_flush hook (lvh_prof_flush).
+uint64_t s_refr_t0 = 0;
+uint32_t s_fr_refr_us = 0;
+uint32_t s_fr_swap_us = 0;
+uint32_t s_fr_push_us = 0;
+uint32_t s_fr_px = 0;
+uint32_t s_fr_flushes = 0;
+
+// Window counterparts, reset by report_tick().
+uint32_t s_win_refr_max_us = 0;
+uint64_t s_win_px = 0;
+uint32_t s_win_refr_frames = 0;
+
+bool s_refr_hooked = false;
+
+// --- boot markers (G.1) ---
+static const uint32_t kBootMax = 32;
+const char *s_boot_name[kBootMax];
+uint64_t s_boot_us[kBootMax];
+uint32_t s_boot_n = 0;
+bool s_boot_flushed = false;   // first display flush seen
+bool s_boot_printed = false;
+
+void refr_event_cb(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_REFR_START) {
+        s_refr_t0 = now_us();
+    } else if (code == LV_EVENT_REFR_READY && s_refr_t0 != 0) {
+        s_fr_refr_us += (uint32_t)(now_us() - s_refr_t0);
+        s_refr_t0 = 0;
+    }
+}
 
 // --- named spans -----------------------------------------------------------
 const char *s_span_max_name = "?";
@@ -169,7 +205,40 @@ void key_latency(uint64_t us) {
     if (us > s_key_max_us) s_key_max_us = us;
 }
 
+void boot_mark(const char *name) {
+    if (s_boot_n < kBootMax) {
+        s_boot_name[s_boot_n] = name;
+        s_boot_us[s_boot_n] = now_us();
+        s_boot_n++;
+    }
+}
+
+// One display flush (vendor disp_flush hook): pixels, byte-swap and SPI push
+// time (P7.9).
+void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) {
+    if (!s_boot_flushed) { s_boot_flushed = true; boot_mark("first flush"); }
+    s_fr_px += px;
+    s_fr_swap_us += swap_us;
+    s_fr_push_us += push_us;
+    s_fr_flushes++;
+}
+
 void frame_begin() {
+    // Hook the display's refresh events once, as soon as LVGL has a default
+    // display, so the REFR span covers render + flush + flush-ready wait.
+    if (!s_refr_hooked) {
+        lv_display_t *disp = lv_display_get_default();
+        if (disp) {
+            lv_display_add_event_cb(disp, refr_event_cb, LV_EVENT_REFR_START, NULL);
+            lv_display_add_event_cb(disp, refr_event_cb, LV_EVENT_REFR_READY, NULL);
+            s_refr_hooked = true;
+        }
+    }
+    s_fr_refr_us = 0;
+    s_fr_swap_us = 0;
+    s_fr_push_us = 0;
+    s_fr_px = 0;
+    s_fr_flushes = 0;
 #ifdef ARDUINO
     s_census_n = 0;
     for (lv_timer_t *t = lv_timer_get_next(NULL); t && s_census_n < kCensusMax;
@@ -187,7 +256,21 @@ void frame(uint64_t us) {
     // is new. A timer deleted during the frame is not listed. Resolve cb with
     // addr2line -fe .pio/build/tlora_pager_profile/firmware.elf <cb>.
     if (us >= 100000) {
-        PROF_LOG("slow frame %u ms, timers that ran:", (unsigned)(us / 1000));
+        // Split the refresh span into render / swap / push so a slow frame
+        // points at the stage that actually cost the time (P7.9).
+        int64_t refr_us   = (int64_t)s_fr_refr_us;
+        int64_t swap_us   = (int64_t)s_fr_swap_us;
+        int64_t push_us   = (int64_t)s_fr_push_us;
+        int64_t render_us = refr_us - swap_us - push_us;
+        if (render_us < 0) render_us = 0;
+        int64_t other_us  = (int64_t)us - refr_us;
+        if (other_us < 0) other_us = 0;
+        PROF_LOG("slow frame %u ms @ %u MHz: refr %u ms (render %u, swap %u, push %u ms; %u px in %u flushes), timers/other %u ms; timers that ran:",
+                 (unsigned)(us / 1000), (unsigned)getCpuFrequencyMhz(),
+                 (unsigned)(refr_us / 1000), (unsigned)(render_us / 1000),
+                 (unsigned)(swap_us / 1000), (unsigned)(push_us / 1000),
+                 (unsigned)s_fr_px, (unsigned)s_fr_flushes,
+                 (unsigned)(other_us / 1000));
         for (lv_timer_t *t = lv_timer_get_next(NULL); t; t = lv_timer_get_next(t)) {
             bool seen = false, ran = true;
             for (uint32_t i = 0; i < s_census_n; i++) {
@@ -202,6 +285,10 @@ void frame(uint64_t us) {
     if (us > 33000) s_frame_gt33++;
     if (us > 100000) s_frame_gt100++;
     s_frame_count++;
+
+    if (s_fr_refr_us > s_win_refr_max_us) s_win_refr_max_us = s_fr_refr_us;
+    s_win_px += s_fr_px;
+    if (s_fr_refr_us) s_win_refr_frames++;
 }
 
 void span(const char *name, uint64_t us) {
@@ -337,6 +424,17 @@ void report_tick() {
 #endif
         return;
     }
+    if (s_boot_flushed && !s_boot_printed) {
+        s_boot_printed = true;
+        // Times are esp_timer microseconds (esp_timer starts early in IDF startup, so
+        // ROM/bootloader time before it is not included).
+        uint64_t prev = 0;
+        for (uint32_t i = 0; i < s_boot_n; i++) {
+            PROF_LOG("boot: %-14s %6u ms (+%u ms)", s_boot_name[i],
+                     (unsigned)(s_boot_us[i] / 1000), (unsigned)((s_boot_us[i] - prev) / 1000));
+            prev = s_boot_us[i];
+        }
+    }
     if (s_req_app[0]) {
         PROF_LOG("console: enter app %s", s_req_app);
         // queueEnterApp keeps the pointer until System::loop applies it.
@@ -365,6 +463,38 @@ void report_tick() {
         s_slow_pending = false;
     }
 
+#ifdef ARDUINO
+    // Heap and stack telemetry (P7.49) print every window, even when nothing
+    // else was recorded: a heap/stack problem is worth seeing while idle.
+    heap_stats_t hs;
+    hw_get_heap_stats(hs);
+    PROF_LOG("heap: int free %uK min %uK blk %uK | psram free %uK min %uK",
+             (unsigned)(hs.int_free / 1024), (unsigned)(hs.int_min_free / 1024),
+             (unsigned)(hs.int_largest / 1024), (unsigned)(hs.psram_free / 1024),
+             (unsigned)(hs.psram_min_free / 1024));
+
+    // Stack high-water marks (minimum free since task start), P7.49. By name:
+    // the 2.0.17 SDK has no trace facility, so no uxTaskGetSystemState.
+    static const char *const kTasks[] = {
+        "lvgl", "kb_reader", "rotary_reader", "rotary", "charge_ind",
+        "nfc_reader", "link", "ble_kb_ka", "nimble_host", "loopTask",
+        "ssh_app", "app/play", "app/rec", "note_save", "prof_console",
+    };
+    char buf[384];
+    size_t off = 0;
+    buf[0] = '\0';
+    for (const char *name : kTasks) {
+        TaskHandle_t h = xTaskGetHandle(name);
+        if (!h) continue;
+        int wrote = snprintf(buf + off, sizeof(buf) - off, "%s:%uB ", name,
+                             (unsigned)(uxTaskGetStackHighWaterMark(h) * sizeof(StackType_t)));
+        if (wrote < 0) break;
+        off += (size_t)wrote;
+        if (off >= sizeof(buf)) { off = sizeof(buf) - 1; break; }
+    }
+    PROF_LOG("stack free: %s", buf);
+#endif
+
     bool any = s_lock_seen || s_key_count > 0 || s_frame_count > 0;
     if (!any) return;
 
@@ -384,7 +514,8 @@ void report_tick() {
     PROF_LOG(
         "win: hold max %ums (%s) hist <5:%u <16:%u <33:%u <100:%u <300:%u "
         ">=300:%u | kb wait max %ums | key n=%u p50 %ums p95 %ums max %ums | "
-        "frame max %ums >33:%u >100:%u | span max %s %ums",
+        "frame max %ums >33:%u >100:%u | span max %s %ums | "
+        "refr max %ums, %u frames, avg %u px",
         (unsigned)(s_hold_max_us / 1000), s_hold_max_holder,
         (unsigned)s_hist[0], (unsigned)s_hist[1], (unsigned)s_hist[2],
         (unsigned)s_hist[3], (unsigned)s_hist[4], (unsigned)s_hist[5],
@@ -392,7 +523,9 @@ void report_tick() {
         (unsigned)s_key_count, p50, p95, (unsigned)(s_key_max_us / 1000),
         (unsigned)(s_frame_max_us / 1000), (unsigned)s_frame_gt33,
         (unsigned)s_frame_gt100, s_span_max_name,
-        (unsigned)(s_span_max_us / 1000));
+        (unsigned)(s_span_max_us / 1000),
+        (unsigned)(s_win_refr_max_us / 1000), (unsigned)s_win_refr_frames,
+        (unsigned)(s_win_refr_frames ? s_win_px / s_win_refr_frames : 0));
 
     // Reset all window stats.
     s_hold_max_us = 0;
@@ -409,6 +542,9 @@ void report_tick() {
     s_frame_count = 0;
     s_span_max_name = "?";
     s_span_max_us = 0;
+    s_win_refr_max_us = 0;
+    s_win_px = 0;
+    s_win_refr_frames = 0;
 }
 
 void dump_group(const char *why) {
@@ -449,5 +585,15 @@ void dump_group(const char *why) {
 }
 
 }} // namespace core::prof
+
+// P7.9: display flush hook, called from the vendor disp_flush() (LV_Helper_v9.cpp).
+extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) {
+    core::prof::note_flush(px, swap_us, push_us);
+}
+
+// G.1: boot marker hook, called from the vendor LilyGoLoRaPager::begin().
+extern "C" void lvh_prof_boot_mark(const char *name) {
+    core::prof::boot_mark(name);
+}
 
 #endif // INPUT_PROFILE

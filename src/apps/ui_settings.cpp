@@ -659,8 +659,9 @@ void ui_sys_exit(lv_obj_t *parent)
     // Rebuild the theme so any system-font change takes effect on the next
     // screen that gets constructed. Objects already created keep their old
     // font, but the next UI (menu, app, dialog) picks up the new one.
-    theme_init();
-    core::System::getInstance().applyChromeStyle();
+    // theme_init is a no-op when nothing changed (P7.11); style and dark-mode
+    // changes already re-tinted the chrome from their own callbacks.
+    if (theme_init()) core::System::getInstance().applyChromeStyle();
     settings_main_page = NULL;
     settings_exit_btn = NULL;
     // Drop any in-flight NTP poll timer so it doesn't outlive the page it

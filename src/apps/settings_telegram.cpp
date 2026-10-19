@@ -24,12 +24,19 @@ static lv_obj_t *g_fav_sub_page   = nullptr;
 // lv_menu_set_page from the button callback.
 static lv_obj_t *g_parent_menu    = nullptr;
 
+// The masked token needs a ~2 s PBKDF2 decrypt the first time per session,
+// so refresh_labels starts it on a worker and the label is filled in when
+// the result lands (P7.3).
+static core::OneShotJob<std::string> g_mask_job;
+
 #ifdef ARDUINO
 static void fav_async_teardown();   // defined with the async block below
 #endif
 
 void reset_state()
 {
+    // Kill the token-label drain before the widgets it writes into go away.
+    g_mask_job.teardown();
     g_url_label = nullptr;
     g_tok_label = nullptr;
     g_note_label = nullptr;
@@ -42,6 +49,24 @@ void reset_state()
 
 static void build_favorites_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
 
+// Fills the token/note labels from an already-resolved display string, so
+// the cheap peek path and the worker's decrypt result share one form.
+static void apply_token_labels(const std::string &display)
+{
+    settings_refresh_token_labels(
+        g_tok_label, g_note_label,
+        display, apps::tg_cfg_token_is_encrypted(),
+        "Enable Notes encryption (Settings » Notes Security) "
+        "before saving the bearer — the token is persisted "
+        "only AES-256 wrapped, never plaintext.",
+        "Token is AES-256 wrapped with your notes passphrase.");
+}
+
+static void mask_done(std::string &display)
+{
+    if (g_tok_label) apply_token_labels(display);
+}
+
 static void refresh_labels()
 {
     if (g_url_label) {
@@ -49,13 +74,19 @@ static void refresh_labels()
         lv_label_set_text_fmt(g_url_label, "URL: %s",
                               url.empty() ? "(not set)" : url.c_str());
     }
-    settings_refresh_token_labels(
-        g_tok_label, g_note_label,
-        apps::tg_cfg_get_token_display(), apps::tg_cfg_token_is_encrypted(),
-        "Enable Notes encryption (Settings » Notes Security) "
-        "before saving the bearer — the token is persisted "
-        "only AES-256 wrapped, never plaintext.",
-        "Token is AES-256 wrapped with your notes passphrase.");
+    // The masked token needs a ~2 s PBKDF2 decrypt the first time per
+    // session, so it runs on a worker and the label is filled in when it
+    // lands (P7.3).
+    std::string display;
+    if (apps::tg_cfg_peek_token_display(display)) {
+        apply_token_labels(display);
+    } else {
+        apply_token_labels("********");
+        g_mask_job.on_done(mask_done);
+        g_mask_job.start([] {
+            return new std::string(apps::tg_cfg_get_token_display());
+        }, 8192, "tg_mask", 1);
+    }
 }
 
 static void set_url_cb(const char *text, void *)
@@ -170,18 +201,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_text_color(g_note_label, UI_COLOR_MUTED, 0);
 #endif
 
-    // Placeholder text so the page paints with content during the menu
-    // slide-in. The real refresh — NVS opens + PBKDF2/AES decrypt of the
-    // token — is deferred to a one-shot timer so it runs after the
-    // transition animation completes instead of stalling it.
-    lv_label_set_text(g_url_label, "URL: \xE2\x80\xA6");
-    lv_label_set_text(g_tok_label, "Token: \xE2\x80\xA6");
-#ifdef ARDUINO
-    if (g_note_label) lv_label_set_text(g_note_label, "");
-#endif
-    lv_timer_t *t = lv_timer_create([](lv_timer_t *) { refresh_labels(); },
-                                    1, nullptr);
-    lv_timer_set_repeat_count(t, 1);
+    // refresh_labels never decrypts on this thread (P7.3), so fill the labels now.
+    refresh_labels();
 }
 
 // Per-button owned (id, title) — freed via LV_EVENT_DELETE. Title is kept

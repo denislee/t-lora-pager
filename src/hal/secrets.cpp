@@ -7,6 +7,8 @@
 #include "str_encode.h"
 
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <vector>
 
 #ifdef ARDUINO
@@ -15,6 +17,39 @@
 #endif
 
 namespace hal {
+
+namespace {
+
+/* Masks remembered per "ns/key" so Settings labels skip the ~2 s PBKDF2 on
+ * every paint. Holds only "********"+last four chars, never the secret. */
+std::mutex g_mask_mu;
+std::map<std::string, std::string> g_masks;
+
+std::string slot_id(const char *ns, const char *key)
+{
+    return std::string(ns) + "/" + key;
+}
+
+std::string mask_of(const std::string &tok)
+{
+    std::string out = "********";
+    if (tok.size() > 8) out += tok.substr(tok.size() - 4);
+    return out;
+}
+
+void mask_remember(const char *ns, const char *key, const std::string &mask)
+{
+    std::lock_guard<std::mutex> lock(g_mask_mu);
+    g_masks[slot_id(ns, key)] = mask;
+}
+
+void mask_forget(const char *ns, const char *key)
+{
+    std::lock_guard<std::mutex> lock(g_mask_mu);
+    g_masks.erase(slot_id(ns, key));
+}
+
+} // namespace
 
 bool secret_exists(const char *ns, const char *key)
 {
@@ -81,6 +116,7 @@ bool secret_store(const char *ns, const char *key, const char *plaintext,
             refusal = "Encryption failed.";
         }
     }
+    std::string mask = (!clear && !refusal) ? mask_of(value) : std::string();
     secret_scrub(value);
     if (refusal) { if (err) *err = refusal; return false; }
 
@@ -92,6 +128,8 @@ bool secret_store(const char *ns, const char *key, const char *plaintext,
     if (clear) p.remove(key);
     else       p.putBytes(key, ct.data(), ct.size());
     p.end();
+    if (clear) mask_forget(ns, key);
+    else       mask_remember(ns, key, mask);
     return true;
 #else
     (void)ns; (void)key; (void)plaintext; (void)trim_ws;
@@ -104,10 +142,31 @@ std::string secret_mask_display(const char *ns, const char *key)
 {
     std::string tok = secret_load(ns, key);
     if (tok.empty()) return secret_exists(ns, key) ? "(locked)" : "(not set)";
-    std::string out = "********";
-    if (tok.size() > 8) out += tok.substr(tok.size() - 4);
+    std::string out = mask_of(tok);
+    mask_remember(ns, key, out);
     secret_scrub(tok);
     return out;
+}
+
+bool secret_mask_peek(const char *ns, const char *key, std::string &out)
+{
+    if (!secret_exists(ns, key)) {
+        mask_forget(ns, key);
+        out = "(not set)";
+        return true;
+    }
+    if (!notes_crypto_is_unlocked()) {
+        mask_forget(ns, key);
+        out = "(locked)";
+        return true;
+    }
+    std::lock_guard<std::mutex> lock(g_mask_mu);
+    auto it = g_masks.find(slot_id(ns, key));
+    if (it != g_masks.end()) {
+        out = it->second;
+        return true;
+    }
+    return false;
 }
 
 void secret_purge_legacy(const char *ns, const char *legacy_key)

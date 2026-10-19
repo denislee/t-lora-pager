@@ -37,6 +37,10 @@ void key_latency(uint64_t us);
 void frame_begin();
 // One lv_timer_handler() pass.
 void frame(uint64_t us);
+// One display flush (vendor disp_flush hook): pixels, byte-swap and SPI push time (P7.9).
+void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us);
+// Boot marker (OPTIMIZATION_PHASE6.md G.1): records esp_timer time under a static name; the whole list is printed once, at the first report after the first display flush.
+void boot_mark(const char *name);
 // Named span, logged when >= 5 ms.
 void span(const char *name, uint64_t us);
 // Dump the default group's members (why = short label).

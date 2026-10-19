@@ -927,6 +927,7 @@ void hw_low_power_loop()
 
 #if defined(ARDUINO)
 #include <Esp.h>
+#include <esp_heap_caps.h>
 #endif
 
 void hw_get_heap_info(uint32_t &total, uint32_t &free)
@@ -937,6 +938,23 @@ void hw_get_heap_info(uint32_t &total, uint32_t &free)
 #else
     total = 512 * 1024;
     free = 256 * 1024;
+#endif
+}
+
+void hw_get_heap_stats(heap_stats_t &s)
+{
+#if defined(ARDUINO)
+    s.int_free       = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s.int_min_free   = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s.int_largest    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s.psram_free     = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    s.psram_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+#else
+    s.int_free       = 200 * 1024;
+    s.int_min_free   = 150 * 1024;
+    s.int_largest    = 100 * 1024;
+    s.psram_free     = 6 * 1024 * 1024;
+    s.psram_min_free = 5 * 1024 * 1024;
 #endif
 }
 

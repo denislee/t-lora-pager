@@ -21,6 +21,8 @@ struct sys_label_t {
     lv_obj_t *datetime_label         = nullptr;
     lv_obj_t *wifi_rssi_label        = nullptr;
     lv_obj_t *batt_voltage_label     = nullptr;
+    lv_obj_t *heap_int_label         = nullptr;
+    lv_obj_t *heap_psram_label       = nullptr;
 
     lv_obj_t *wifi_ssid_label        = nullptr;
     lv_obj_t *ip_info_label          = nullptr;
@@ -39,6 +41,9 @@ struct sys_label_t {
     std::string cached_datetime;              // last string written to datetime_label
     int       cached_rssi           = 1;      // 1 = sentinel (valid RSSI is always <= 0)
     int       cached_batt_mv        = -1;     // -1 = sentinel (valid voltage > 0)
+    // KB-granular signatures so the 1 Hz tick only rewrites on a change.
+    uint32_t  cached_heap_key       = UINT32_MAX;
+    uint32_t  cached_psram_key      = UINT32_MAX;
 };
 
 sys_label_t sys_label;
@@ -86,6 +91,30 @@ void sys_timer_event_cb(lv_timer_t *)
     if (mp.battery_voltage != sys_label.cached_batt_mv) {
         sys_label.cached_batt_mv = mp.battery_voltage;
         lv_label_set_text_fmt(sys_label.batt_voltage_label, "%d mV", mp.battery_voltage);
+    }
+
+    // Heap telemetry (P7.49). Keys are KB-granular mixes of the counters, so
+    // the 1 Hz tick only rewrites a label when a value actually moved.
+    heap_stats_t hs;
+    hw_get_heap_stats(hs);
+    uint32_t int_free_kb    = hs.int_free / 1024;
+    uint32_t int_min_kb     = hs.int_min_free / 1024;
+    uint32_t int_largest_kb = hs.int_largest / 1024;
+    uint32_t heap_key = (int_free_kb << 20) ^ (int_min_kb << 10) ^ int_largest_kb;
+    if (sys_label.heap_int_label && heap_key != sys_label.cached_heap_key) {
+        sys_label.cached_heap_key = heap_key;
+        lv_label_set_text_fmt(sys_label.heap_int_label, "%uK free, min %uK, blk %uK",
+                              (unsigned)int_free_kb, (unsigned)int_min_kb,
+                              (unsigned)int_largest_kb);
+    }
+
+    uint32_t psram_free_kb = hs.psram_free / 1024;
+    uint32_t psram_min_kb  = hs.psram_min_free / 1024;
+    uint32_t psram_key = (psram_free_kb << 16) ^ psram_min_kb;
+    if (sys_label.heap_psram_label && psram_key != sys_label.cached_psram_key) {
+        sys_label.cached_psram_key = psram_key;
+        lv_label_set_text_fmt(sys_label.heap_psram_label, "%uK free, min %uK",
+                              (unsigned)psram_free_kb, (unsigned)psram_min_kb);
     }
 
     if (!sys_label.info_loaded) {
@@ -191,6 +220,9 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 
     snprintf(buffer, sizeof(buffer), "%d mV", hw_get_battery_voltage());
     sys_label.batt_voltage_label = add_info_row("Battery", buffer);
+
+    sys_label.heap_int_label = add_info_row("RAM", "...");
+    sys_label.heap_psram_label = add_info_row("PSRAM", "...");
 
 #if defined(HAS_SD_CARD_SOCKET)
     const char *storage_name = "SD Total";

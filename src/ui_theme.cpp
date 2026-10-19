@@ -726,12 +726,25 @@ static void new_theme_apply_cb(lv_theme_t * th, lv_obj_t * obj)
     }
 }
 
-void theme_init()
+bool theme_init()
 {
     lv_display_t * disp = lv_display_get_default();
     const lv_font_t *font = get_system_font();
     if (!font) font = MAIN_FONT;
     bool had_styles = s_styles_built;
+    // {style, dark, font} fully determine the theme. Settings exit calls this
+    // unconditionally for a possible font change; rebuilding an unchanged
+    // theme restyled and relaid out the whole UI (336 style refreshes and
+    // 1,592 layout marks per exit, P7.11).
+    static int last_style = -1, last_dark = -1;
+    static const lv_font_t *last_font = nullptr;
+    const int style = (int)ui_style_get();
+    const int dark = ui_style_is_dark() ? 1 : 0;
+    if (had_styles && style == last_style && dark == last_dark && font == last_font)
+        return false;
+    last_style = style;
+    last_dark = dark;
+    last_font = font;
     s_pal = &palette_for(ui_style_get());
     s_theme_styles = &k_theme_styles[ui_style_get()];
     // Classic uses a black primary; Pixel Iso, Hotel and BeOS take the accent.
@@ -745,6 +758,7 @@ void theme_init()
     // Styles existed before this call (a live style switch): ask every object
     // to re-apply them so the new palette takes effect without a rebuild.
     if (had_styles) lv_obj_report_style_change(NULL);
+    return true;
 }
 
 // --- Raised blocks + backdrop ---------------------------------------------

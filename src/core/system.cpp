@@ -13,6 +13,7 @@
 
 #include "../apps/menu_app.h"
 
+#include <atomic>
 #include <vector>
 
 LV_FONT_DECLARE(lv_font_montserrat_18);
@@ -43,6 +44,23 @@ void System::init() {
     AppManager::getInstance().switchApp("MainMenu", _menuPanel);
     showMenu();
 }
+
+namespace {
+// Last colour written to each status-bar icon (lv_color_to_u32), so the 1 s
+// refresh only calls lv_obj_set_style_text_color on a change (P6.7).
+// applyChromeStyle repaints the icons directly, so it resets these.
+uint32_t prev_sd_color   = UINT32_MAX;
+uint32_t prev_bt_color   = UINT32_MAX;
+uint32_t prev_wifi_color = UINT32_MAX;
+uint32_t prev_hub_color  = UINT32_MAX;
+uint32_t prev_usb_color  = UINT32_MAX;
+
+void reset_icon_color_cache()
+{
+    prev_sd_color = prev_bt_color = prev_wifi_color =
+        prev_hub_color = prev_usb_color = UINT32_MAX;
+}
+} // namespace
 
 void System::setupGlobalUI() {
     theme_init();
@@ -186,10 +204,12 @@ void System::setupGlobalUI() {
     lv_timer_create([](lv_timer_t *t) {
         System& self = System::getInstance();
 
-        // Hold the status-bar refresh while the user is typing: the cadence
-        // triggers an FFat walk (file count) plus an I2C battery read, both
-        // under the instance mutex that the keyboard reader also needs.
-        if (core::isTextInputFocused()) return;
+        // While the user types, skip only the two costly reads: the gauge I2C
+        // sweep and the FFat file-count walk. The clock, radio icons and the
+        // USB "unsafe to disconnect" box keep updating — the keyboard reader no
+        // longer needs the instance mutex (IS.1), so the old blanket hold only
+        // froze them (P7.17).
+        const bool typing = core::isTextInputFocused();
 
         // P4.10: per-tick caches for labels whose text rarely changes.
         // LVGL 9 lv_label_set_text* unconditionally copies the string and calls
@@ -244,6 +264,7 @@ void System::setupGlobalUI() {
             prev_batt_pct    = -1;
             prev_file_count  = UINT32_MAX;
             prev_mem_free_kb = UINT32_MAX;
+            reset_icon_color_cache();
         }
 
         // Status bar update logic. Use the system clock (not the RTC over
@@ -266,16 +287,18 @@ void System::setupGlobalUI() {
             prev_clock_year = timeinfo.tm_year;
         }
 
-        monitor_params_t params;
-        hw_get_monitor_params(params);
-        if (self._statBattLabel &&
-            (params.battery_percent != prev_batt_pct ||
-             params.is_charging     != prev_is_charging)) {
-            lv_label_set_text_fmt(self._statBattLabel, "%s %d%%",
-                                  ui_battery_icon(params.battery_percent, params.is_charging),
-                                  params.battery_percent);
-            prev_batt_pct    = params.battery_percent;
-            prev_is_charging = params.is_charging;
+        if (!typing) {
+            monitor_params_t params;
+            hw_get_monitor_params(params);
+            if (self._statBattLabel &&
+                (params.battery_percent != prev_batt_pct ||
+                 params.is_charging     != prev_is_charging)) {
+                lv_label_set_text_fmt(self._statBattLabel, "%s %d%%",
+                                      ui_battery_icon(params.battery_percent, params.is_charging),
+                                      params.battery_percent);
+                prev_batt_pct    = params.battery_percent;
+                prev_is_charging = params.is_charging;
+            }
         }
 
         // When the back button is visible, push the memory readout right so
@@ -287,13 +310,23 @@ void System::setupGlobalUI() {
             back_off += 4;
         }
 
+        // lv_obj_set_style_text_color invalidates even when the colour is the
+        // same, which made these icons repaint every second (P6.7). Only write
+        // on a change.
+        auto set_icon_color = [](lv_obj_t *obj, lv_color_t c, uint32_t &prev) {
+            uint32_t v = lv_color_to_u32(c);
+            if (v == prev) return;
+            prev = v;
+            lv_obj_set_style_text_color(obj, c, 0);
+        };
+
         bool sd_online = (HW_SD_ONLINE & hw_get_device_online());
         if (self._statSDLabel) {
             if (sd_online) {
                 lv_obj_add_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
             } else {
                 lv_obj_clear_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_style_text_color(self._statSDLabel, lv_palette_main(LV_PALETTE_RED), 0);
+                set_icon_color(self._statSDLabel, lv_palette_main(LV_PALETTE_RED), prev_sd_color);
             }
         }
 
@@ -304,8 +337,8 @@ void System::setupGlobalUI() {
         if (self._statBTLabel) {
             if (hw_get_bt_enable()) {
                 lv_obj_clear_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_style_text_color(self._statBTLabel,
-                    hw_get_ble_kb_connected() ? ui_color_title_icon() : ui_color_title_muted(), 0);
+                set_icon_color(self._statBTLabel,
+                    hw_get_ble_kb_connected() ? ui_color_title_icon() : ui_color_title_muted(), prev_bt_color);
             } else {
                 lv_obj_add_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
             }
@@ -314,8 +347,8 @@ void System::setupGlobalUI() {
         if (self._statWifiLabel) {
             if (hw_get_wifi_enable()) {
                 lv_obj_clear_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_style_text_color(self._statWifiLabel,
-                    hw_get_wifi_connected() ? ui_color_title_icon() : ui_color_title_muted(), 0);
+                set_icon_color(self._statWifiLabel,
+                    hw_get_wifi_connected() ? ui_color_title_icon() : ui_color_title_muted(), prev_wifi_color);
             } else {
                 lv_obj_add_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
             }
@@ -326,8 +359,8 @@ void System::setupGlobalUI() {
         // so it doesn't stutter the LVGL timer thread.
         if (self._statHubLabel) {
             if (hal::hub_is_enabled()) {
-                static bool hub_reachable = false;
-                static bool hub_probe_running = false;
+                static std::atomic<bool> hub_reachable{false};
+                static std::atomic<bool> hub_probe_running{false};
                 static uint8_t hub_tick = 0;
 
                 // Probe every 30 s, matching the freshness window the consumers
@@ -336,38 +369,43 @@ void System::setupGlobalUI() {
                 // wake) per tick; the status-bar icon now lags <=30 s. (PB.10)
                 if (!hub_probe_running && ++hub_tick >= 30) {
                     hub_tick = 0;
-                    hub_probe_running = true;
-#ifdef ARDUINO
-                    void **args = (void**)malloc(2 * sizeof(void*));
-                    if (args == nullptr) {
-                        hub_probe_running = false;
+                    // No Wi-Fi: the probe can only fail, so don't spawn a task for it (P7.40).
+                    if (!hw_get_wifi_connected()) {
+                        hub_reachable = false;
                     } else {
-                        args[0] = (void*)&hub_reachable;
-                        args[1] = (void*)&hub_probe_running;
-                        BaseType_t spawned = xTaskCreate([](void *arg) {
-                            bool res = hal::hub_is_reachable();
-                            hal::hub_note_reachable(res);   // publish for non-blocking readers
-                            bool *reachable_ptr = (bool*)((void**)arg)[0];
-                            bool *running_ptr = (bool*)((void**)arg)[1];
-                            *reachable_ptr = res;
-                            *running_ptr = false;
-                            free(arg);
-                            vTaskDelete(NULL);
-                        }, "hub_probe", 3072, args, 1, NULL);
-                        if (spawned != pdPASS) {
-                            free(args);
+                        hub_probe_running = true;
+#ifdef ARDUINO
+                        void **args = (void**)malloc(2 * sizeof(void*));
+                        if (args == nullptr) {
                             hub_probe_running = false;
+                        } else {
+                            args[0] = (void*)&hub_reachable;
+                            args[1] = (void*)&hub_probe_running;
+                            BaseType_t spawned = xTaskCreate([](void *arg) {
+                                bool res = hal::hub_is_reachable();
+                                hal::hub_note_reachable(res);   // publish for non-blocking readers
+                                auto *reachable_ptr = (std::atomic<bool>*)((void**)arg)[0];
+                                auto *running_ptr = (std::atomic<bool>*)((void**)arg)[1];
+                                reachable_ptr->store(res);
+                                running_ptr->store(false);
+                                free(arg);
+                                vTaskDelete(NULL);
+                            }, "hub_probe", 3072, args, 1, NULL);
+                            if (spawned != pdPASS) {
+                                free(args);
+                                hub_probe_running = false;
+                            }
                         }
-                    }
 #else
-                    hub_reachable = hal::hub_is_reachable();
-                    hal::hub_note_reachable(hub_reachable);
-                    hub_probe_running = false;
+                        hub_reachable = hal::hub_is_reachable();
+                        hal::hub_note_reachable(hub_reachable.load());
+                        hub_probe_running = false;
 #endif
+                    }
                 }
                 lv_obj_clear_flag(self._statHubLabel, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_style_text_color(self._statHubLabel,
-                    hub_reachable ? ui_color_title_icon() : ui_color_title_muted(), 0);
+                set_icon_color(self._statHubLabel,
+                    hub_reachable.load() ? ui_color_title_icon() : ui_color_title_muted(), prev_hub_color);
             } else {
                 lv_obj_add_flag(self._statHubLabel, LV_OBJ_FLAG_HIDDEN);
             }
@@ -379,11 +417,11 @@ void System::setupGlobalUI() {
             if (usb_mounted) {
                 lv_obj_clear_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
                 if (hw_is_usb_msc_writing()) {
-                    lv_obj_set_style_text_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_RED), 0);
+                    set_icon_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_RED), prev_usb_color);
                 } else if (hw_is_usb_msc_reading()) {
-                    lv_obj_set_style_text_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_BLUE), 0);
+                    set_icon_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_BLUE), prev_usb_color);
                 } else {
-                    lv_obj_set_style_text_color(self._statUSBLabel, ui_color_title_icon(), 0);
+                    set_icon_color(self._statUSBLabel, ui_color_title_icon(), prev_usb_color);
                 }
             } else {
                 lv_obj_add_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
@@ -438,7 +476,7 @@ void System::setupGlobalUI() {
             if (settings.show_file_count) {
                 static uint8_t file_count_tick = 0;
                 static uint32_t cached_file_count = UINT32_MAX;
-                if (cached_file_count == UINT32_MAX || ++file_count_tick >= 60) {
+                if (!typing && (cached_file_count == UINT32_MAX || ++file_count_tick >= 60)) {
                     cached_file_count = hw_count_internal_files();
                     file_count_tick = 0;
                 }
@@ -528,6 +566,7 @@ void System::applyChromeStyle() {
     if (_statBTLabel)       lv_obj_set_style_text_color(_statBTLabel, ui_color_title_icon(), 0);
     if (_statWifiLabel)     lv_obj_set_style_text_color(_statWifiLabel, ui_color_title_icon(), 0);
     if (_statFileCountLabel) lv_obj_set_style_text_color(_statFileCountLabel, ui_color_title_muted(), 0);
+    reset_icon_color_cache();   // the next status tick re-applies the state colours
 }
 
 void System::showMenu() {

@@ -621,7 +621,9 @@ static TgUplink tg_uplink_now()
 static TgUplink tg_uplink()
 {
 #ifdef ARDUINO
-    (void)internet_available();
+    // The phone wins whenever the link is up, so the verdict is unused then:
+    // skip the 30 s probe task + TCP connect (P7.40).
+    if (!hw_link_connected()) (void)internet_available();
 #endif
     return tg_uplink_now();
 }
@@ -882,9 +884,16 @@ static void tg_drain_tick(lv_timer_t *t);   // fwd (defined after the kickers)
 static bool load_bridge_auth(std::string &url, std::string &auth, std::string *err)
 {
     url = load_pref("url");
+    // No bridge to hand the phone as its fallback: skip the token decrypt, a
+    // ~2 s PBKDF2 on a key-cache miss that also holds the shared SHA engine
+    // (P7.8). With a bridge set the token is still needed even on the phone
+    // path — tg_phone_request forwards it for the phone's bridge fallback.
+    if (url.empty() && hw_link_connected()) {
+        auth.clear();
+        return true;
+    }
     std::string tok = load_token_plain();
-    if ((url.empty() || tok.empty()) && hw_link_connected()) {
-        hal::secret_scrub(tok);
+    if (tok.empty() && hw_link_connected()) {   // locked or unset: phone only
         url.clear();
         auth.clear();
         return true;
@@ -1915,6 +1924,12 @@ void tg_cfg_set_url(const char *url)
 std::string tg_cfg_get_token_display()
 {
     return hal::secret_mask_display(TG_PREFS_NS, "token_enc");
+}
+
+// Cheap form for the UI thread — see hal::secret_mask_peek.
+bool tg_cfg_peek_token_display(std::string &out)
+{
+    return hal::secret_mask_peek(TG_PREFS_NS, "token_enc", out);
 }
 
 bool tg_cfg_set_token(const char *tok, std::string *err)

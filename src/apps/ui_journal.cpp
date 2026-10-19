@@ -481,12 +481,13 @@ static void bg_refresh_done(BgRefreshResult &r)
     uint32_t before = entries_signature(journal_entries);
     journal_entries = std::move(r.entries);
     s_entries_gen++;
-    // Any write besides our own index rewrite may be missing from this scan.
-    uint32_t expect = r.fs_gen + (r.saved_index ? 1u : 0u);
-    bool fresh = (hw_get_filesystem_generation() == expect);
+    // Any write since the snapshot may be missing from this scan. Our own index
+    // rewrite does not count: hw_save_preferred_bytes never bumps the generation
+    // for _idx.bin (P7.23 — expecting +1 here made every rewrite look stale).
+    bool fresh = (hw_get_filesystem_generation() == r.fs_gen);
     cache_valid = fresh;
-    // Our own index write set the dirty flag; clear it so the next open does not
-    // rescan for nothing (delete_confirm_cb does the same).
+    // The index now reflects every write the dirty flag recorded; clear it so
+    // the next open does not rescan for nothing (delete_confirm_cb does the same).
     if (fresh && r.saved_index) hw_set_filesystem_dirty(false);
     if (menu == NULL || parent_obj == NULL) return;  // closed: keep the warm cache
     if (entries_signature(journal_entries) != before) {

@@ -53,6 +53,8 @@ std::string tg_cfg_get_url();
 void        tg_cfg_set_url(const char *url);
 // Masked display string ("(not set)", "(locked)", or "********abcd").
 std::string tg_cfg_get_token_display();
+// Cheap form for the UI thread; false = needs a decrypt (hal::secret_mask_peek).
+bool tg_cfg_peek_token_display(std::string &out);
 // Saves the bearer AES-wrapped under the notes passphrase. Refuses to
 // persist a non-empty token unless notes crypto is enabled AND the
 // session is unlocked; on refusal returns false with `*err` populated.
@@ -92,6 +94,8 @@ void        nsync_cfg_set_repo(const char *v);
 std::string nsync_cfg_get_branch();
 void        nsync_cfg_set_branch(const char *v);
 std::string nsync_cfg_get_token_display();
+// Cheap form for the UI thread; false = needs a decrypt (hal::secret_mask_peek).
+bool nsync_cfg_peek_token_display(std::string &out);
 // Saves the PAT AES-wrapped under the notes passphrase. Refuses to persist
 // a non-empty token unless notes crypto is enabled AND the session is
 // unlocked; on refusal returns false with `*err` populated. Passing an

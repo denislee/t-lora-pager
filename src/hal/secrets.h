@@ -40,6 +40,13 @@ bool secret_store(const char *ns, const char *key, const char *plaintext,
  * plus the last four characters. The decrypted copy is scrubbed. */
 std::string secret_mask_display(const char *ns, const char *key);
 
+/* Non-blocking variant for the UI thread (P7.3). Fills `out` and returns
+ * true when the answer needs no PBKDF2: "(not set)", "(locked)", or a mask
+ * remembered this session from an earlier secret_store / secret_mask_display
+ * of the same slot. Returns false when only a decrypt can tell; call
+ * secret_mask_display off the UI thread then (it remembers the result). */
+bool secret_mask_peek(const char *ns, const char *key, std::string &out);
+
 /* Drop a plaintext predecessor key that pre-dates encryption (e.g. the
  * bare "token" slot that lived next to "token_enc" during migration).
  * Idempotent — safe to call on every boot. */

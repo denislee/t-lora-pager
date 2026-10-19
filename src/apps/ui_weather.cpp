@@ -764,7 +764,13 @@ static WeatherFetchResult *weather_fetch(const std::string &key,
 
     std::string direct_status;
 #ifdef ARDUINO
-    if (try_direct) {
+    // With the phone up, Wi-Fi without internet would cost the 5 s connect
+    // timeout (up to the 120 s TLS handshake default) before falling back to
+    // it; a short TCP probe settles that first (P7.39). Without the phone
+    // there is nothing to fall back to, so go straight to direct.
+    if (try_direct &&
+        (!hw_link_connected() ||
+         hw_ping_internet("1.1.1.1", 53, 1500, nullptr, nullptr))) {
         if (direct_fetch(key, user_city, res->forecast, direct_status)) {
             res->ok = true;
             res->status_color = UI_COLOR_MUTED;

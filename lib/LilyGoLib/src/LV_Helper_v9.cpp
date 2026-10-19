@@ -33,6 +33,13 @@ static lv_color16_t *buf_sw  = NULL;
 #define _SWAP_COLORS
 #endif
 
+#ifdef INPUT_PROFILE
+// [LOCAL PATCH] P7.9: per-stage flush timing for the profile build. Defined
+// weak so the library links without src/core/input_profile.cpp.
+#include <esp_timer.h>
+extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) __attribute__((weak));
+#endif
+
 static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p)
 {
     size_t len = lv_area_get_size(area);
@@ -40,8 +47,16 @@ static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *
     uint32_t h = lv_area_get_height(area);
     auto *plane = (LilyGo_Display *)lv_display_get_user_data(disp_drv);
 
+#ifdef INPUT_PROFILE
+    int64_t t0 = esp_timer_get_time();
+#endif
+
 #ifdef _SWAP_COLORS
     lv_draw_sw_rgb565_swap(color_p, len);
+#endif
+
+#ifdef INPUT_PROFILE
+    int64_t t1 = esp_timer_get_time();
 #endif
 
 #if defined(ARDUINO_T_LORA_PAGER) || defined(ARDUINO_T_WATCH_S3_ULTRA)
@@ -50,6 +65,11 @@ static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *
 #else
     // log_d("x1:%d y1:%d x2:%d y2:%d", area->x1, area->y1, area->x2 + 1, area->y2 + 1);
     plane->pushColors(area->x1, area->y1, area->x2 + 1, area->y2 + 1, (uint16_t *)color_p);
+#endif
+
+#ifdef INPUT_PROFILE
+    int64_t t2 = esp_timer_get_time();
+    if (lvh_prof_flush) lvh_prof_flush((uint32_t)len, (uint32_t)(t1 - t0), (uint32_t)(t2 - t1));
 #endif
 
     lv_display_flush_ready( disp_drv );
