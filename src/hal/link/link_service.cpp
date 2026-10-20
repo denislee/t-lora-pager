@@ -83,6 +83,7 @@ struct State {
     uint32_t total_timeouts = 0;
 
     size_t packet_size = 0;
+    size_t rx_queue_packets = 0;
     std::string peer_name;
 
     /* Battery-change baseline for evt.battery. */
@@ -341,6 +342,7 @@ void service_on_connect(const TransportOps &ops) {
 
     s.send_packet = ops.send_packet;
     s.packet_size = ops.packet_size;
+    s.rx_queue_packets = ops.rx_queue_packets;
     s.peer_name = ops.peer_name;
     s.rx_packets = 0;
     s.tx_packets = 0;
@@ -548,11 +550,19 @@ void service_get_stats(HwLinkStats &out) {
     out.link_resets = s.total_resets + (s.rpc ? s.rpc->stats().link_resets : 0);
     out.malformed = s.total_malformed + (s.rpc ? s.rpc->stats().malformed : 0);
     out.timeouts = s.total_timeouts + (s.rpc ? s.rpc->stats().timeouts : 0);
+    out.rx_dropped = 0; /* the transport fills it */
 }
 
 size_t service_packet_size() {
     LinkLock lock(__func__);
     return state().packet_size;
+}
+
+void service_rx_window(uint16_t &credits, unsigned &ack_every) {
+    LinkLock lock(__func__);
+    State &s = state();
+    credits = rx_credits_for(s.rx_queue_packets, s.packet_size);
+    ack_every = rx_ack_every_for(credits);
 }
 
 bool service_call(const std::string &method, const std::string &params_json, uint32_t timeout_ms,
@@ -668,6 +678,9 @@ bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_
     }
     in.buf.clear();
     in.buf.reserve(size);
+    uint16_t credits = 0;
+    unsigned ack_every = 0;
+    service_rx_window(credits, ack_every);
     in.rx.reset(new XferReceiver(
         size,
         [xfer](uint32_t off, const uint8_t *bytes, size_t n) -> bool {
@@ -682,7 +695,7 @@ bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_
             State &st = state();
             return st.rpc && st.rpc->send_bulk(MsgType::Ack, xfer, payload);
         },
-        INITIAL_CREDITS, 4, 0));
+        credits, ack_every, 0));
     LINK_LOG("accept expect id=%u size=%u early=%u", static_cast<unsigned>(xfer),
              static_cast<unsigned>(size), static_cast<unsigned>(in.early.size()));
 

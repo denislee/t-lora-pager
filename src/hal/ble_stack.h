@@ -32,6 +32,10 @@ namespace ble {
 /** Device name advertised and used by existing bonds; do not change. */
 constexpr const char *DEVICE_NAME = "lilygo-pager";
 
+/** ATT_MTU requested from peers; PagerLink packet size P = ATT_MTU - 3 = 244,
+ * the same P as over TCP. */
+constexpr uint16_t ATT_MTU = 247;
+
 /** Init the stack on first use, then start advertising. True on success. */
 bool enable();
 

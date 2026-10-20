@@ -39,6 +39,7 @@ std::string hw_link_peer_name();
 // Cumulative link counters for the diagnostics UI.
 struct HwLinkStats {
     uint32_t rx_packets, tx_packets, rx_messages, link_resets, malformed, timeouts;
+    uint32_t rx_dropped;  // packets the transport dropped before the service saw them (BLE rx queue full / oversize)
 };
 
 // Copy the current counters into `out`.

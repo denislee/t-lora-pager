@@ -29,6 +29,10 @@ struct TransportOps {
     std::function<bool(const uint8_t *pkt, size_t len)> send_packet;
     /** Negotiated packet size P (PROTOCOL.md §2). */
     size_t packet_size = 0;
+    /** Packets the transport can buffer ahead of the service; 0 = unbounded
+     * (it back-pressures, e.g. TCP). Bulk receivers size their credit grant to
+     * it (rx_credits_for, P7.30). */
+    size_t rx_queue_packets = 0;
     /** Human-readable peer name, e.g. "tcp:127.0.0.1:54321". */
     std::string peer_name;
 };
@@ -50,6 +54,10 @@ std::string service_peer_name();
 void service_get_stats(HwLinkStats &out);
 /** Negotiated packet size P (0 when no transport is connected). */
 size_t service_packet_size();
+/** Credit grant and ack_every for a new bulk receiver, sized to the connected
+ * transport's receive queue (rx_credits_for / rx_ack_every_for). Takes the
+ * service lock. */
+void service_rx_window(uint16_t &credits, unsigned &ack_every);
 
 /** Register the sys.* handlers on `rpc` (implemented in handlers_sys.cpp). */
 void register_sys_handlers(Rpc &rpc);

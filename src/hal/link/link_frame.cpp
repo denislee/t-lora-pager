@@ -235,4 +235,32 @@ bool decode_ack(const uint8_t *payload, size_t len, uint32_t &next, uint16_t &cr
     return true;
 }
 
+uint16_t rx_credits_for(size_t queue_packets, size_t packet_size) {
+    if (packet_size < 2) {
+        return 1;
+    }
+    if (queue_packets == 0) {
+        return INITIAL_CREDITS;
+    }
+    const size_t per_message = packets_per_message(MAX_MESSAGE, packet_size);
+    const size_t fit = per_message == 0 ? 0 : queue_packets / per_message;
+    if (fit < 1) {
+        return 1;
+    }
+    if (fit > INITIAL_CREDITS) {
+        return INITIAL_CREDITS;
+    }
+    return static_cast<uint16_t>(fit);
+}
+
+unsigned rx_ack_every_for(uint16_t credits) {
+    if (credits >= 8) {
+        return 4;
+    }
+    if (credits >= 4) {
+        return 2;
+    }
+    return 1;
+}
+
 }  // namespace pagerlink

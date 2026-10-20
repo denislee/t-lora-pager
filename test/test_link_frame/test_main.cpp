@@ -289,6 +289,30 @@ static void test_segmenter_send_sink_abort(void)
     TEST_ASSERT_EQUAL_UINT8(1, seg.seq()); /* seq advanced only for the accepted packet */
 }
 
+static void test_rx_window(void)
+{
+    /* 4102 = MAX_MESSAGE; 244/20 are the TCP/BLE and minimum packet sizes. */
+    TEST_ASSERT_EQUAL_UINT(17, (unsigned)packets_per_message(4102, 244));
+    TEST_ASSERT_EQUAL_UINT(216, (unsigned)packets_per_message(4102, 20));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)packets_per_message(0, 244));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)packets_per_message(10, 1));
+
+    TEST_ASSERT_EQUAL_UINT16(16, rx_credits_for(0, 244));    /* unbounded */
+    TEST_ASSERT_EQUAL_UINT16(16, rx_credits_for(272, 244));  /* 16 messages, capped */
+    TEST_ASSERT_EQUAL_UINT16(16, rx_credits_for(1000, 244)); /* more than a window */
+    TEST_ASSERT_EQUAL_UINT16(2, rx_credits_for(34, 244));
+    TEST_ASSERT_EQUAL_UINT16(1, rx_credits_for(16, 244)); /* less than one message */
+    TEST_ASSERT_EQUAL_UINT16(1, rx_credits_for(272, 20));
+    TEST_ASSERT_EQUAL_UINT16(1, rx_credits_for(100, 1)); /* bad packet size */
+
+    TEST_ASSERT_EQUAL_UINT(4, rx_ack_every_for(16));
+    TEST_ASSERT_EQUAL_UINT(4, rx_ack_every_for(8));
+    TEST_ASSERT_EQUAL_UINT(2, rx_ack_every_for(7));
+    TEST_ASSERT_EQUAL_UINT(2, rx_ack_every_for(4));
+    TEST_ASSERT_EQUAL_UINT(1, rx_ack_every_for(3));
+    TEST_ASSERT_EQUAL_UINT(1, rx_ack_every_for(1));
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -303,5 +327,6 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_crc32_vectors);
     RUN_TEST(test_segmenter_send_rejects_bad_args);
     RUN_TEST(test_segmenter_send_sink_abort);
+    RUN_TEST(test_rx_window);
     return UNITY_END();
 }

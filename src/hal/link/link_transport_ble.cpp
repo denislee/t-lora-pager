@@ -13,7 +13,9 @@
  * the event into a queue and return. The `link` task drains it and is the
  * only caller of the service lifecycle (connect / packet / tick /
  * disconnect). It blocks indefinitely while no companion is connected, and
- * pumps service_tick() at 1 Hz while one is.
+ * pumps service_tick() at 1 Hz while one is. The queue holds a whole credit
+ * window (P7.30); a packet that still finds it full is dropped rather than
+ * blocking the host task.
  *
  * Security: `rx` requires an encrypted link (bonded Just Works today).
  * PROTOCOL.md §1 also asks for authentication, which needs passkey pairing
@@ -37,6 +39,7 @@
 #include <cstring>
 #include <string>
 
+#include "hal/ble_stack.h"
 #include "hal/link/link_frame.h"
 #include "hal/link/link_service.h"
 #include "hal/link/link_uuids.h"
@@ -49,11 +52,17 @@ namespace ble {
 namespace {
 
 constexpr uint16_t NO_HANDLE = 0xFFFF;
-/** Largest packet accepted from a write (ATT_MTU 517 − 3, rounded down). */
-constexpr size_t MAX_PACKET = 512;
-/** Event queue depth: the phone may burst write-without-response packets. */
-constexpr UBaseType_t QUEUE_DEPTH = 32;
-constexpr UBaseType_t QUEUE_DEPTH_INTERNAL = 8;
+/** Largest packet: ATT_MTU − 3 (ble_stack.h caps the MTU, so a write can't be larger). */
+constexpr size_t MAX_PACKET = hal::ble::ATT_MTU - 3;
+static_assert(MAX_PACKET == TCP_PACKET, "BLE and TCP use the same packet size");
+/** Packets kept free for REQ/RES/ACK traffic interleaved with a bulk window. */
+constexpr UBaseType_t RX_SLACK = 32;
+/** Event queue depth: a full implicit credit window (INITIAL_CREDITS max-size messages,
+ * PROTOCOL.md §4) plus slack, so a phone that respects credits never overflows it (P7.30).
+ * ~76 KB of PSRAM. */
+constexpr UBaseType_t QUEUE_DEPTH =
+    INITIAL_CREDITS * packets_per_message(MAX_MESSAGE, MAX_PACKET) + RX_SLACK;
+constexpr UBaseType_t QUEUE_DEPTH_INTERNAL = 16;
 constexpr uint32_t TICK_MS = 1000;
 constexpr uint32_t TASK_STACK = 8192;
 /** notify() fails while the controller is out of mbufs; retry this long. */
@@ -80,13 +89,19 @@ std::atomic<bool> g_user_off{false};
 /** Companion connection handle; written only by the link task. */
 std::atomic<uint16_t> g_companion{NO_HANDLE};
 std::atomic<uint32_t> g_dropped{0};
+std::atomic<uint32_t> g_dropped_total{0};
+/** Queue depth in use; 0 until create_queue() picks a path. */
+UBaseType_t g_queue_depth = 0;
 
 bool accepting() { return g_bt_on.load() && !g_user_off.load(); }
 
 /**
  * Queue an event. Producers are the NimBLE host task and hw_link_enable();
- * g_post_lock serialises them over the one static staging Event (~520 B, kept
- * off the host task's stack). Waits at most 50 ms for queue space.
+ * g_post_lock serialises them over the one static staging Event (~250 B, kept
+ * off the host task's stack). Control events wait up to 50 ms for queue space;
+ * packets never wait (a dropped packet costs one message, which the transfer
+ * engine's rewind/retransmit recovers, P7.29), so HID reports and GATT events
+ * are never stalled behind link_task.
  */
 void post(Kind kind, uint16_t conn, const uint8_t *data, size_t len) {
     if (!g_queue || !g_post_lock) {
@@ -100,8 +115,11 @@ void post(Kind kind, uint16_t conn, const uint8_t *data, size_t len) {
     if (data && ev.len) {
         std::memcpy(ev.data, data, ev.len);
     }
-    if (xQueueSend(g_queue, &ev, pdMS_TO_TICKS(50)) != pdTRUE) {
+    /* Packets must never block the NimBLE host task. */
+    const TickType_t wait = (kind == Kind::Packet) ? 0 : pdMS_TO_TICKS(50);
+    if (xQueueSend(g_queue, &ev, wait) != pdTRUE) {
         g_dropped.fetch_add(1);
+        g_dropped_total.fetch_add(1);
     }
     xSemaphoreGive(g_post_lock);
 }
@@ -111,6 +129,7 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         const NimBLEAttValue v = chr->getValue();
         if (v.size() > MAX_PACKET) {
             g_dropped.fetch_add(1);
+            g_dropped_total.fetch_add(1);
             return;
         }
         // Empty writes pass through: they reset the reassembler (PROTOCOL.md §2).
@@ -152,12 +171,18 @@ void companion_up(uint16_t conn, const std::string &addr) {
     if (mtu < 23) {
         mtu = 23;
     }
+    if (mtu > hal::ble::ATT_MTU) {
+        mtu = hal::ble::ATT_MTU;
+    }
     TransportOps ops;
     ops.send_packet = [conn](const uint8_t *pkt, size_t len) { return send_packet(conn, pkt, len); };
     ops.packet_size = static_cast<size_t>(mtu) - 3;
+    ops.rx_queue_packets =
+        g_queue_depth > 2 * RX_SLACK ? g_queue_depth - RX_SLACK : g_queue_depth / 2;
     ops.peer_name = "ble:" + addr;
     g_companion.store(conn);
-    LINK_LOG("[link] companion %s up, mtu=%u", ops.peer_name.c_str(), static_cast<unsigned>(mtu));
+    LINK_LOG("[link] companion %s up, mtu=%u rxq=%u", ops.peer_name.c_str(),
+             static_cast<unsigned>(mtu), static_cast<unsigned>(ops.rx_queue_packets));
     service_on_connect(ops);
 }
 
@@ -208,7 +233,7 @@ void handle(const Event &ev) {
 }
 
 void link_task(void *) {
-    // Event is ~520 B; static so the task stack only carries handler depth.
+    // Event is ~250 B; static so the task stack only carries handler depth.
     static Event ev;
     uint32_t last_tick = millis();
     for (;;) {
@@ -223,7 +248,9 @@ void link_task(void *) {
         }
         const uint32_t dropped = g_dropped.exchange(0);
         if (dropped) {
-            LINK_LOG("[link] dropped %u events (queue full or oversize)", static_cast<unsigned>(dropped));
+            LINK_LOG("[link] dropped %u events (queue full or oversize), %u total",
+                     static_cast<unsigned>(dropped),
+                     static_cast<unsigned>(g_dropped_total.load()));
         }
     }
 }
@@ -233,8 +260,10 @@ QueueHandle_t create_queue() {
     static StaticQueue_t qs;
     void *storage = heap_caps_malloc(QUEUE_DEPTH * sizeof(Event), MALLOC_CAP_SPIRAM);
     if (storage) {
+        g_queue_depth = QUEUE_DEPTH;
         return xQueueCreateStatic(QUEUE_DEPTH, sizeof(Event), static_cast<uint8_t *>(storage), &qs);
     }
+    g_queue_depth = QUEUE_DEPTH_INTERNAL;
     return xQueueCreate(QUEUE_DEPTH_INTERNAL, sizeof(Event));
 }
 
@@ -312,6 +341,9 @@ bool hw_link_connected() { return pagerlink::service_connected(); }
 
 std::string hw_link_peer_name() { return pagerlink::service_peer_name(); }
 
-void hw_link_get_stats(HwLinkStats &out) { pagerlink::service_get_stats(out); }
+void hw_link_get_stats(HwLinkStats &out) {
+    pagerlink::service_get_stats(out);
+    out.rx_dropped = g_dropped_total.load();
+}
 
 #endif  // ARDUINO

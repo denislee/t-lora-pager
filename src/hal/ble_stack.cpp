@@ -122,7 +122,7 @@ bool init_stack() {
     NimBLEDevice::setSecurityAuth(true, false, true);
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
     // ATT_MTU 247 → PagerLink packet size 244, the same P as over TCP.
-    NimBLEDevice::setMTU(247);
+    NimBLEDevice::setMTU(ATT_MTU);
 
     g_server = NimBLEDevice::createServer();
     g_server->setCallbacks(new ServerCallbacks(), true);

@@ -142,7 +142,9 @@ and drops the receiver when the call ends.
 
 - The receiver grants credits with ACK. The initial grant is implicit:
   **16** DATA messages (not packets: a DATA message carries up to 4092 B).
-  The sender keeps at most `credits` DATA messages unacknowledged.
+  The sender keeps at most `credits` DATA messages unacknowledged. A receiver
+  may grant fewer (the pager sizes its grant to its BLE receive queue) and
+  should then ACK often enough that the window never runs dry.
 - `ACK.next_expected_offset` acknowledges every byte below it.
   `ACK.credits` replaces (not adds to) the sender's window, counting from
   that offset.

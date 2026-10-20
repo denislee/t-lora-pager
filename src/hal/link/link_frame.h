@@ -42,6 +42,31 @@ constexpr uint16_t INITIAL_CREDITS = 16;
  * rewind (PROTOCOL.md §4). */
 constexpr uint32_t XFER_RETRANSMIT_MS = 2000;
 
+/**
+ * Link packets one message of `msg_len` bytes needs at `packet_size`: each
+ * packet is one flags byte plus `packet_size - 1` message bytes. Returns 0
+ * when `packet_size < 2` or `msg_len == 0`.
+ */
+constexpr size_t packets_per_message(size_t msg_len, size_t packet_size) {
+    /* single return: the ESP32 toolchain builds as C++11 */
+    return (packet_size < 2 || msg_len == 0) ? 0
+                                             : (msg_len + (packet_size - 2)) / (packet_size - 1);
+}
+
+/**
+ * Bulk credit grant that fits a receive queue of `queue_packets` packets: how
+ * many MAX_MESSAGE-sized DATA messages fit at `packet_size`, clamped to
+ * 1..INITIAL_CREDITS. 0 queue_packets = unbounded (the transport
+ * back-pressures, e.g. TCP) -> INITIAL_CREDITS. packet_size < 2 -> 1.
+ */
+uint16_t rx_credits_for(size_t queue_packets, size_t packet_size);
+
+/**
+ * ack_every for a grant, so the receiver ACKs before the sender's window runs
+ * out: 4 at >= 8 credits, 2 at 4..7, else 1.
+ */
+unsigned rx_ack_every_for(uint16_t credits);
+
 /** Message type field. */
 enum class MsgType : uint8_t { Req = 0, Res = 1, Err = 2, Evt = 3, Data = 4, Ack = 5 };
 

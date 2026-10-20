@@ -408,6 +408,9 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
     t.overwrite = overwrite;
     t.last_ms = now_ms();
     t.rto_ms = t.last_ms;
+    uint16_t credits = 0;
+    unsigned ack_every = 0;
+    service_rx_window(credits, ack_every);
     t.rx.reset(new XferReceiver(
         size,
         [v, part](uint32_t off, const uint8_t *bytes, size_t n) {
@@ -416,7 +419,7 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
         [id](const std::string &payload) {
             return g_rpc && g_rpc->send_bulk(MsgType::Ack, id, payload);
         },
-        INITIAL_CREDITS, 4, 0));
+        credits, ack_every, 0));
     g_xfers.push_back(std::move(t));
 
     result.begin_object().key("xfer").uint_val(id).key("offset").uint_val(0).end_object();
