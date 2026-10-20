@@ -718,6 +718,7 @@ Value = expected payoff. Risk = chance of regression. "HW" = needs a hardware te
   - Never block the host task: drop-and-count, or use a lossless ring buffer.
   - Log `g_dropped` and `link_resets` per transfer (`hw_link_get_stats`).
 - **Verify:** HW upload test.
+- **Status (2026-10-19): ✅ code, HW upload test owed.** Queue sized to a whole window (304 events), packets never block the host task, grant sized to the queue, drops counted in `HwLinkStats::rx_dropped`. Details: §16 "P7.30".
 
 ### P7.31: PagerLink bulk sends starve BLE HID (MED-HIGH, LOW-MED risk)
 - **Where:** `hal/ble_hid.cpp` `send_report` (ignores the `notify()` result); `link_transport_ble.cpp` `send_packet`; NimBLE `MSYS_1_BLOCK_COUNT` 12 × 256 B.
@@ -1132,7 +1133,7 @@ never overwrite rows.
 
 **Phase C: transfer reliability** (needs `make protocol-test` plus hardware)
 1. **P7.29** engine fix in all three implementations, with lossy tests. ✅ code 2026-10-19 (§16); HW smoke test owed.
-2. **P7.30** BLE grant and queue.
+2. **P7.30** BLE grant and queue. ✅ code 2026-10-19 (§16); HW upload test owed.
 3. **P7.32** event-driven notify.
 4. **P7.31** HID starvation.
 5. **P7.33** connection params, MTU change, DLE.
@@ -1215,6 +1216,7 @@ _Append-only. One row per run: date, commit, scenario, what was measured, result
 | 2026-10-19 | c9c1a96 + §16 (P7.29) | Go engine, lossy harness, one dropped DATA (interleaved delivery unless noted) | DATA sends / ACKs / timer firings: 8 KB last DATA (batched) · 64 KB #5 · 100 KB #5 · 256 KB #0 · 256 KB #5 | 6/3/1 · 29/7/0 · 42/9/0 · 81/18/0 · 81/19/0 (was stall · 241 · 2,113 · ~904,000) |
 | 2026-10-19 | c9c1a96 + §16 (P7.29) | negative control: new Go tests against the `c9c1a96` `xfer.go` | interleaved 100 KB #5 / 256 KB #0 | 1,285 sends (limit 52) / livelock: 1,117,506 sends in 200k steps |
 | 2026-10-19 | c9c1a96 + §16 (P7.29) | `pio run -e tlora_pager` | image / static DRAM | 2,869,113 B (68.4 %) / 94,712 B |
+| 2026-10-19 | 57c44e2 + P7.30 working tree | `pio run -e tlora_pager` | image / static DRAM | 2,869,904 B (68.4 %) / 94,192 B (−520: the two static `Event`s shrink with `MAX_PACKET` 512 → 244) |
 
 Scratch artifacts from this audit (not in the repo, may be cleaned by the OS):
 - `/tmp/xsim` (transfer simulation)
@@ -1271,3 +1273,17 @@ emulator's simulated battery %. No other visual change from P6.7, P7.11 or P7.3.
 **Next open items**, in order:
 1. The `tlora_pager_profile` hardware session (§G.1 boot rows now included), plus every ☐ above.
 2. Phase C: P7.30 (BLE grant and queue), then P7.32, P7.31, P7.33, P7.34.
+
+### 2026-10-19 (later): P7.30
+
+| ID | Status | What changed | Verified | HW owed |
+|---|---|---|---|---|
+| P7.30 | ✅ code | **Queue holds a whole window:** `link_transport_ble.cpp` `QUEUE_DEPTH` = `INITIAL_CREDITS` × `packets_per_message(MAX_MESSAGE, MAX_PACKET)` + `RX_SLACK` (16 × 17 + 32 = 304 events, ~76 KB PSRAM; internal fallback 16). `MAX_PACKET` = `hal::ble::ATT_MTU` − 3 = 244 (new `ble_stack.h` constant, also used by `setMTU`; `static_assert` == `TCP_PACKET`), so `Event` is ~250 B (P7.37 part). **Host task never blocks on a packet:** `post()` waits 0 ticks for `Kind::Packet`, 50 ms only for control events; a drop costs one message, which P7.29 recovers. **Grant sized to the queue:** new `TransportOps::rx_queue_packets` (BLE: depth − slack; TCP: 0 = unbounded, so the emulator is unchanged) and `service_rx_window()` → pure `rx_credits_for()` / `rx_ack_every_for()` (`link_frame.h/.cpp`). Both receivers (`handlers_fs.cpp` `handle_write_begin`, `link_service.cpp` `service_accept_expect`) use it. At P = 244 it is still 16 credits / ack every 4, so nothing changes on the wire; at a small MTU (P = 20) the grant drops to 1 credit / ack every 1 after the first ACK. **Drops visible:** `HwLinkStats::rx_dropped` (cumulative, BLE only), the per-tick log prints the total, `companion_up` logs `rxq=`. `PROTOCOL.md` §4: a receiver may grant fewer than 16 and should then ACK often. | Unity `test_rx_window` (new), native 146/146; `make protocol-test` exit 0 (Unity 76, Go, PagerKit 113); `tlora_pager`, `twatchs3`, `twatch_ultra`, `emulator_lora_pager` build; emulator `pagerlink smoke` all steps passed. | ☐ phone → pager `fs.write` of 256 KB+ and a `tg.messages` bulk reply: `rx_dropped` stays 0, no `[link] dropped` lines |
+
+**Not done in P7.30, by choice:**
+- The **implicit first window** is still 16 messages; a receiver can only shrink it after its first ACK. At P = 244 the queue now covers it. At a tiny MTU it doesn't, but P7.29 recovers, and iOS always negotiates a large MTU. Shrinking the first window would need a `window` field in `fs.write.begin` / the tg.* params (a protocol change in all three engines).
+- `link_task` priority (1, core 0) unchanged: the queue now absorbs its slow FFat writes. Revisit with P7.34 if `rx_dropped` shows up on hardware.
+
+**Next open items**, in order:
+1. The `tlora_pager_profile` hardware session plus every ☐ above (no device was attached in this session).
+2. Phase C: P7.32 (event-driven notify, pump off the caller's worker), then P7.31, P7.33, P7.34.
