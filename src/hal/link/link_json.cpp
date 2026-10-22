@@ -3,8 +3,9 @@
  * @brief     Implementation of the minimal PagerLink JSON writer/reader.
  *
  * Pure C++17, no Arduino / ESP-IDF headers (see link_json.h). The reader is a
- * recursive-descent validator over an owned copy of the input; it records the
- * raw text span of every top-level member so values are decoded lazily.
+ * recursive-descent validator over an owned copy of the input (parse) or a
+ * borrowed one (parse_view, json_array_spans; P7.50); it records the raw text
+ * span of every top-level member so values are decoded lazily.
  */
 #include "hal/link/link_json.h"
 
@@ -103,7 +104,8 @@ void JsonWriter::clear()
 namespace {
 
 /* Value of four hex digits at `p`, or -1 if out of range / not hex. */
-int hex4(const std::string &t, size_t p)
+template <class T>  /* std::string or JsonObject::Text */
+int hex4(const T &t, size_t p)
 {
     if (p + 4 > t.size()) return -1;
     int v = 0;
@@ -147,8 +149,8 @@ void append_utf8(std::string &out, uint32_t cp)
 
 void JsonObject::skip_ws(size_t &i) const
 {
-    while (i < text_.size()) {
-        const char c = text_[i];
+    while (i < src().size()) {
+        const char c = src()[i];
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ++i;
         else break;
     }
@@ -156,7 +158,7 @@ void JsonObject::skip_ws(size_t &i) const
 
 bool JsonObject::parse_string(size_t &i, std::string *out, bool strict) const
 {
-    const std::string &t = text_;
+    const Text t = src();
     const size_t n = t.size();
     if (i >= n || t[i] != '"') return false;
     ++i;
@@ -218,7 +220,7 @@ bool JsonObject::parse_string(size_t &i, std::string *out, bool strict) const
 
 bool JsonObject::parse_number(size_t &i) const
 {
-    const std::string &t = text_;
+    const Text t = src();
     const size_t n = t.size();
     if (i < n && t[i] == '-') ++i;
     if (i >= n) return false;
@@ -242,15 +244,15 @@ bool JsonObject::parse_number(size_t &i) const
 bool JsonObject::parse_literal(size_t &i, const char *lit) const
 {
     const size_t len = std::strlen(lit);
-    if (text_.compare(i, len, lit) != 0) return false;
+    if (src().compare(i, len, lit) != 0) return false;
     i += len;
     return true;
 }
 
 bool JsonObject::parse_value(size_t &i, int depth)
 {
-    if (i >= text_.size()) return false;
-    switch (text_[i]) {
+    if (i >= src().size()) return false;
+    switch (src()[i]) {
     case '{': return parse_object(i, depth, false);
     case '[': return parse_array(i, depth);
     case '"': return parse_string(i, nullptr, false);
@@ -264,25 +266,25 @@ bool JsonObject::parse_value(size_t &i, int depth)
 bool JsonObject::parse_object(size_t &i, int depth, bool top)
 {
     if (depth > 16) return false;
-    if (i >= text_.size() || text_[i] != '{') return false;
+    if (i >= src().size() || src()[i] != '{') return false;
     ++i;
     skip_ws(i);
-    if (i < text_.size() && text_[i] == '}') { ++i; return true; }
+    if (i < src().size() && src()[i] == '}') { ++i; return true; }
     for (;;) {
         skip_ws(i);
         std::string key;
         if (!parse_string(i, &key, false)) return false;
         skip_ws(i);
-        if (i >= text_.size() || text_[i] != ':') return false;
+        if (i >= src().size() || src()[i] != ':') return false;
         ++i;
         skip_ws(i);
         const size_t vstart = i;
         if (!parse_value(i, depth + 1)) return false;
         if (top) members_.push_back(Member{key, vstart, i - vstart});
         skip_ws(i);
-        if (i >= text_.size()) return false;
-        if (text_[i] == ',') { ++i; continue; }
-        if (text_[i] == '}') { ++i; return true; }
+        if (i >= src().size()) return false;
+        if (src()[i] == ',') { ++i; continue; }
+        if (src()[i] == '}') { ++i; return true; }
         return false;
     }
 }
@@ -290,17 +292,17 @@ bool JsonObject::parse_object(size_t &i, int depth, bool top)
 bool JsonObject::parse_array(size_t &i, int depth)
 {
     if (depth > 16) return false;
-    if (i >= text_.size() || text_[i] != '[') return false;
+    if (i >= src().size() || src()[i] != '[') return false;
     ++i;
     skip_ws(i);
-    if (i < text_.size() && text_[i] == ']') { ++i; return true; }
+    if (i < src().size() && src()[i] == ']') { ++i; return true; }
     for (;;) {
         skip_ws(i);
         if (!parse_value(i, depth + 1)) return false;
         skip_ws(i);
-        if (i >= text_.size()) return false;
-        if (text_[i] == ',') { ++i; continue; }
-        if (text_[i] == ']') { ++i; return true; }
+        if (i >= src().size()) return false;
+        if (src()[i] == ',') { ++i; continue; }
+        if (src()[i] == ']') { ++i; return true; }
         return false;
     }
 }
@@ -320,7 +322,38 @@ bool JsonObject::parse(const char *text, size_t len)
 
     text_.swap(tmp.text_);
     members_.swap(tmp.members_);
+    borrowed_ = false;
+    view_ = nullptr;
+    view_len_ = 0;
     return true;
+}
+
+bool JsonObject::parse_view(const char *text, size_t len)
+{
+    if (text == nullptr) return false;
+
+    JsonObject tmp;
+    tmp.borrowed_ = true;
+    tmp.view_ = text;
+    tmp.view_len_ = len;
+    size_t i = 0;
+    tmp.skip_ws(i);
+    if (!tmp.parse_object(i, 1, true)) return false;
+    tmp.skip_ws(i);
+    if (i != len) return false;
+
+    text_.clear();
+    members_.swap(tmp.members_);
+    borrowed_ = true;
+    view_ = text;
+    view_len_ = len;
+    return true;
+}
+
+const std::string &JsonObject::text() const
+{
+    if (borrowed_) text_.assign(view_, view_len_); /* fresh copy each call: the bytes may change */
+    return text_;
 }
 
 const JsonObject::Member *JsonObject::find(const char *key) const
@@ -339,7 +372,7 @@ bool JsonObject::get_raw(const char *key, std::string &out) const
 {
     const Member *m = find(key);
     if (m == nullptr) return false;
-    out = text_.substr(m->off, m->len);
+    out.assign(src().data() + m->off, m->len);
     return true;
 }
 
@@ -359,7 +392,7 @@ bool JsonObject::get_int(const char *key, int64_t &out) const
 {
     const Member *m = find(key);
     if (m == nullptr) return false;
-    const std::string raw = text_.substr(m->off, m->len);
+    const std::string raw(src().substr(m->off, m->len));
     if (raw.find('.') != std::string::npos ||
         raw.find('e') != std::string::npos ||
         raw.find('E') != std::string::npos) {
@@ -377,7 +410,7 @@ bool JsonObject::get_double(const char *key, double &out) const
 {
     const Member *m = find(key);
     if (m == nullptr) return false;
-    const std::string raw = text_.substr(m->off, m->len);
+    const std::string raw(src().substr(m->off, m->len));
     char *end = nullptr;
     const double v = std::strtod(raw.c_str(), &end);
     if (end == raw.c_str() || *end != '\0') return false;
@@ -389,7 +422,7 @@ bool JsonObject::get_bool(const char *key, bool &out) const
 {
     const Member *m = find(key);
     if (m == nullptr) return false;
-    const std::string raw = text_.substr(m->off, m->len);
+    const std::string raw(src().substr(m->off, m->len));
     if (raw == "true")  { out = true;  return true; }
     if (raw == "false") { out = false; return true; }
     return false;
@@ -398,94 +431,81 @@ bool JsonObject::get_bool(const char *key, bool &out) const
 bool JsonObject::is_null(const char *key) const
 {
     const Member *m = find(key);
-    return m != nullptr && text_.compare(m->off, m->len, "null") == 0;
+    return m != nullptr && src().compare(m->off, m->len, "null") == 0;
 }
 
 bool JsonObject::get_object(const char *key, JsonObject &out) const
 {
     const Member *m = find(key);
     if (m == nullptr) return false;
-    const std::string raw = text_.substr(m->off, m->len);
+    const std::string raw(src().substr(m->off, m->len));
     if (raw.empty() || raw[0] != '{') return false;
     return out.parse(raw);
+}
+
+bool JsonObject::get_object_view(const char *key, JsonObject &out) const
+{
+    const Member *m = find(key);
+    if (m == nullptr) return false;
+    const Text t = src();
+    if (m->len == 0 || t[m->off] != '{') return false;
+    return out.parse_view(t.data() + m->off, m->len);
 }
 
 // ---------------------------------------------------------------------------
 // json_array_items
 // ---------------------------------------------------------------------------
 
+bool json_array_spans(const char *text, size_t len, std::vector<JsonSpan> &out)
+{
+    out.clear();
+    if (text == nullptr) return false;
+
+    /* Validate in place over a borrowed reader. Elements are parsed at the
+     * depth they had when json_array_items() wrapped the array as an object
+     * member ({"a":[...]}: array at 2, elements at 3), so the depth limit is
+     * unchanged. Each span is the exact value text (whitespace is skipped
+     * around it, never included). */
+    JsonObject r;
+    r.borrowed_ = true;
+    r.view_ = text;
+    r.view_len_ = len;
+    const int depth = 2;
+
+    size_t i = 0;
+    r.skip_ws(i);
+    if (i >= len || text[i] != '[') return false;
+    ++i;
+    r.skip_ws(i);
+    if (i < len && text[i] == ']') {
+        ++i;
+    } else {
+        for (;;) {
+            r.skip_ws(i);
+            const size_t b = i;
+            if (!r.parse_value(i, depth + 1)) { out.clear(); return false; }
+            out.push_back(JsonSpan{b, i - b});
+            r.skip_ws(i);
+            if (i >= len) { out.clear(); return false; }
+            if (text[i] == ',') { ++i; continue; }
+            if (text[i] == ']') { ++i; break; }
+            out.clear();
+            return false;
+        }
+    }
+    r.skip_ws(i);
+    if (i != len) { out.clear(); return false; }
+    return true;
+}
+
 bool json_array_items(const std::string &text, std::vector<std::string> &out)
 {
     out.clear();
-
-    /* Validate the whole text as exactly one JSON array by embedding it as the
-     * value of an object member, so we reuse the complete JsonObject::parse
-     * rules (escapes, depth limit, trailing-garbage rejection). */
-    std::string wrapped = "{\"a\":";
-    wrapped += text;
-    wrapped += "}";
-
-    JsonObject obj;
-    if (!obj.parse(wrapped)) return false;
-
-    std::string raw;
-    if (!obj.get_raw("a", raw)) return false;
-    if (raw.empty() || raw[0] != '[') return false;
-    /* The member must be the whole input: `[1],"b":[2]` also wraps validly. */
-    const size_t lead = text.find_first_not_of(" \t\r\n");
-    if (lead == std::string::npos || text.compare(lead, raw.size(), raw) != 0 ||
-        text.find_first_not_of(" \t\r\n", lead + raw.size()) != std::string::npos) {
-        return false;
-    }
-
-    /* Record the raw bytes [b, e) as one element, trimming surrounding
-     * spaces/tabs/CR/LF. An empty span records nothing (empty array case). */
-    auto emit = [&out, &raw](size_t b, size_t e) {
-        while (b < e) {
-            const char c = raw[b];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') ++b;
-            else break;
-        }
-        while (e > b) {
-            const char c = raw[e - 1];
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') --e;
-            else break;
-        }
-        if (e > b) out.push_back(raw.substr(b, e - b));
-    };
-
-    /* Walk raw[1 ..] tracking nesting of [ { vs ] } and whether we are inside
-     * a string; a backslash inside a string skips the next byte. A comma at
-     * depth 0 outside strings ends the current element, and the matching ']'
-     * at depth 0 (only one is possible, the input already validated) ends the
-     * array. */
-    int    depth = 0;
-    bool   in_string = false;
-    size_t start = 1;
-    for (size_t i = 1; i < raw.size(); ++i) {
-        const char c = raw[i];
-        if (in_string) {
-            if (c == '\\')       ++i;         /* skip the escaped byte */
-            else if (c == '"')   in_string = false;
-            continue;
-        }
-        if (c == '"') {
-            in_string = true;
-        } else if (c == '[' || c == '{') {
-            ++depth;
-        } else if (c == ']' || c == '}') {
-            if (depth == 0) {
-                if (c != ']') return false;   /* stray close bracket */
-                emit(start, i);
-                return true;
-            }
-            --depth;
-        } else if (c == ',' && depth == 0) {
-            emit(start, i);
-            start = i + 1;
-        }
-    }
-    return false; /* no matching final ']' */
+    std::vector<JsonSpan> spans;
+    if (!json_array_spans(text.data(), text.size(), spans)) return false;
+    out.reserve(spans.size());
+    for (const JsonSpan &sp : spans) out.push_back(text.substr(sp.off, sp.len));
+    return true;
 }
 
 }  // namespace pagerlink

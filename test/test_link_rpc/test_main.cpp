@@ -33,8 +33,8 @@ static std::deque<std::string> g_to_phone; /* messages addressed to the phone */
 static std::deque<std::string> g_to_pager; /* messages addressed to the pager */
 
 static uint32_t fake_clock(void) { return g_now; }
-static bool send_to_pager(const std::string &m) { g_to_pager.push_back(m); return true; }
-static bool send_to_phone(const std::string &m) { g_to_phone.push_back(m); return true; }
+static bool send_to_pager(const uint8_t *m, size_t n) { g_to_pager.emplace_back(reinterpret_cast<const char *>(m), n); return true; }
+static bool send_to_phone(const uint8_t *m, size_t n) { g_to_phone.emplace_back(reinterpret_cast<const char *>(m), n); return true; }
 
 static void reset_link(void) {
     g_now = 0;

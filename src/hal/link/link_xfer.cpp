@@ -104,18 +104,12 @@ XferState XferSender::pump() {
         }
 
         const size_t n = std::min(chunk_, static_cast<size_t>(size_ - next_));
-        std::string buf(n, '\0');
-        if (!read_(next_, reinterpret_cast<uint8_t *>(&buf[0]), n)) {
+        uint8_t *dst = encode_data_prepare(next_, n, payload_);
+        if (dst == nullptr || !read_(next_, dst, n)) {
             state_ = XferState::Failed;
             return state_;
         }
-
-        std::string payload;
-        if (!encode_data(next_, reinterpret_cast<const uint8_t *>(buf.data()), n, payload)) {
-            state_ = XferState::Failed;
-            return state_;
-        }
-        if (!send_(payload)) {
+        if (!send_(payload_.data(), payload_.size())) {
             state_ = XferState::Failed;
             return state_;
         }

@@ -53,12 +53,22 @@ void Rpc::defer(std::function<void()> fn) {
 // ---------------------------------------------------------------------------
 
 bool Rpc::send_message(MsgType t, uint16_t id, const std::string &payload) {
-    std::string msg;
-    if (!encode_message(t, id, reinterpret_cast<const uint8_t *>(payload.data()), payload.size(),
-                        msg)) {
+    return send_message(t, id, reinterpret_cast<const uint8_t *>(payload.data()), payload.size());
+}
+
+bool Rpc::send_message(MsgType t, uint16_t id, const uint8_t *payload, size_t len) {
+    if (tx_busy_) {
+        ByteBuf nested;
+        return encode_message_into(t, id, payload, len, nested) &&
+               send_(nested.data(), nested.size());
+    }
+    if (!encode_message_into(t, id, payload, len, tx_)) {
         return false;
     }
-    return send_(msg);
+    tx_busy_ = true;
+    const bool ok = send_(tx_.data(), tx_.size());
+    tx_busy_ = false;
+    return ok;
 }
 
 bool Rpc::send_err(uint16_t id, const char *code, const std::string &msg) {
@@ -122,10 +132,8 @@ bool Rpc::call(const std::string &method, const std::string &params_json, Respon
     w.end_object();
 
     const uint16_t id = alloc_id();
-    std::string msg;
-    if (!encode_message(MsgType::Req, id, reinterpret_cast<const uint8_t *>(w.str().data()),
-                        w.str().size(), msg)) {
-        return false;
+    if (w.str().size() > MAX_PAYLOAD) {
+        return false; /* what encode_message() rejected before the send */
     }
 
     Pending p;
@@ -134,7 +142,8 @@ bool Rpc::call(const std::string &method, const std::string &params_json, Respon
     p.cb = std::move(cb);
     pending_.push_back(std::move(p));
 
-    if (!send_(msg)) {
+    if (!send_message(MsgType::Req, id, reinterpret_cast<const uint8_t *>(w.str().data()),
+                      w.str().size())) {
         /* Roll the pending entry back; the id has already been consumed. */
         for (size_t i = 0; i < pending_.size(); ++i) {
             if (pending_[i].id == id) {
@@ -163,11 +172,15 @@ bool Rpc::send_bulk(MsgType type, uint16_t xfer, const std::string &payload) {
     return send_message(type, xfer, payload);
 }
 
+bool Rpc::send_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
+    return send_message(type, xfer, payload, len);
+}
+
 // ---------------------------------------------------------------------------
 // Incoming
 // ---------------------------------------------------------------------------
 
-void Rpc::handle_req(const Message &m) {
+void Rpc::handle_req(const MessageView &m) {
     /* A REQ must carry the other role's parity (PROTOCOL.md §3.2). */
     const bool need_even = (role_ == Role::Pager);
     const bool parity_ok = need_even ? (m.id != 0 && (m.id & 1u) == 0) : ((m.id & 1u) == 1);
@@ -178,7 +191,8 @@ void Rpc::handle_req(const Message &m) {
 
     JsonObject req;
     std::string method;
-    if (!req.parse(m.payload) || !req.get_string("m", method)) {
+    if (!req.parse(reinterpret_cast<const char *>(m.payload), m.len) ||
+        !req.get_string("m", method)) {
         stats_.bad_requests++;
         send_err(m.id, "bad_request", "bad request");
         return;
@@ -229,7 +243,7 @@ void Rpc::handle_req(const Message &m) {
     }
 }
 
-void Rpc::handle_res(const Message &m, bool is_result) {
+void Rpc::handle_res(const MessageView &m, bool is_result) {
     size_t idx = pending_.size();
     for (size_t i = 0; i < pending_.size(); ++i) {
         if (pending_[i].id == m.id) {
@@ -247,13 +261,14 @@ void Rpc::handle_res(const Message &m, bool is_result) {
     pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(idx));
 
     if (is_result) {
-        cb(true, m.payload, RpcError{});
+        cb(true, std::string(reinterpret_cast<const char *>(m.payload), m.len), RpcError{});
         return;
     }
 
     RpcError err;
     JsonObject obj;
-    if (!obj.parse(m.payload) || !obj.get_string("code", err.code)) {
+    if (!obj.parse(reinterpret_cast<const char *>(m.payload), m.len) ||
+        !obj.get_string("code", err.code)) {
         err.code = "internal";
     } else {
         obj.get_string("msg", err.msg); /* msg is optional */
@@ -261,10 +276,11 @@ void Rpc::handle_res(const Message &m, bool is_result) {
     cb(false, "", err);
 }
 
-void Rpc::handle_evt(const Message &m) {
+void Rpc::handle_evt(const MessageView &m) {
     JsonObject obj;
     std::string name;
-    if (!obj.parse(m.payload) || !obj.get_string("e", name)) {
+    if (!obj.parse(reinterpret_cast<const char *>(m.payload), m.len) ||
+        !obj.get_string("e", name)) {
         stats_.malformed++;
         return;
     }
@@ -286,8 +302,10 @@ void Rpc::handle_evt(const Message &m) {
 }
 
 void Rpc::on_message(const uint8_t *msg, size_t len) {
-    Message m;
-    if (decode_message(msg, len, m) != DecodeError::None) {
+    /* A view into the reassembler's buffer: valid for this call only; the
+     * REQ/RES/EVT paths copy what they keep (JsonObject::parse owns its text). */
+    MessageView m;
+    if (decode_message_view(msg, len, m) != DecodeError::None) {
         stats_.malformed++;
         return;
     }
@@ -308,8 +326,7 @@ void Rpc::on_message(const uint8_t *msg, size_t len) {
         case MsgType::Data:
         case MsgType::Ack:
             if (on_bulk_) {
-                on_bulk_(m.type, m.id, reinterpret_cast<const uint8_t *>(m.payload.data()),
-                         m.payload.size());
+                on_bulk_(m.type, m.id, m.payload, m.len);
             }
             break;
     }

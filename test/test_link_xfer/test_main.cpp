@@ -199,7 +199,9 @@ struct LossyRig {
                  std::memcpy(buf, src.data() + off, n);
                  return true;
              },
-             [this](const std::string &p) { return loop.send_data(p); }),
+             [this](const uint8_t *p, size_t n) {
+                 return loop.send_data(std::string(reinterpret_cast<const char *>(p), n));
+             }),
           rx(size,
              [this](uint32_t off, const uint8_t *b, size_t n) {
                  std::memcpy(dst.data() + off, b, n);
@@ -366,7 +368,7 @@ static void test_receiver_crc_matches_payload(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
     XferReceiver rx(
         size,
         [&](uint32_t off, const uint8_t *b, size_t n) {
@@ -416,7 +418,7 @@ static void test_round_trip_lossless(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
     XferReceiver rx(
         size,
         [&](uint32_t off, const uint8_t *b, size_t n) {
@@ -451,7 +453,7 @@ static void test_sender_respects_credits(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
 
     tx.pump(); /* no ACKs delivered yet */
 
@@ -473,7 +475,7 @@ static void test_ack_replaces_window(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
 
     tx.pump(); /* 16 messages in flight, next_ = 16*4092 */
 
@@ -504,7 +506,7 @@ static void test_rewind_on_duplicate_ack(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
     XferReceiver rx(
         size,
         [&](uint32_t off, const uint8_t *b, size_t n) {
@@ -598,7 +600,7 @@ static void test_zero_size_done(void) {
             reads++;
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
     XferReceiver rx(
         0,
         [&](uint32_t, const uint8_t *, size_t) {
@@ -631,7 +633,7 @@ static void test_resume_start_offset(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); }, 8184);
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); }, 8184);
 
     tx.pump();
     TEST_ASSERT_FALSE(loop.data.empty());
@@ -663,7 +665,7 @@ static void test_read_failure_fails(void) {
     Loop loop;
     XferSender tx(
         size, 4092, [](uint32_t, uint8_t *, size_t) { return false; },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
 
     TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Failed),
                             static_cast<uint8_t>(tx.pump()));
@@ -829,7 +831,7 @@ static void test_sender_one_rewind_per_acked(void) {
             std::memcpy(buf, src.data() + off, n);
             return true;
         },
-        [&](const std::string &p) { return loop.send_data(p); });
+        [&](const uint8_t *p, size_t n) { return loop.send_data(std::string(reinterpret_cast<const char *>(p), n)); });
 
     tx.pump();
     TEST_ASSERT_EQUAL_UINT32(16u * 4092u, tx.sent());
@@ -904,7 +906,9 @@ static void test_retransmit_contract(void) {
         reads++;
         return true;
     };
-    auto send = [&](const std::string &p) { return loop.send_data(p); };
+    auto send = [&](const uint8_t *p, size_t n) {
+        return loop.send_data(std::string(reinterpret_cast<const char *>(p), n));
+    };
 
     /* Nothing sent yet: nothing unacknowledged. */
     XferSender fresh(20 * 4092, 4092, read, send);

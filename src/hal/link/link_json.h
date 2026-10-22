@@ -19,6 +19,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -87,11 +88,19 @@ private:
     bool              after_key_ = false;
 };
 
+/** Byte span [off, off + len) of one value inside a caller's text. */
+struct JsonSpan {
+    size_t off;
+    size_t len;
+};
+
 /**
  * A validated JSON object. Only the top-level members are indexed; nested
- * objects are indexed on demand via get_object(). The input text is copied
- * into an owned buffer, and every member stores the byte span of its raw
- * value text, so values are decoded lazily (and exactly) by the getters.
+ * objects are indexed on demand via get_object(). parse() copies the input
+ * text into an owned buffer; parse_view() borrows the caller's buffer instead
+ * (P7.50). Every member stores the byte span of its raw value text, so values
+ * are decoded lazily (and exactly) by the getters, which always return owned
+ * copies.
  *
  * Duplicate keys are allowed by parse(); lookups return the last one.
  */
@@ -109,6 +118,13 @@ public:
     bool parse(const char *text, size_t len);
     /** Convenience overload for a std::string. */
     bool parse(const std::string &s) { return parse(s.data(), s.size()); }
+    /**
+     * parse() without the copy (P7.50): same validation, but the object
+     * BORROWS `text` — the bytes must stay valid and unchanged for as long as
+     * this object (or any copy of it, or any get_object_view() child) is used.
+     * Meant for a parse-and-read loop over a buffer the caller owns.
+     */
+    bool parse_view(const char *text, size_t len);
 
     /** Number of top-level members recorded. */
     size_t size() const { return members_.size(); }
@@ -131,10 +147,15 @@ public:
     bool get_bool(const char *key, bool &out) const;
     /** True when the member's value is the literal `null`. */
     bool is_null(const char *key) const;
-    /** Parse an object member into `out` (recursive). */
+    /** Parse an object member into `out` (recursive); `out` owns a copy. */
     bool get_object(const char *key, JsonObject &out) const;
-    /** The exact text of the object last parsed ("" before any parse). */
-    const std::string &text() const { return text_; }
+    /** get_object() with `out` borrowing this object's text (P7.50): `out` is
+     * valid only while this object's backing bytes are (its own buffer, or
+     * the caller's buffer for a parse_view() object). */
+    bool get_object_view(const char *key, JsonObject &out) const;
+    /** The exact text of the object last parsed ("" before any parse). A
+     * parse_view() object copies the borrowed bytes out on every call. */
+    const std::string &text() const;
 
 private:
     struct Member {
@@ -156,7 +177,34 @@ private:
     /** Validate the string at `i`; decode into *out when not null. */
     bool parse_string(size_t &i, std::string *out, bool strict) const;
 
-    std::string         text_;
+    /** Read-only byte view (the hardware build is gnu++11: no std::string_view). */
+    struct Text {
+        const char *p;
+        size_t      n;
+        size_t size() const { return n; }
+        const char *data() const { return p; }
+        char operator[](size_t i) const { return p[i]; }
+        std::string substr(size_t pos, size_t len) const { return std::string(p + pos, len); }
+        /** std::string::compare(pos, len, lit) semantics, as far as == 0 goes. */
+        int compare(size_t pos, size_t len, const char *lit) const {
+            const size_t avail = pos <= n ? n - pos : 0;
+            const size_t cnt = len < avail ? len : avail;
+            const size_t sl = std::strlen(lit);
+            if (cnt != sl) return cnt < sl ? -1 : 1;
+            return std::memcmp(p + pos, lit, cnt);
+        }
+    };
+    /** The text being read: the owned copy, or the borrowed bytes. */
+    Text src() const {
+        return borrowed_ ? Text{view_, view_len_} : Text{text_.data(), text_.size()};
+    }
+
+    friend bool json_array_spans(const char *text, size_t len, std::vector<JsonSpan> &out);
+
+    mutable std::string text_; /* owned text; filled lazily by text() when borrowed */
+    const char         *view_ = nullptr;
+    size_t              view_len_ = 0;
+    bool                borrowed_ = false;
     std::vector<Member> members_;
 };
 
@@ -167,5 +215,14 @@ private:
  * limit as JsonObject::parse). Returns false, leaving `out` cleared, otherwise.
  */
 bool json_array_items(const std::string &text, std::vector<std::string> &out);
+
+/**
+ * json_array_items() without the copies (P7.50): the same validation, but
+ * each element is returned as its byte span inside `text` (exact value bytes,
+ * no surrounding whitespace). Returns false, leaving `out` cleared, when
+ * `text` is not exactly one valid JSON array. Pair with
+ * JsonObject::parse_view() to read object elements in place.
+ */
+bool json_array_spans(const char *text, size_t len, std::vector<JsonSpan> &out);
 
 }  // namespace pagerlink

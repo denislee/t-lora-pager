@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "hal/link/link_json.h"
 
@@ -262,6 +263,143 @@ static void test_array_items_rejects(void)
     }
 }
 
+/* ------------------------------------------------------ json_array_spans */
+
+static void test_array_spans_basic(void)
+{
+    /* [ 1 , "a\"b" ,{"k":[2,3]}, null ] with surrounding whitespace. */
+    const std::string t = "  [ 1 , \"a\\\"b\" ,{\"k\":[2,3]}, null ]  ";
+    std::vector<JsonSpan> spans;
+    TEST_ASSERT_TRUE(json_array_spans(t.data(), t.size(), spans));
+    TEST_ASSERT_EQUAL(4, (int)spans.size());
+    TEST_ASSERT_EQUAL_STRING("1", t.substr(spans[0].off, spans[0].len).c_str());
+    TEST_ASSERT_EQUAL_STRING("\"a\\\"b\"", t.substr(spans[1].off, spans[1].len).c_str());
+    TEST_ASSERT_EQUAL_STRING("{\"k\":[2,3]}", t.substr(spans[2].off, spans[2].len).c_str());
+    TEST_ASSERT_EQUAL_STRING("null", t.substr(spans[3].off, spans[3].len).c_str());
+}
+
+static void test_array_spans_matches_items(void)
+{
+    static const char *const cases[] = {
+        "[]",
+        " [ ] ",
+        "[1,2,3]",
+        "[\"x\",{\"a\":1},[1,[2]],true,false,null,-1.5e3]",
+        "[ \"q\\\"\" , \"\\\\\" ]",
+    };
+    for (const char *src : cases) {
+        const std::string text(src);
+        std::vector<std::string> items;
+        std::vector<JsonSpan> spans;
+        TEST_ASSERT_TRUE(json_array_items(text, items));
+        TEST_ASSERT_TRUE(json_array_spans(text.data(), text.size(), spans));
+        TEST_ASSERT_EQUAL((int)items.size(), (int)spans.size());
+        for (size_t k = 0; k < items.size(); ++k) {
+            TEST_ASSERT_EQUAL_STRING(items[k].c_str(),
+                                     text.substr(spans[k].off, spans[k].len).c_str());
+        }
+    }
+}
+
+static void test_array_spans_rejects(void)
+{
+    static const char *const bad[] = {
+        "[1,]", "[1] x", "{}", "", "[", "[1 2]", "[1]]", "]",
+    };
+    for (const char *src : bad) {
+        std::vector<JsonSpan> spans;
+        spans.push_back(JsonSpan{1, 1}); /* stale entry must be dropped */
+        TEST_ASSERT_FALSE(json_array_spans(src, std::strlen(src), spans));
+        TEST_ASSERT_EQUAL(0, (int)spans.size());
+
+        std::vector<std::string> items;
+        TEST_ASSERT_FALSE(json_array_items(src, items));
+    }
+}
+
+static void test_array_spans_depth(void)
+{
+    for (int k = 1; k <= 20; ++k) {
+        std::string text(static_cast<size_t>(k), '[');
+        text.append(static_cast<size_t>(k), ']');
+
+        std::vector<JsonSpan> spans;
+        std::vector<std::string> items;
+        const bool spans_ok = json_array_spans(text.data(), text.size(), spans);
+        const bool items_ok = json_array_items(text, items);
+        TEST_ASSERT_TRUE(items_ok == spans_ok);
+        if (k == 15) {
+            TEST_ASSERT_TRUE(spans_ok); /* innermost array at depth 16 */
+        }
+        if (k == 16) {
+            TEST_ASSERT_FALSE(spans_ok); /* depth 17 */
+        }
+    }
+}
+
+/* --------------------------------------------------------- parse_view */
+
+static void test_parse_view_borrows(void)
+{
+    char buf[] = "{\"a\":\"x\",\"n\":5,\"o\":{\"t\":\"p\",\"w\":3}}";
+    JsonObject o;
+    TEST_ASSERT_TRUE(o.parse_view(buf, std::strlen(buf)));
+
+    std::string s;
+    TEST_ASSERT_TRUE(o.get_string("a", s));
+    TEST_ASSERT_EQUAL_STRING("x", s.c_str());
+
+    int64_t n = 0;
+    TEST_ASSERT_TRUE(o.get_int("n", n));
+    TEST_ASSERT_EQUAL_INT64(5, n);
+
+    JsonObject c;
+    TEST_ASSERT_TRUE(o.get_object_view("o", c));
+    TEST_ASSERT_TRUE(c.get_string("t", s));
+    TEST_ASSERT_EQUAL_STRING("p", s.c_str());
+    int64_t w = 0;
+    TEST_ASSERT_TRUE(c.get_int("w", w));
+    TEST_ASSERT_EQUAL_INT64(3, w);
+
+    TEST_ASSERT_TRUE(o.text() == std::string(buf));
+
+    /* The value bytes are borrowed: an in-place edit is visible through it. */
+    char *px = std::strchr(buf + 5, 'x');
+    TEST_ASSERT_NOT_NULL(px);
+    *px = 'y';
+    TEST_ASSERT_TRUE(o.get_string("a", s));
+    TEST_ASSERT_EQUAL_STRING("y", s.c_str());
+
+    /* A failed re-parse leaves the previous state untouched. */
+    TEST_ASSERT_FALSE(o.parse_view("{\"a\":}", 6));
+    TEST_ASSERT_TRUE(o.has("a"));
+    TEST_ASSERT_TRUE(o.get_string("a", s));
+    TEST_ASSERT_EQUAL_STRING("y", s.c_str());
+}
+
+static void test_parse_view_then_parse_owns(void)
+{
+    char buf[] = "{\"a\":\"x\"}";
+    JsonObject o;
+    TEST_ASSERT_TRUE(o.parse_view(buf, std::strlen(buf)));
+    TEST_ASSERT_TRUE(o.parse(std::string("{\"a\":\"z\"}")));
+
+    std::memset(buf, '?', std::strlen(buf));
+
+    std::string s;
+    TEST_ASSERT_TRUE(o.get_string("a", s));
+    TEST_ASSERT_EQUAL_STRING("z", s.c_str());
+
+    JsonObject owned;
+    TEST_ASSERT_TRUE(owned.parse(std::string("{\"o\":{\"t\":1}}")));
+    JsonObject child;
+    TEST_ASSERT_TRUE(owned.get_object_view("o", child));
+    int64_t t = 0;
+    TEST_ASSERT_TRUE(child.get_int("t", t));
+    TEST_ASSERT_EQUAL_INT64(1, t);
+    TEST_ASSERT_FALSE(owned.get_object_view("missing", child));
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -282,5 +420,11 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_array_items_escapes);
     RUN_TEST(test_array_items_empty);
     RUN_TEST(test_array_items_rejects);
+    RUN_TEST(test_array_spans_basic);
+    RUN_TEST(test_array_spans_matches_items);
+    RUN_TEST(test_array_spans_rejects);
+    RUN_TEST(test_array_spans_depth);
+    RUN_TEST(test_parse_view_borrows);
+    RUN_TEST(test_parse_view_then_parse_owns);
     return UNITY_END();
 }

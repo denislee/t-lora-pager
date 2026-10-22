@@ -375,19 +375,17 @@ void service_on_connect(const TransportOps &ops) {
 
     s.rpc.reset(new Rpc(
         Role::Pager,
-        [](const std::string &message) -> bool {
+        [](const uint8_t *message, size_t len) -> bool {
             State &st = state();
             if (!st.send_packet) {
                 return false;
             }
             /* Queue the message whole or not at all (P7.32). */
-            if (st.tx_room &&
-                !st.tx_room(packets_per_message(message.size(), st.packet_size))) {
+            if (st.tx_room && !st.tx_room(packets_per_message(len, st.packet_size))) {
                 return false;
             }
             return st.segmenter.send(
-                reinterpret_cast<const uint8_t *>(message.data()), message.size(),
-                st.packet_size, [&st](const uint8_t *pkt, size_t len) -> bool {
+                message, len, st.packet_size, [&st](const uint8_t *pkt, size_t len) -> bool {
                     if (!st.send_packet(pkt, len)) {
                         return false;
                     }
@@ -695,9 +693,9 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
             std::memcpy(buf, data + off, n);
             return true;
         },
-        [xfer](const std::string &payload) -> bool {
+        [xfer](const uint8_t *payload, size_t plen) -> bool {
             State &st = state();
-            return st.rpc && st.rpc->send_bulk(MsgType::Data, xfer, payload);
+            return st.rpc && st.rpc->send_bulk(MsgType::Data, xfer, payload, plen);
         },
         0));
     s.outbound.push_back(std::move(o));

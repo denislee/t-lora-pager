@@ -942,17 +942,18 @@ static bool fetch_chats(std::string base_url, const std::string &auth,
                          auth.c_str(), body, &code, err)) {
         return false;
     }
-    std::vector<std::string> items;
-    if (!pagerlink::json_array_items(body, items)) {
+    std::vector<pagerlink::JsonSpan> items;
+    if (!pagerlink::json_array_spans(body.data(), body.size(), items)) {
         if (err) *err = "Parse error";
         return false;
     }
     out.reserve(items.size());
     int unread_sum = 0;
-    for (const std::string &raw : items) {
+    // P7.50: spans/views borrow body (alive for the whole loop); the getters copy what they keep.
+    for (const pagerlink::JsonSpan &sp : items) {
         // A non-object element yields the defaults, as the cJSON parser did.
         pagerlink::JsonObject it;
-        const bool obj = it.parse(raw);
+        const bool obj = it.parse_view(body.data() + sp.off, sp.len);
         Chat c;
         c.id     = obj ? tg_json_num(it, "id") : 0;
         if (!obj || !it.get_string("title", c.title)) c.title = "(no title)";
@@ -969,14 +970,15 @@ static bool fetch_chats(std::string base_url, const std::string &auth,
 // message id seen (for the mark-read decision).
 static bool tg_parse_msgs(const std::string &body, FgResult *res, int *newest)
 {
-    std::vector<std::string> items;
-    if (!pagerlink::json_array_items(body, items)) return false;
+    std::vector<pagerlink::JsonSpan> items;
+    if (!pagerlink::json_array_spans(body.data(), body.size(), items)) return false;
     res->msgs.reserve(items.size());
     int newest_id = 0;
-    for (const std::string &raw : items) {
+    // P7.50: spans/views borrow body (alive for the whole loop); the getters copy what they keep.
+    for (const pagerlink::JsonSpan &sp : items) {
         // A non-object element yields the defaults, as the cJSON parser did.
         pagerlink::JsonObject it;
-        const bool obj = it.parse(raw);
+        const bool obj = it.parse_view(body.data() + sp.off, sp.len);
         Message m;
         bool out = false;
         m.id   = obj ? (int)tg_json_num(it, "id") : 0;
@@ -986,7 +988,7 @@ static bool tg_parse_msgs(const std::string &body, FgResult *res, int *newest)
         m.media_w = 0;
         m.media_h = 0;
         pagerlink::JsonObject md;
-        if (obj && it.get_object("media", md)) {
+        if (obj && it.get_object_view("media", md)) {
             if (!md.get_string("type", m.media_type)) m.media_type.clear();
             m.media_w = (int)tg_json_num(md, "w");
             m.media_h = (int)tg_json_num(md, "h");

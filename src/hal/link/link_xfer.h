@@ -33,6 +33,8 @@
 #include <functional>
 #include <string>
 
+#include "hal/link/link_buf.h"
+
 namespace pagerlink {
 
 /** Largest DATA chunk: MAX_PAYLOAD minus the u32 offset. */
@@ -52,8 +54,9 @@ class XferSender {
 public:
     /** Fill `buf` with exactly `n` bytes of the source at `offset`; false fails the transfer. */
     using ReadFn = std::function<bool(uint32_t offset, uint8_t *buf, size_t n)>;
-    /** Send one encoded DATA payload (u32 offset + bytes); false fails the transfer. */
-    using SendFn = std::function<bool(const std::string &data_payload)>;
+    /** Send one encoded DATA payload (u32 offset + bytes); false fails the transfer.
+     * The bytes are valid only for the call (a reused buffer, P7.36). */
+    using SendFn = std::function<bool(const uint8_t *data_payload, size_t len)>;
 
     /**
      * `chunk` is the DATA size (clamped to 1..MAX_DATA_CHUNK); every message
@@ -98,6 +101,9 @@ private:
     bool rewound_;  /* the current acked_ already used its one rewind */
     uint16_t credits_;
     XferState state_;
+    /* The DATA payload being sent: ReadFn fills it in place (P7.36). One
+     * MAX_PAYLOAD block, PSRAM-first, allocated at the first pump. */
+    ByteBuf payload_;
 };
 
 /** Receives `size` bytes of DATA in order and acknowledges them. */

@@ -84,6 +84,8 @@ constexpr uint32_t IDLE_TICK_MS = 10000;
 /** Minimum gap between two service_tick() runs, so a deadline that stays due
  * can't spin the task. */
 constexpr uint32_t MIN_TICK_GAP_MS = 20;
+/* P7.37: kept at 8 KB until the profile build's `[prof] stack free: link` (P7.49)
+ * is read during a 256 KB fs.write + tg bulk reply; shrink only from that number. */
 constexpr uint32_t TASK_STACK = 8192;
 /** Outbound packets queued for the tx task: a whole credit window of max-size
  * messages plus slack for RPC traffic (~84 KB of PSRAM, P7.32). */

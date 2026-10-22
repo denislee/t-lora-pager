@@ -9,6 +9,7 @@
 #include "hal/link/link_frame.h"
 
 #include <algorithm>
+#include <cstring>
 #include <utility>
 
 namespace pagerlink {
@@ -78,7 +79,38 @@ bool encode_message(MsgType t, uint16_t id, const uint8_t *payload, size_t len, 
     return true;
 }
 
+bool encode_message_into(MsgType t, uint16_t id, const uint8_t *payload, size_t len, ByteBuf &out) {
+    out.clear();
+    if (len > MAX_PAYLOAD || !out.reserve(MAX_MESSAGE)) {
+        return false;
+    }
+    uint8_t *p = out.data();
+    p[0] = PROTO_VERSION;
+    p[1] = static_cast<uint8_t>(t);
+    p[2] = static_cast<uint8_t>(id & 0xFF);
+    p[3] = static_cast<uint8_t>((id >> 8) & 0xFF);
+    p[4] = static_cast<uint8_t>(len & 0xFF);
+    p[5] = static_cast<uint8_t>((len >> 8) & 0xFF);
+    if (len != 0) {
+        std::memcpy(p + HEADER_SIZE, payload, len);
+    }
+    out.resize(HEADER_SIZE + len);
+    return true;
+}
+
 DecodeError decode_message(const uint8_t *buf, size_t len, Message &out) {
+    MessageView v;
+    const DecodeError e = decode_message_view(buf, len, v);
+    if (e != DecodeError::None) {
+        return e;
+    }
+    out.type = v.type;
+    out.id = v.id;
+    out.payload.assign(reinterpret_cast<const char *>(v.payload), v.len);
+    return DecodeError::None;
+}
+
+DecodeError decode_message_view(const uint8_t *buf, size_t len, MessageView &out) {
     if (len < HEADER_SIZE) {
         return DecodeError::Short;
     }
@@ -100,7 +132,8 @@ DecodeError decode_message(const uint8_t *buf, size_t len, Message &out) {
     }
     out.type = static_cast<MsgType>(type);
     out.id = id;
-    out.payload.assign(reinterpret_cast<const char *>(buf) + HEADER_SIZE, plen);
+    out.payload = buf + HEADER_SIZE;
+    out.len = plen;
     return DecodeError::None;
 }
 
@@ -115,6 +148,15 @@ bool Segmenter::send(const uint8_t *msg, size_t len, size_t packet_size, const S
         return false;
     }
     const size_t room = packet_size - 1;
+    /* One packet buffer for the whole message: on the stack up to
+     * SEGMENT_STACK_PACKET (every real transport), heap above (P7.36). */
+    uint8_t stack_pkt[SEGMENT_STACK_PACKET];
+    std::string heap_pkt;
+    uint8_t *pkt = stack_pkt;
+    if (packet_size > SEGMENT_STACK_PACKET) {
+        heap_pkt.resize(packet_size);
+        pkt = reinterpret_cast<uint8_t *>(&heap_pkt[0]);
+    }
     for (size_t off = 0; off < len; off += room) {
         const size_t take = std::min(room, len - off);
         uint8_t flags = seq_ & SEQ_MASK;
@@ -124,11 +166,9 @@ bool Segmenter::send(const uint8_t *msg, size_t len, size_t packet_size, const S
         if (off + room >= len) {
             flags |= FLAG_END;
         }
-        std::string pkt;
-        pkt.reserve(1 + take);
-        pkt.push_back(static_cast<char>(flags));
-        pkt.append(reinterpret_cast<const char *>(msg) + off, take);
-        if (!sink(reinterpret_cast<const uint8_t *>(pkt.data()), pkt.size())) {
+        pkt[0] = flags;
+        std::memcpy(pkt + 1, msg + off, take);
+        if (!sink(pkt, 1 + take)) {
             return false;
         }
         seq_ = (seq_ + 1) & SEQ_MASK;
@@ -171,6 +211,7 @@ void Reassembler::feed(const uint8_t *pkt, size_t len) {
         }
         partial_.clear();
         open_ = true;
+        partial_.reserve(MAX_MESSAGE); /* once; a failure shows up as Oversize below */
     } else if (!open_) {
         if (!discarding_) {
             on_reset_(ResetReason::UnexpectedContinue);
@@ -178,16 +219,15 @@ void Reassembler::feed(const uint8_t *pkt, size_t len) {
         return;
     }
 
-    if (partial_.size() + dlen > MAX_MESSAGE) {
+    if (partial_.size() + dlen > MAX_MESSAGE || !partial_.append(data, dlen)) {
         on_reset_(ResetReason::Oversize);
         partial_.clear();
         open_ = false;
         discarding_ = true;
         return;
     }
-    partial_.append(reinterpret_cast<const char *>(data), dlen);
     if (flags & FLAG_END) {
-        on_message_(reinterpret_cast<const uint8_t *>(partial_.data()), partial_.size());
+        on_message_(partial_.data(), partial_.size());
         partial_.clear();
         open_ = false;
     }
@@ -205,6 +245,18 @@ bool encode_data(uint32_t offset, const uint8_t *bytes, size_t n, std::string &o
     }
     out = std::move(buf);
     return true;
+}
+
+uint8_t *encode_data_prepare(uint32_t offset, size_t n, ByteBuf &out) {
+    if (n > MAX_PAYLOAD - 4 || !out.reserve(MAX_PAYLOAD) || !out.resize(4 + n)) {
+        return nullptr;
+    }
+    uint8_t *p = out.data();
+    p[0] = static_cast<uint8_t>(offset & 0xFF);
+    p[1] = static_cast<uint8_t>((offset >> 8) & 0xFF);
+    p[2] = static_cast<uint8_t>((offset >> 16) & 0xFF);
+    p[3] = static_cast<uint8_t>((offset >> 24) & 0xFF);
+    return p + 4;
 }
 
 bool decode_data(const uint8_t *payload, size_t len, uint32_t &offset, const uint8_t *&bytes,

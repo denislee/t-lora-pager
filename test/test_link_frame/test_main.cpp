@@ -369,6 +369,157 @@ static void test_min_wait_ms(void)
     TEST_ASSERT_EQUAL_UINT32(0, min_wait_ms(10000, 0x00000100, 0xFFFFFF00));
 }
 
+/* ------------------------------------------------ zero-copy codec paths */
+
+static void test_decode_view_matches_copy(void)
+{
+    std::string bytes;
+    TEST_ASSERT_TRUE(encode_message(MsgType::Res, 7,
+                                    reinterpret_cast<const uint8_t *>("hello"), 5, bytes));
+
+    MessageView v;
+    TEST_ASSERT_EQUAL((int)DecodeError::None,
+                      (int)decode_message_view(reinterpret_cast<const uint8_t *>(bytes.data()),
+                                               bytes.size(), v));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)MsgType::Res, (uint8_t)v.type);
+    TEST_ASSERT_EQUAL_UINT16(7, v.id);
+    TEST_ASSERT_EQUAL_UINT(5, (unsigned)v.len);
+    TEST_ASSERT_TRUE(v.payload ==
+                     reinterpret_cast<const uint8_t *>(bytes.data()) + HEADER_SIZE);
+    TEST_ASSERT_EQUAL_INT(0, std::memcmp(v.payload, "hello", 5));
+
+    static const uint8_t b_short[] = {1, 1, 0, 0, 0};
+    static const uint8_t b_version[] = {2, 1, 0, 0, 0, 0};
+    static const uint8_t b_type[] = {1, 6, 0, 0, 0, 0};
+    static const uint8_t b_oversize[] = {1, 1, 0, 0, 0x01, 0x10}; /* len 4097 */
+    static const uint8_t b_length[] = {1, 1, 0, 0, 3, 0, 'a'};    /* len 3, 7 bytes */
+
+    struct BadMsg {
+        const uint8_t *bytes;
+        size_t len;
+        DecodeError want;
+    };
+    const BadMsg bad[] = {
+        {b_short, sizeof(b_short), DecodeError::Short},
+        {b_version, sizeof(b_version), DecodeError::Version},
+        {b_type, sizeof(b_type), DecodeError::Type},
+        {b_oversize, sizeof(b_oversize), DecodeError::Oversize},
+        {b_length, sizeof(b_length), DecodeError::Length},
+    };
+    for (const BadMsg &c : bad) {
+        MessageView mv;
+        Message m{};
+        const DecodeError ev = decode_message_view(c.bytes, c.len, mv);
+        const DecodeError ec = decode_message(c.bytes, c.len, m);
+        TEST_ASSERT_EQUAL((int)c.want, (int)ev);
+        TEST_ASSERT_EQUAL((int)ev, (int)ec);
+    }
+}
+
+static void test_encode_message_into_matches(void)
+{
+    static const size_t sizes[] = {0, 1, 500, MAX_PAYLOAD};
+    ByteBuf b;
+    size_t cap = 0;
+    bool first = true;
+    for (size_t n : sizes) {
+        std::vector<uint8_t> p(n);
+        for (size_t i = 0; i < n; ++i) {
+            p[i] = static_cast<uint8_t>(i * 7 + 3);
+        }
+        const uint8_t *src = p.empty() ? nullptr : p.data();
+
+        TEST_ASSERT_TRUE(encode_message_into(MsgType::Data, 9, src, n, b));
+
+        std::string ref;
+        TEST_ASSERT_TRUE(encode_message(MsgType::Data, 9, src, n, ref));
+        TEST_ASSERT_EQUAL_UINT((unsigned)ref.size(), (unsigned)b.size());
+        TEST_ASSERT_EQUAL_INT(0, std::memcmp(b.data(), ref.data(), ref.size()));
+
+        if (first) {
+            cap = b.capacity();
+            TEST_ASSERT_EQUAL_UINT((unsigned)MAX_MESSAGE, (unsigned)cap);
+            first = false;
+        } else {
+            TEST_ASSERT_EQUAL_UINT((unsigned)cap, (unsigned)b.capacity());
+        }
+    }
+
+    TEST_ASSERT_FALSE(encode_message_into(MsgType::Data, 9, nullptr, MAX_PAYLOAD + 1, b));
+    TEST_ASSERT_EQUAL_UINT(0, (unsigned)b.size());
+}
+
+static void test_encode_data_prepare(void)
+{
+    ByteBuf b;
+    uint8_t *p = encode_data_prepare(0x01020304u, 10, b);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_TRUE(p == b.data() + 4);
+    TEST_ASSERT_EQUAL_UINT(14, (unsigned)b.size());
+    for (size_t i = 0; i < 10; ++i) {
+        p[i] = static_cast<uint8_t>(i);
+    }
+
+    std::string ref;
+    TEST_ASSERT_TRUE(encode_data(0x01020304u, p, 10, ref));
+    TEST_ASSERT_EQUAL_INT(0, std::memcmp(b.data(), ref.data(), 14));
+
+    TEST_ASSERT_NOT_NULL(encode_data_prepare(0, MAX_PAYLOAD - 4, b));
+    TEST_ASSERT_EQUAL_UINT((unsigned)MAX_PAYLOAD, (unsigned)b.size());
+
+    const size_t before = b.size();
+    TEST_ASSERT_TRUE(encode_data_prepare(0, MAX_PAYLOAD - 3, b) == nullptr);
+    TEST_ASSERT_EQUAL_UINT((unsigned)before, (unsigned)b.size());
+}
+
+static void test_segmenter_heap_path_roundtrip(void)
+{
+    static const size_t packet_sizes[] = {20, 244, 300, 600};
+    std::string msg(1000, '\0');
+    for (size_t i = 0; i < msg.size(); ++i) {
+        msg[i] = static_cast<char>(i * 13 + 1);
+    }
+
+    for (size_t packet_size : packet_sizes) {
+        Segmenter s;
+        std::vector<std::string> packets;
+        const bool ok = s.send(
+            reinterpret_cast<const uint8_t *>(msg.data()), msg.size(), packet_size,
+            [&](const uint8_t *pkt, size_t len) {
+                packets.push_back(std::string(reinterpret_cast<const char *>(pkt), len));
+                return true;
+            });
+        TEST_ASSERT_TRUE(ok);
+        TEST_ASSERT_EQUAL_UINT((unsigned)packets_per_message(msg.size(), packet_size),
+                               (unsigned)packets.size());
+        TEST_ASSERT_FALSE(packets.empty());
+        for (const std::string &pkt : packets) {
+            TEST_ASSERT_TRUE(pkt.size() <= packet_size);
+        }
+        TEST_ASSERT_EQUAL_UINT8(FLAG_START,
+                                static_cast<uint8_t>(packets.front()[0]) & FLAG_START);
+        TEST_ASSERT_EQUAL_UINT8(FLAG_END,
+                                static_cast<uint8_t>(packets.back()[0]) & FLAG_END);
+
+        std::string got;
+        int messages = 0;
+        int resets = 0;
+        Reassembler r(
+            [&](const uint8_t *m, size_t n) {
+                got.assign(reinterpret_cast<const char *>(m), n);
+                ++messages;
+            },
+            [&](ResetReason) { ++resets; });
+        for (const std::string &pkt : packets) {
+            r.feed(reinterpret_cast<const uint8_t *>(pkt.data()), pkt.size());
+        }
+        TEST_ASSERT_EQUAL_INT(1, messages);
+        TEST_ASSERT_EQUAL_INT(0, resets);
+        TEST_ASSERT_EQUAL_UINT((unsigned)msg.size(), (unsigned)got.size());
+        TEST_ASSERT_EQUAL_INT(0, std::memcmp(got.data(), msg.data(), msg.size()));
+    }
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -387,5 +538,9 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_packet_size_for_mtu);
     RUN_TEST(test_next_conn_band);
     RUN_TEST(test_min_wait_ms);
+    RUN_TEST(test_decode_view_matches_copy);
+    RUN_TEST(test_encode_message_into_matches);
+    RUN_TEST(test_encode_data_prepare);
+    RUN_TEST(test_segmenter_heap_path_roundtrip);
     return UNITY_END();
 }

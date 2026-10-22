@@ -385,8 +385,8 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
             note_read(xfer, off, buf, n);
             return true;
         },
-        [xfer](const std::string &payload) {
-            return g_rpc && g_rpc->send_bulk(MsgType::Data, xfer, payload);
+        [xfer](const uint8_t *payload, size_t len) {
+            return g_rpc && g_rpc->send_bulk(MsgType::Data, xfer, payload, len);
         },
         offset));
     g_xfers.push_back(std::move(t));

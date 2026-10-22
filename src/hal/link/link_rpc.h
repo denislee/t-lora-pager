@@ -61,8 +61,9 @@ struct RpcStats {
  */
 class Rpc {
 public:
-    /** Send one encoded message (header + payload); the transport segments it. */
-    using SendFn = std::function<bool(const std::string &message)>;
+    /** Send one encoded message (header + payload); the transport segments it.
+     * The bytes are valid only for the call (a reused buffer, P7.36). */
+    using SendFn = std::function<bool(const uint8_t *message, size_t len)>;
     /** Milliseconds, wrapping at 2^32; compare with signed `now - deadline` math. */
     using ClockFn = std::function<uint32_t()>;
     /**
@@ -113,6 +114,8 @@ public:
 
     /** Send a pre-encoded DATA/ACK message with transfer id `xfer`. */
     bool send_bulk(MsgType type, uint16_t xfer, const std::string &payload);
+    /** Same, from a byte span (no std::string on the DATA path, P7.36). */
+    bool send_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);
 
     /** Feed one reassembled message (header + payload). */
     void on_message(const uint8_t *msg, size_t len);
@@ -138,11 +141,12 @@ private:
         ResponseFn cb;
     };
 
-    void handle_req(const Message &m);
-    void handle_res(const Message &m, bool is_result);
-    void handle_evt(const Message &m);
+    void handle_req(const MessageView &m);
+    void handle_res(const MessageView &m, bool is_result);
+    void handle_evt(const MessageView &m);
 
     bool send_message(MsgType t, uint16_t id, const std::string &payload);
+    bool send_message(MsgType t, uint16_t id, const uint8_t *payload, size_t len);
     bool send_err(uint16_t id, const char *code, const std::string &msg);
     bool send_res(uint16_t id, const std::string &result_json);
 
@@ -159,6 +163,11 @@ private:
     std::vector<Pending> pending_;
     std::vector<std::function<void()>> deferred_;
     bool in_handler_ = false;
+    /* Encoded outgoing message, reused (MAX_MESSAGE, PSRAM-first; P7.36).
+     * tx_busy_ covers a send_ that re-enters send_message(): that nested
+     * message uses a temporary buffer instead. */
+    ByteBuf tx_;
+    bool tx_busy_ = false;
     uint16_t next_id_;
     RpcStats stats_;
 };

@@ -16,6 +16,8 @@
 #include <functional>
 #include <string>
 
+#include "hal/link/link_buf.h"
+
 namespace pagerlink {
 
 /** Wire protocol version; a message whose ver byte differs is malformed. */
@@ -36,6 +38,10 @@ constexpr uint8_t SEQ_MASK = 0x3F;
 constexpr size_t MIN_PACKET = 20;
 /** Fixed packet size for the TCP transport (equivalent to MTU 247). */
 constexpr size_t TCP_PACKET = 244;
+/** Largest packet Segmenter::send() builds on the stack (P7.36): every
+ * transport packet is ≤ 244 B (BLE ATT_MTU − 3, TCP_PACKET). A larger
+ * packet_size still works through a heap fallback. */
+constexpr size_t SEGMENT_STACK_PACKET = TCP_PACKET;
 /** Implicit initial bulk-transfer credit window, in DATA messages (up to 4092 B each), not packets. */
 constexpr uint16_t INITIAL_CREDITS = 16;
 /** Bulk sender retransmit timeout: no ACK for this long with bytes unacknowledged ->
@@ -112,6 +118,17 @@ struct Message {
 };
 
 /**
+ * A decoded message that borrows its payload from the decoded buffer (P7.36):
+ * `payload` is valid only as long as that buffer is.
+ */
+struct MessageView {
+    MsgType type;
+    uint16_t id;
+    const uint8_t *payload;
+    size_t len;
+};
+
+/**
  * Encode a message header + payload into `out` (6-byte little-endian header
  * followed by the payload). Returns false and leaves `out` untouched when
  * `len > MAX_PAYLOAD`.
@@ -125,6 +142,19 @@ bool encode_message(MsgType t, uint16_t id, const uint8_t *payload, size_t len, 
  * and DecodeError::None returned.
  */
 DecodeError decode_message(const uint8_t *buf, size_t len, Message &out);
+
+/**
+ * decode_message() without the payload copy: same checks, same errors; on
+ * success `out.payload` points into `buf` (no allocation).
+ */
+DecodeError decode_message_view(const uint8_t *buf, size_t len, MessageView &out);
+
+/**
+ * Encode a message header + payload into `out`, a ByteBuf reused across
+ * calls (P7.36: no allocation once it holds MAX_MESSAGE). Returns false and
+ * leaves `out` empty when `len > MAX_PAYLOAD` or the buffer can't be allocated.
+ */
+bool encode_message_into(MsgType t, uint16_t id, const uint8_t *payload, size_t len, ByteBuf &out);
 
 /** Splits messages into link-layer packets, tracking the rolling seq counter. */
 class Segmenter {
@@ -145,7 +175,8 @@ public:
      * packet, END the last; seq advances by one (mod 64) per packet accepted
      * by `sink`. Returns false if `packet_size < 2` or `len == 0`, or if
      * `sink` returns false (seq has then advanced only for the packets the
-     * sink accepted).
+     * sink accepted). A packet of up to SEGMENT_STACK_PACKET bytes is built
+     * on the stack, so a send allocates nothing (P7.36).
      */
     bool send(const uint8_t *msg, size_t len, size_t packet_size, const Sink &sink);
 
@@ -182,7 +213,7 @@ public:
 private:
     MessageFn on_message_;
     ResetFn on_reset_;
-    std::string partial_;
+    ByteBuf partial_; /* MAX_MESSAGE, PSRAM-first, allocated at the first START (P7.36) */
     bool open_ = false;
     bool discarding_ = false;
     uint8_t expected_ = 0;
@@ -193,6 +224,14 @@ private:
  * `n > MAX_PAYLOAD - 4`; otherwise `out` is filled.
  */
 bool encode_data(uint32_t offset, const uint8_t *bytes, size_t n, std::string &out);
+
+/**
+ * Lay out a DATA payload for `n` bytes at `offset` in `out` (resized to
+ * 4 + n, the offset written; first use allocates MAX_PAYLOAD) and return
+ * where the `n` bytes go, so a reader can fill them in place (P7.36). nullptr when `n > MAX_PAYLOAD - 4` or `out`
+ * is too small (`out` then unchanged).
+ */
+uint8_t *encode_data_prepare(uint32_t offset, size_t n, ByteBuf &out);
 
 /**
  * Decode a DATA payload. Returns false when `len < 4`; otherwise `bytes`/`n`
