@@ -762,6 +762,7 @@ Value = expected payoff. Risk = chance of regression. "HW" = needs a hardware te
   - Call `setDataLen(conn, 251)` and request 2M PHY in `companion_up`.
   - Size `PHONE_WATCHDOG_MS` to begin + upload + ask.
 - **Verify:** HW throughput measurement (S3). Keep the iOS HID-compliant idle band.
+- **Status (2026-10-22): ✅ code, HW throughput test owed.** Transfer band 15–30 ms / latency 0 while DATA flows, idle band 2–3 s after; `onMTUChange` updates the packet size; DLE 251 + 2M PHY requested; chat watchdog 99 s. Details: §16 "P7.33".
 
 ### P7.34: Link file I/O: per-chunk reopen, whole-file CRC passes, notes read ~3× (MED, MED risk)
 - **Where:** `hal/link/fs_volume.cpp` `vol_read_at` / `vol_write_at`; `handlers_fs.cpp` `file_crc`, `handle_read`, `handle_write_commit`; `hal/notes_link.cpp` `scan`.
@@ -1138,7 +1139,7 @@ never overwrite rows.
 2. **P7.30** BLE grant and queue. ✅ code 2026-10-19 (§16); HW upload test owed.
 3. **P7.32** event-driven notify. ✅ code 2026-10-20 (§16); HW upload test owed.
 4. **P7.31** HID starvation. ✅ code 2026-10-20 (§16); HW typing test owed.
-5. **P7.33** connection params, MTU change, DLE.
+5. **P7.33** connection params, MTU change, DLE. ✅ code 2026-10-22 (§16); HW throughput test owed.
 6. **P7.34** file I/O.
 
 **Phase D: crypto off the UI thread** (security review)
@@ -1315,3 +1316,28 @@ Note: `pio run -v` fails at the `firmware.bin` step with a PlatformIO `TypeError
 **Next open items**, in order:
 1. The `tlora_pager_profile` hardware session plus every ☐ above (still no device attached).
 2. Phase C: P7.33 (transfer connection params, `onMTUChange`, DLE/2M; needs HW throughput numbers), then P7.34.
+
+### 2026-10-22: P7.33 (run: finish every code item; hardware checks stay owed)
+
+Scope settled with the user for this run: land every code item, with each hardware check left ☐; Phase E parked until the Phase A hardware numbers; product calls P6.17, P7.12 (snippet trim), P7.57 (protocol flag), P6.42 and P6.43 parked; one local commit per item, no push.
+
+| ID | Status | What changed | Verified | HW owed |
+|---|---|---|---|---|
+| P7.33 | ✅ code | **Transfer band:** a new optional `TransportOps::bulk_activity` hook fires on transfer start (`service_send_bytes`, `service_accept_expect`, `fs.read`, `fs.write.begin`) and on every DATA/ACK (`Rpc::on_bulk`); it only sets flags (it runs under `g_mutex`). `link_task` `update_conn_band()` uses the pure `next_conn_band()` (`link_frame.h`, `BULK_IDLE_MS` 2000) and calls `hal::ble::apply_transfer_conn_params` = `updateConnParams(conn, 12, 24, 0, 0x2A0)`, then the unchanged HID idle band 2–3 s after the last DATA/ACK. `apply_idle_conn_params` is a no-op while a connection is in the transfer band (so the keepalive's wake re-apply can't slow a transfer). Both bands use the same 6.72 s supervision timeout, so the P7.32 stall budget stays valid. GAP calls run on `link_task`, outside `g_mutex`. **MTU:** `ServerCallbacks::onMTUChange` → `Kind::Mtu` event → `service_set_packet_size(packet_size_for_mtu(mtu, ATT_MTU))`, clamped to ≤ `MAX_PACKET` 244. **DLE/PHY:** `companion_up` → `hal::ble::request_fast_link` (`setDataLen(conn, 251)` + 2M PHY; both are requests the phone can refuse; `nm -u` confirms `ble_gap_set_data_len` is linked). **P7.35 bullet:** `companion_up` applies the idle band to a companion-only peer. **Chat watchdog:** `PHONE_WATCHDOG_MS` 75 s → 99 s = begin 10 s + upload 24 s (480,044 B at 20 KB/s) + `CHAT_ASK_TIMEOUT_MS` 60 s + 5 s, computed from the constants. TCP path unchanged. | `tlora_pager`, `twatchs3`, `twatch_ultra`, `emulator_lora_pager` build; native 148/148 (new `test_packet_size_for_mtu`, `test_next_conn_band`; negative control: off-by-one helpers fail both); emulator `pagerlink smoke` all steps passed. | ☐ 480 KB voice upload and a 256 KB+ `fs.write`: `[link] transfer conn params` then `[link] idle conn params` 2–3 s after; no `Update params error` / `Failed to update phy` / `Set data length error`; record KB/s both ways (estimate ~12–24 s before, ~5–8 s expected for 480 KB); keyboard still works and the link stays up minutes after |
+
+**Corrections:** the keepalive applies the idle params only on HID connect (after 1.5 s) and after a fake-sleep wake, not continuously (`wireless.cpp` `ble_kb_keepalive_task`, the `now_connected && !was_connected` branch). `State::packet_size` is private to `link_service.cpp`, hence `service_set_packet_size`. The three GAP requests in `companion_up` go back to back; whether the S3 controller queues overlapping LL procedures is part of the HW check. A narrow race (keepalive checks the hold, then the transfer band lands, then the keepalive applies idle) is healed by the next transfer start.
+
+### 2026-10-22: Phase I (companions)
+
+| ID | Status | What changed | Verified | HW owed |
+|---|---|---|---|---|
+| P7.55 | ✅ code, unbuilt (App target) | `TDJSONClient.swift` `receiveLoop` peeks the leading `{"@type":"…"` and decodes only replies carrying `"@extra":` and the types in `forwardedUpdates` (`updateAuthorizationState`); the rest is dropped on the TDLib thread, before the main actor. | App target can't build on Linux | ☐ Xcode build + Telegram login on a phone |
+| P7.56 | ✅ code | `JSONValue.decode` builds from `JSONSerialization` (bool detected by CFBoolean type / `NSNumber(true)` class identity: on Linux `1 is Bool` is true); numbers stay `Double` (same precision as before). Shared encoders; `encoded()` unsorted, `encodedSorted()` new. `LinkSession.handleEncoded`: `tg.chats`/`tg.messages` replies hand back their RES bytes, so nothing is encoded twice. **Correction:** the golden vectors hold frame hex only; no vector depends on JSON key order. | PagerKit 139/139 (was 113); new `JSONValueTests` | — |
+| P7.57 | ◐ LOW half | `NotesSyncService` remote-name cache, TTL 120 s (injectable clock), keyed by `NotesRemote.cacheKey` (`repo@branch` for GitHub, nil = no cache); committed names are added. The `more`/`last` coalescing flag stays a parked product call. | tests; negative control (TTL 0) fails 6 assertions | — |
+| P7.58 | ✅ code | iOS `GitHubNotesBackend.existingNames` and `server/internal/notessync` `listRemote`: `GET /repos/<repo>/git/trees/<branch>:notes`, blobs only, 404 = empty, `truncated:true` → error. Unchecked: branch names containing `/` in the `<ref>:notes` form. | PagerKit; server `go test -race` (notessync 82.7 %) | — |
+| P7.59 | ✅ code (phone half) | `HTTP.sendWithRetry(…, deadline:)` caps each attempt to the time left and skips a retry whose backoff crosses it; `ChatService.ask` sets one `askBudget` (55 s) for upload wait + STT + LLM. The pager half (watchdog 99 s) landed with P7.33. `timeoutInterval` is an idle timeout, not a hard total. | PagerKit `ChatServiceTests` | — |
+| P7.60 | ◐ | `WeatherCache`: geocode per city key (≤ 32), forecast per URL for 600 s. **`forecast_hours=24` not added:** a live Open-Meteo probe showed it starts the series at the current hour, moving the 8 three-hourly slots off 00/03/…/21, out of step with the firmware direct path (`ui_weather.cpp` `build_hourly_cache`). Decide together with P6.35. | PagerKit `WeatherServiceTests` | — |
+| P7.61 | ✅ code, **uncommitted** | `TDTelegram.swift`: `getChat` calls in a `withTaskGroup` (id order kept, the first-failure rule unchanged); each page's sender lookups prefetched concurrently (`prefetchSenders`). Left uncommitted with `TDTelegramConcurrencyTests.swift` because `TDTelegram.swift`/`TDTelegramTests.swift` carry separate local edits. | PagerKit 139/139 on the working tree; the committed tree (without P7.61) passes 132/132 in a clean worktree | — |
+| P7.62 | ✅ code, unbuilt (App target) | `LocationProvider`: city cached with the fix, locator capped at 4 s, reverse geocode 3 s timeout (`cancelGeocode`), each fix timer tied to its request and cancelled in `finish`. Budget 4 + 3 + 5 = 12 s (fix failure: 14 s) < the pager's 15 s. | unbuilt | ☐ weather from the pager with location "auto" |
+| P7.63 | ◐ 5 of 6 | RES > 4096 B (or encode failure) → ERR `internal` "reply too large"; `ChatService` keeps ≤ 2 uploads (a dropped one wakes a waiting ask as "busy"); `NotesSyncService.deliver` skips `fs.read` when size + CRC32 match; `arm()` reserves the buffer (≤ 4 MiB); App: `SessionLog` with stable IDs, `LogRows` subview, static `DateComponentsFormatter` (unbuilt). **Not done:** the control-message priority lane (splitting the single writer stream is not small). | PagerKit | — |
+| P7.64 | ✅ code | `client.go`: `bufio.Writer` (2 × MaxMessage), header + packet with no allocation, one flush per message; `Client.Call` `NewTimer` + `Stop`; `AcceptBytes` and `ReadFile` one idle timer reset per message. P7.29 had converted only `SendBytes`. | `go test -race` (internal/pagerlink 83.7 %, was 82.8 %); `go vet`, `gofmt` clean | — |
