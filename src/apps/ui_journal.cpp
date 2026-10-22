@@ -7,7 +7,10 @@
  *            parent_obj, pending_journal_parent
  *                                       — nulled (not owned)
  *   paging:  target_focus_index, current_page — reset
- *   cache:   journal_entries / cache_valid    — kept on purpose (warm reopen)
+ *   cache:   journal_entries / cache_valid    — kept on purpose (warm reopen);
+ *                                               dropped on a notes lock when
+ *                                               encryption is on (journal_on_lock,
+ *                                               P7.25)
  *   timers:  bg_refresh_timer           — the deferred one-shot that starts the
  *                                         rescan when the FS changed; also holds
  *                                         the 0 ms first-run one-shot
@@ -35,6 +38,7 @@
 #include "../hal/notes_path.h"
 #include "../core/one_shot_job.h"
 #include "../core/input_profile.h"
+#include "../core/ui_post.h"
 #include "../hal/storage.h"
 #include <vector>
 #include <memory>
@@ -450,6 +454,19 @@ static bool s_first_run_pending = false;
 // off the LVGL thread. The worker only touches its own snapshot.
 static core::OneShotJob<BgRefreshResult> s_bg_job(bg_refresh_done);
 
+// P7.25: the cache holds decrypted snippets of encrypted notes, so a notes
+// lock drops it (and leaves an open journal, whose labels hold the same
+// text). notes_crypto_lock() may run on any task: the hook only posts.
+static void journal_on_lock()
+{
+    if (!notes_crypto_is_enabled()) return;   // plaintext notes: keep the warm cache
+    std::vector<JournalEntry>().swap(journal_entries);
+    cache_valid = false;
+    s_entries_gen++;                          // drop an in-flight worker result
+    if (menu != NULL && parent_obj != NULL) menu_show_deferred();
+}
+static void journal_lock_hook() { core::ui_post(journal_on_lock); }
+
 // Cheap FNV-1a over (filename, mtime) so a completed refresh can tell whether
 // anything actually changed before tearing down and re-rendering the page —
 // an unchanged journal must not flicker or steal focus.
@@ -774,6 +791,8 @@ static void post_scroll_indicator_cb(lv_event_t *e)
 
 void ui_journal_enter(lv_obj_t *parent)
 {
+    static bool s_lock_hook_set = false;
+    if (!s_lock_hook_set) { notes_crypto_set_lock_hook(journal_lock_hook); s_lock_hook_set = true; }
     if (notes_crypto_is_enabled() && !notes_crypto_is_unlocked()) {
         pending_journal_parent = parent;
         ui_passphrase_unlock(journal_unlock_result_cb, parent);

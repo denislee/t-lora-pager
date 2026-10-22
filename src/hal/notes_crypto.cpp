@@ -883,6 +883,16 @@ bool notes_crypto_unlock(const char *pw)
     return true;
 }
 
+/* One observer, notified once the session is fully locked. Runs on the task
+ * that called lock(), outside prewarm_mutex; the hook must not touch crypto
+ * state (the app hooks only post to the LVGL thread). */
+static std::atomic<void (*)()> g_lock_hook{nullptr};
+
+void notes_crypto_set_lock_hook(void (*hook)())
+{
+    g_lock_hook.store(hook);
+}
+
 void notes_crypto_lock()
 {
     /* Mark locked and drop the pre-derived key atomically: a background prewarm
@@ -903,6 +913,9 @@ void notes_crypto_lock()
         }
         g_passphrase.clear();
     }
+    /* P7.25: tell the one observer, with the session already locked and the
+     * mutex released. */
+    if (void (*hook)() = g_lock_hook.load()) hook();
 }
 
 bool notes_crypto_encrypt_buffer(const uint8_t *pt, size_t pt_len,

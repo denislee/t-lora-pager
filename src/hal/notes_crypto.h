@@ -34,6 +34,10 @@ bool notes_crypto_unlock(const char *pw);
 /* Zeroise and drop the cached passphrase. */
 void notes_crypto_lock();
 
+/* P7.25: called at the end of every notes_crypto_lock(), on the locking
+ * task, with no crypto lock held; one hook, nullptr to clear. */
+void notes_crypto_set_lock_hook(void (*hook)());
+
 /* OpenSSL-`enc` format buffer crypto. Both require the session to be unlocked. */
 bool notes_crypto_encrypt_buffer(const uint8_t *pt, size_t pt_len,
                                  std::vector<uint8_t> &out);
