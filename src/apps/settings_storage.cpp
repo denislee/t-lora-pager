@@ -15,17 +15,27 @@
  * the next prompt. After any state-mutating operation `mark_for_rebuild()`
  * drops the page's focus-group entries and resets user_data so LVGL
  * rebuilds it on next entry with the fresh enabled/unlocked status.
+ *
+ * The Notes Security bulk operations run on `g_sec_job`, a OneShotJob worker,
+ * and report progress through `storage_progress_post` -> `g_progress_timer`
+ * (the older `storage_progress_cb` touches LVGL and stays for the synchronous
+ * Storage-subpage operations). `g_sec_job` is deliberately not torn down by
+ * `reset_state()` so its result popup still lands, and `sec_done` only
+ * navigates while `g_sub_page` is set.
  */
 #include "../ui_define.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/hub.h"
 #include "../hal/link.h"
 #include "../hal/notes_link.h"
+#include "../hal/secrets.h"
 #include "../hal/storage.h"
 #include "../core/one_shot_job.h"
 #include "settings_internal.h"
 
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace {
@@ -72,6 +82,74 @@ void show_storage_loader(const char *title)
 void hide_storage_loader()
 {
     ui_loading_close(&storage_loader);
+}
+
+// Worker-safe progress mailbox (P7.7). The Notes Security bulk operations run
+// on core::OneShotJob workers, which must never touch LVGL; they post here and
+// the LVGL thread applies the latest value from g_progress_timer.
+struct StorageProgress {
+    std::mutex mu;
+    int cur = 0;
+    int total = 0;
+    std::string name;
+    bool dirty = false;
+};
+
+StorageProgress g_storage_progress;
+lv_timer_t *g_progress_timer = nullptr;
+
+// Worker-safe (P7.7): records the latest progress; the LVGL thread applies it
+// from g_progress_timer. Never touches LVGL.
+void storage_progress_post(int cur, int total, const char *name)
+{
+    std::lock_guard<std::mutex> lock(g_storage_progress.mu);
+    g_storage_progress.cur = cur;
+    g_storage_progress.total = total;
+    g_storage_progress.name = name ? name : "";
+    g_storage_progress.dirty = true;
+}
+
+void storage_progress_drain(lv_timer_t *)
+{
+    int cur, total;
+    std::string name;
+    {
+        std::lock_guard<std::mutex> lock(g_storage_progress.mu);
+        if (!g_storage_progress.dirty) return;
+        cur = g_storage_progress.cur;
+        total = g_storage_progress.total;
+        name = g_storage_progress.name;
+        g_storage_progress.dirty = false;
+    }
+    if (!storage_loader.overlay) return;
+    if (total > 0) {
+        ui_loading_set_progress(&storage_loader, cur, total, name.c_str());
+    } else {
+        ui_loading_set_indeterminate(&storage_loader,
+                                     name.empty() ? "Working..." : name.c_str());
+    }
+}
+
+void storage_progress_start()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_storage_progress.mu);
+        g_storage_progress.dirty = false;
+        g_storage_progress.name.clear();
+        g_storage_progress.cur = 0;
+        g_storage_progress.total = 0;
+    }
+    if (!g_progress_timer) {
+        g_progress_timer = lv_timer_create(storage_progress_drain, 100, nullptr);
+    }
+}
+
+void storage_progress_stop()
+{
+    if (g_progress_timer) {
+        lv_timer_delete(g_progress_timer);
+        g_progress_timer = nullptr;
+    }
 }
 
 } // anonymous namespace
@@ -260,19 +338,77 @@ void return_to_main()
     settings_return_to_main_page();
 }
 
+// Result handed from a Notes Security worker back to the LVGL thread.
+struct SecResult {
+    enum Kind { Message, AskNewPassphrase } kind = Message;
+    std::string msg;
+    bool to_main = true;     // pop back to the settings root afterwards
+    std::string old_pw;      // AskNewPassphrase: the verified current passphrase
+    ~SecResult() { hal::secret_scrub(old_pw); }
+};
+
+// Runs every Notes Security bulk operation (set/change/disable passphrase,
+// encrypt SD) off the LVGL thread (P7.7). Not torn down on settings exit: the
+// result popup must still land.
+static core::OneShotJob<SecResult> g_sec_job;
+
+void change_new_cb(const char *pw, void *ud);   // forward declaration
+
+void sec_done(SecResult &r)
+{
+    storage_progress_stop();
+    hide_storage_loader();
+    if (r.kind == SecResult::AskNewPassphrase) {
+        auto ctx = std::make_unique<ChangeCtx>();
+        ctx->old_pw = r.old_pw;
+        ui_passphrase_prompt("New passphrase",
+                             "Enter a new passphrase for your notes.",
+                             /*confirm=*/true, change_new_cb, ctx.release());
+        return;
+    }
+    if (!r.msg.empty()) ui_msg_pop_up("Notes Security", r.msg.c_str());
+    if (r.to_main && g_sub_page) return_to_main();
+}
+
+bool start_sec_job(const char *title, std::function<SecResult *()> work)
+{
+    if (g_sec_job.busy()) {
+        ui_msg_pop_up("Notes Security", "Another operation is still running.");
+        return false;
+    }
+    show_storage_loader(title);
+    storage_progress_start();
+    g_sec_job.on_done(sec_done);
+    auto st = g_sec_job.start(std::move(work), 10240, "notes_sec", 1);
+    if (st == core::OneShotJob<SecResult>::Start::Failed) {
+        storage_progress_stop();
+        hide_storage_loader();
+        ui_msg_pop_up("Notes Security", "Could not start the operation.");
+        return false;
+    }
+    return true;
+}
+
 // --- Set passphrase flow ---
 void set_pw_cb(const char *pw, void *)
 {
     if (!pw) return;
-    if (!notes_crypto_set_passphrase(pw)) {
-        ui_msg_pop_up("Notes Security", "Could not set passphrase.");
-        return;
+    std::string *p = new std::string(pw);
+    bool started = start_sec_job("Encrypting notes", [p]() -> SecResult * {
+        bool ok = notes_crypto_set_passphrase(p->c_str());
+        if (ok) notes_crypto_encrypt_existing(storage_progress_post);
+        hal::secret_scrub(*p);
+        delete p;
+        auto *r = new SecResult();
+        r->msg = ok ? "Passphrase set. Notes are now encrypted."
+                    : "Could not set passphrase.";
+        r->to_main = ok;
+        return r;
+    });
+    if (!started) {
+        hal::secret_scrub(*p);
+        delete p;
     }
-    show_storage_loader("Encrypting notes");
-    notes_crypto_encrypt_existing(storage_progress_cb);
-    hide_storage_loader();
-    ui_msg_pop_up("Notes Security", "Passphrase set. Notes are now encrypted.");
-    return_to_main();
 }
 
 // --- Change passphrase flow: ask old, then ask new (with confirm). ---
@@ -283,47 +419,79 @@ void change_new_cb(const char *pw, void *ud)
      * pair of callbacks is the safe equivalent of new/delete — both
      * cancel and OK paths drop the allocation when this scope exits. */
     std::unique_ptr<ChangeCtx> ctx((ChangeCtx *)ud);
-    if (!pw) return;
-    std::string new_pw = pw;
-    show_storage_loader("Re-encrypting notes");
-    bool ok = notes_crypto_change_passphrase(ctx->old_pw.c_str(),
-                                             new_pw.c_str(),
-                                             storage_progress_cb);
-    hide_storage_loader();
-    ui_msg_pop_up("Notes Security",
-                  ok ? "Passphrase changed." : "Passphrase change failed.");
-    return_to_main();
+    if (!pw) {
+        hal::secret_scrub(ctx->old_pw);
+        return;
+    }
+    std::string *o = new std::string(ctx->old_pw);
+    std::string *n = new std::string(pw);
+    hal::secret_scrub(ctx->old_pw);
+    bool started = start_sec_job("Re-encrypting notes", [o, n]() -> SecResult * {
+        bool ok = notes_crypto_change_passphrase(o->c_str(), n->c_str(),
+                                                 storage_progress_post);
+        hal::secret_scrub(*o);
+        delete o;
+        hal::secret_scrub(*n);
+        delete n;
+        auto *r = new SecResult();
+        r->msg = ok ? "Passphrase changed." : "Passphrase change failed.";
+        r->to_main = true;
+        return r;
+    });
+    if (!started) {
+        hal::secret_scrub(*o);
+        delete o;
+        hal::secret_scrub(*n);
+        delete n;
+    }
 }
 
 void change_old_cb(const char *pw, void *)
 {
     if (!pw) return;
     // Verify old passphrase up front so the user doesn't type a whole new
-    // one first only to find out the old was wrong.
-    if (!notes_crypto_unlock(pw)) {
-        ui_msg_pop_up("Notes Security", "Wrong current passphrase.");
-        return;
+    // one first only to find out the old was wrong. The verify (one PBKDF2,
+    // plus finishing an interrupted change) now runs on the worker.
+    std::string *p = new std::string(pw);
+    bool started = start_sec_job("Checking passphrase", [p]() -> SecResult * {
+        bool ok = notes_crypto_unlock(p->c_str());
+        auto *r = new SecResult();
+        if (ok) {
+            r->kind = SecResult::AskNewPassphrase;
+            r->old_pw = *p;
+        } else {
+            r->msg = "Wrong current passphrase.";
+            r->to_main = false;
+        }
+        hal::secret_scrub(*p);
+        delete p;
+        return r;
+    });
+    if (!started) {
+        hal::secret_scrub(*p);
+        delete p;
     }
-    auto ctx = std::make_unique<ChangeCtx>();
-    ctx->old_pw = pw;
-    /* Ownership of ctx travels to change_new_cb via the void* user-data
-     * slot. release() detaches the unique_ptr; change_new_cb re-wraps. */
-    ui_passphrase_prompt("New passphrase",
-                         "Enter a new passphrase for your notes.",
-                         /*confirm=*/true, change_new_cb, ctx.release());
 }
 
 // --- Disable flow ---
 void disable_pw_cb(const char *pw, void *)
 {
     if (!pw) return;
-    show_storage_loader("Decrypting notes");
-    bool ok = notes_crypto_disable(pw, storage_progress_cb);
-    hide_storage_loader();
-    ui_msg_pop_up("Notes Security",
-                  ok ? "Encryption disabled. Notes are plaintext again."
-                     : "Wrong passphrase.");
-    return_to_main();
+    std::string *p = new std::string(pw);
+    bool started = start_sec_job("Decrypting notes", [p]() -> SecResult * {
+        bool ok = notes_crypto_disable(p->c_str(), storage_progress_post);
+        hal::secret_scrub(*p);
+        delete p;
+        auto *r = new SecResult();
+        r->msg = ok ? "Encryption disabled. Notes are plaintext again.\nSaved tokens were erased."
+                    : "Wrong passphrase.";
+        r->to_main = true;
+        return r;
+    });
+    if (!started) {
+        hal::secret_scrub(*p);
+        delete p;
+    }
 }
 
 // --- Sub-page wiring ---
@@ -342,7 +510,7 @@ void btn_change_cb(lv_event_t *) {
 
 void btn_disable_cb(lv_event_t *) {
     ui_passphrase_prompt("Disable encryption",
-                         "Enter passphrase to decrypt all notes.",
+                         "Enter passphrase to decrypt all notes. Saved tokens (Telegram, GitHub, SSH) will be erased.",
                          /*confirm=*/false, disable_pw_cb, NULL);
 }
 
@@ -353,22 +521,25 @@ void btn_lock_cb(lv_event_t *) {
 }
 
 void btn_encrypt_sd_cb(lv_event_t *) {
-    show_storage_loader("Encrypting SD notes");
-    int scanned = 0, enc_count = 0;
-    bool ok = notes_crypto_encrypt_sd(&scanned, &enc_count, storage_progress_cb);
-    hide_storage_loader();
-    char msg[96];
-    if (!ok) {
-        snprintf(msg, sizeof(msg), "SD card unavailable or session locked.");
-    } else if (scanned == 0) {
-        snprintf(msg, sizeof(msg), "No protected notes found on SD.");
-    } else {
-        snprintf(msg, sizeof(msg),
-                 "Scanned %d file(s).\nEncrypted %d new file(s).",
-                 scanned, enc_count);
-    }
-    ui_msg_pop_up("Notes Security", msg);
-    return_to_main();
+    start_sec_job("Encrypting SD notes", []() -> SecResult * {
+        int scanned = 0, enc_count = 0;
+        bool ok = notes_crypto_encrypt_sd(&scanned, &enc_count,
+                                          storage_progress_post);
+        char msg[96];
+        if (!ok) {
+            snprintf(msg, sizeof(msg), "SD card unavailable or session locked.");
+        } else if (scanned == 0) {
+            snprintf(msg, sizeof(msg), "No protected notes found on SD.");
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "Scanned %d file(s).\nEncrypted %d new file(s).",
+                     scanned, enc_count);
+        }
+        auto *r = new SecResult();
+        r->msg = msg;
+        r->to_main = true;
+        return r;
+    });
 }
 
 void build_subpage_impl(lv_obj_t *menu, lv_obj_t *sub_page)

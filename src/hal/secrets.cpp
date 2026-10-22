@@ -54,7 +54,10 @@ void mask_forget(const char *ns, const char *key)
  *   ui_telegram.cpp   TG_PREFS_NS "tgbridge"  / "token_enc"
  *   ui_notes_sync.cpp NSYNC_PREFS_NS "notesync" / "token_enc"
  *   ui_ssh.cpp        SSH_NS "ssh"           / SSH_PW_KEY "pw_enc"
- * A slot missing here only loses the pin, never correctness. */
+ * This is also the full list of encrypted secret slots: change-passphrase
+ * re-encrypts and disable erases exactly these (secret_slot_*, P7.7), so a
+ * new secret_store slot MUST be added here or it stops decrypting after the
+ * next passphrase change. */
 struct PinnedSlot { const char *ns; const char *key; };
 constexpr PinnedSlot kPinnedSlots[] = {
     {"tgbridge", "token_enc"},
@@ -94,6 +97,68 @@ void secret_prewarm_pinned()
                              /*derive=*/true);
     }
 #endif
+}
+
+constexpr size_t kSlotCount = sizeof(kPinnedSlots) / sizeof(kPinnedSlots[0]);
+
+size_t secret_slot_count()
+{
+    return kSlotCount;
+}
+
+std::string secret_slot_name(size_t i)
+{
+    if (i >= kSlotCount) return "";
+    return slot_id(kPinnedSlots[i].ns, kPinnedSlots[i].key);
+}
+
+bool secret_slot_read_raw(size_t i, std::vector<uint8_t> &ct)
+{
+    ct.clear();
+#ifdef ARDUINO
+    if (i >= kSlotCount) return false;
+    Preferences p;
+    if (!p.begin(kPinnedSlots[i].ns, true)) return false;
+    size_t len = p.getBytesLength(kPinnedSlots[i].key);
+    if (len > 0) {
+        ct.resize(len);
+        if (p.getBytes(kPinnedSlots[i].key, ct.data(), len) != len) ct.clear();
+    }
+    p.end();
+    return !ct.empty();
+#else
+    (void)i;
+    return false;
+#endif
+}
+
+bool secret_slot_write_raw(size_t i, const uint8_t *ct, size_t len)
+{
+#ifdef ARDUINO
+    if (i >= kSlotCount || !ct || len == 0) return false;
+    Preferences p;
+    if (!p.begin(kPinnedSlots[i].ns, false)) return false;
+    bool ok = p.putBytes(kPinnedSlots[i].key, ct, len) == len;
+    p.end();
+    return ok;
+#else
+    (void)i; (void)ct; (void)len;
+    return false;
+#endif
+}
+
+void secret_slot_erase(size_t i)
+{
+    if (i >= kSlotCount) return;
+#ifdef ARDUINO
+    Preferences p;
+    if (p.begin(kPinnedSlots[i].ns, false)) {
+        if (p.isKey(kPinnedSlots[i].key)) p.remove(kPinnedSlots[i].key);
+        p.end();
+    }
+#endif
+    notes_crypto_unpin_key(NC_PIN_SECRET_FIRST + (int)i);
+    mask_forget(kPinnedSlots[i].ns, kPinnedSlots[i].key);
 }
 
 bool secret_exists(const char *ns, const char *key)

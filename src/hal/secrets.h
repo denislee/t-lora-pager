@@ -10,7 +10,10 @@
  */
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace hal {
 
@@ -53,6 +56,22 @@ bool secret_mask_peek(const char *ns, const char *key, std::string &out);
  * notes_crypto_prewarm_fixed() after an unlock. secret_store re-pins a slot
  * it rewrites (from the key the encrypt just cached, no extra derive). */
 void secret_prewarm_pinned();
+
+/* Raw access to every encrypted secret slot (the pinned table: Telegram
+ * token, Notes Sync token, SSH password) for the bulk passphrase operations in
+ * notes_crypto.cpp, which must re-encrypt (change) or erase (disable) them in
+ * the same flow as the notes. No crypto here: these move ciphertext only.
+ * Slot `i` is in [0, secret_slot_count()). */
+size_t secret_slot_count();
+/* "ns/key" of slot `i`, for logs. */
+std::string secret_slot_name(size_t i);
+/* Ciphertext of slot `i`; false (and `ct` empty) when the slot is empty. */
+bool secret_slot_read_raw(size_t i, std::vector<uint8_t> &ct);
+/* Replace slot `i` with `ct`. True only when NVS took every byte. The pinned
+ * key is not updated: the caller re-pins (notes_crypto_prewarm_fixed). */
+bool secret_slot_write_raw(size_t i, const uint8_t *ct, size_t len);
+/* Remove slot `i`, its pinned key and its remembered mask. */
+void secret_slot_erase(size_t i);
 
 /* Drop a plaintext predecessor key that pre-dates encryption (e.g. the
  * bare "token" slot that lived next to "token_enc" during migration).

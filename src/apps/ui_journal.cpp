@@ -9,13 +9,22 @@
  *   paging:  target_focus_index, current_page — reset
  *   cache:   journal_entries / cache_valid    — kept on purpose (warm reopen)
  *   timers:  bg_refresh_timer           — the deferred one-shot that starts the
- *                                         rescan when the FS changed; cancelled via
- *                                         cancel_bg_refresh() on exit/rebuild.
+ *                                         rescan when the FS changed; also holds
+ *                                         the 0 ms first-run one-shot
+ *                                         (first_run_timer_cb, P7.6); both are
+ *                                         cancelled via cancel_bg_refresh() on
+ *                                         exit/rebuild.
  *   tasks:   s_bg_job (journal_bg)      — OneShotJob worker running the rescan on a
  *                                         snapshot; s_bg_job.teardown() on exit
  *                                         detaches it (it frees its own result).
  *                                         bg_refresh_done applies the result on the
  *                                         LVGL thread, dropped if s_entries_gen moved.
+ *   flags:   s_first_run_pending        — true while a first-run reconcile
+ *                                         (P7.6: index missing/empty/undecryptable,
+ *                                         run on s_bg_job instead of the LVGL thread)
+ *                                         owns the 'Loading Journal' loader;
+ *                                         bg_refresh_done clears it and hides the
+ *                                         loader; ui_journal_exit resets it to false.
  * No hardware sessions are held here. If you add any, list them above AND extend
  * the exit path.
  */
@@ -418,6 +427,10 @@ struct BgRefreshResult {
 // worker result computed from an older snapshot is dropped instead of applied.
 static uint32_t s_entries_gen = 0;
 static void bg_refresh_done(BgRefreshResult &r);
+static void start_first_run_refresh();
+static void schedule_first_run_refresh();
+// True while a first-run reconcile (P7.6) owns the journal loader.
+static bool s_first_run_pending = false;
 // The reconcile (directory walk + preview decrypts + index rewrite) runs here,
 // off the LVGL thread. The worker only touches its own snapshot.
 static core::OneShotJob<BgRefreshResult> s_bg_job(bg_refresh_done);
@@ -475,11 +488,68 @@ static void bg_refresh_timer_cb(lv_timer_t *t)
     }
 }
 
+// P7.6: the first-run reconcile hands its pass to s_bg_job instead of running
+// it on the LVGL thread. If an earlier worker (detached by a previous exit) is
+// still running, start() re-adopts it and its result lands here instead.
+static void start_first_run_refresh()
+{
+    BgRefreshResult *seed = new BgRefreshResult();
+    seed->entries_gen = s_entries_gen;   // journal_entries is empty here
+    seed->fs_gen = hw_get_filesystem_generation();
+    auto started = s_bg_job.start([seed]() {
+        INPUT_PROF_SPAN("journal_bg");
+        seed->saved_index = refresh_journal_entries(seed->entries, nullptr, nullptr);
+        return seed;
+    }, 10240, "journal_bg", 1, 0);
+    if (started == core::OneShotJob<BgRefreshResult>::Start::Attached) {
+        delete seed;   // the work lambda was not used; the running worker reports
+    } else if (started == core::OneShotJob<BgRefreshResult>::Start::Failed) {
+        // No task: run inline like before so the list still appears.
+        seed->saved_index = refresh_journal_entries(seed->entries, loader_update, nullptr);
+        bg_refresh_done(*seed);
+        delete seed;
+    }
+}
+
+static void first_run_timer_cb(lv_timer_t *t)
+{
+    bg_refresh_timer = nullptr;
+    lv_timer_del(t);
+    if (menu == NULL || parent_obj == NULL) {   // app closed before we ran
+        s_first_run_pending = false;
+        return;
+    }
+    start_first_run_refresh();
+}
+
+// Queue the first-run reconcile right after this frame; shares bg_refresh_timer
+// so cancel_bg_refresh() (exit, rebuild) covers it.
+static void schedule_first_run_refresh()
+{
+    cancel_bg_refresh();
+    s_first_run_pending = true;
+    ui_loading_set_indeterminate(&loader, "Scanning files...");
+    bg_refresh_timer = lv_timer_create(first_run_timer_cb, 0, NULL);
+    if (bg_refresh_timer) {
+        lv_timer_set_repeat_count(bg_refresh_timer, 1);
+    } else {
+        start_first_run_refresh();
+    }
+}
+
 static void bg_refresh_done(BgRefreshResult &r)
 {
+    // The first-run loader (P7.6) closes on any result, applied or dropped.
+    bool first_run = s_first_run_pending;
+    s_first_run_pending = false;
+    if (first_run) loader_hide();
     // journal_entries changed (a delete) since the snapshot: drop this result.
-    // cache_valid stays false, so the next open reconciles again.
-    if (r.entries_gen != s_entries_gen) return;
+    // cache_valid stays false, so the next open reconciles again; a first run
+    // that is still on screen reconciles again now, without the loader.
+    if (r.entries_gen != s_entries_gen) {
+        if (first_run && menu != NULL && parent_obj != NULL) schedule_bg_refresh();
+        return;
+    }
     uint32_t before = entries_signature(journal_entries);
     journal_entries = std::move(r.entries);
     s_entries_gen++;
@@ -704,6 +774,8 @@ static void journal_build_ui(lv_obj_t *parent)
 
     // This build supersedes any refresh queued by a previous one.
     cancel_bg_refresh();
+    // A first-run reconcile whose worker is gone no longer owns the loader.
+    if (!s_bg_job.busy()) s_first_run_pending = false;
 
     bool was_dirty = hw_get_filesystem_dirty();
     if (was_dirty) hw_set_filesystem_dirty(false);
@@ -730,12 +802,14 @@ static void journal_build_ui(lv_obj_t *parent)
     bool show_loader = need_refresh && !have_cache;
     if (show_loader) loader_show();
     menu = create_menu(parent, nullptr);
-    if (show_loader) {
-        refresh_journal_entries(journal_entries, loader_update, nullptr);
-        s_entries_gen++;
-        cache_valid = true;
-        need_refresh = false;
-    }
+    // P7.6: the first-run reconcile (index missing, empty or undecryptable:
+    // one snippet decrypt per note plus an encrypted index save) runs on
+    // s_bg_job like the IS.9 refresh, not inside lv_timer_handler. The loader
+    // stays up (indeterminate: the worker can't touch LVGL) over the empty page
+    // until bg_refresh_done applies the result and hides it.
+    // The job is started from a one-shot timer once this build returns, so an
+    // inline completion (emulator, or no task) can't rebuild the page under us.
+    if (show_loader) need_refresh = false;
 
     lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_style_pad_all(main_page, 0, 0);
@@ -948,14 +1022,17 @@ static void journal_build_ui(lv_obj_t *parent)
     // Cached list is now on screen; reconcile with the filesystem in the
     // background if it may be stale.
     if (need_refresh) schedule_bg_refresh();
+    if (show_loader) schedule_first_run_refresh();
 
-    loader_hide();
+    // A first-run reconcile still owns the loader; bg_refresh_done hides it.
+    if (!s_first_run_pending) loader_hide();
 }
 
 void ui_journal_exit(lv_obj_t *parent)
 {
     cancel_bg_refresh();
     s_bg_job.teardown();  // detach a running worker; it frees its own result
+    s_first_run_pending = false;
     loader_hide();
     ui_hide_back_button();
     disable_keyboard();

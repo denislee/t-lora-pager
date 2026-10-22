@@ -9,6 +9,7 @@
 #include "../hal_interface.h"
 #include "../core/spi_lock.h"
 #include "pbkdf2_sha256.h"
+#include "notes_migrate.h"
 #include "secrets.h"
 
 #include <atomic>
@@ -532,10 +533,17 @@ struct ProtFile {
     bool on_sd;         /* false = FFat internal, true = SD card */
 };
 
-static std::string display_label(const ProtFile &pf)
+static std::string display_label(const nc_migrate::NameCopies &n)
 {
-    return (pf.on_sd ? std::string("SD: ") : std::string("")) + pf.path;
+    return (!n.ffat && n.sd ? std::string("SD: ") : std::string("")) + n.path;
 }
+
+#ifdef ARDUINO
+static fs::FS &vol_fs(bool on_sd)
+{
+    return on_sd ? static_cast<fs::FS &>(SD) : static_cast<fs::FS &>(FFat);
+}
+#endif
 
 static bool raw_read(const ProtFile &pf, std::vector<uint8_t> &out)
 {
@@ -544,8 +552,7 @@ static bool raw_read(const ProtFile &pf, std::vector<uint8_t> &out)
     char s[256];
     normalize_path(pf.path.c_str(), s, sizeof(s));
     core::MaybeSpiLock lock(pf.on_sd);
-    return hal::fs_read_all(pf.on_sd ? static_cast<fs::FS &>(SD)
-                                     : static_cast<fs::FS &>(FFat), s, out);
+    return hal::fs_read_all(vol_fs(pf.on_sd), s, out);
 #else
     (void)pf; return false;
 #endif
@@ -557,49 +564,262 @@ static bool raw_write(const ProtFile &pf, const uint8_t *buf, size_t len)
     char s[256];
     normalize_path(pf.path.c_str(), s, sizeof(s));
     core::MaybeSpiLock lock(pf.on_sd);
-    return hal::fs_write_all(pf.on_sd ? static_cast<fs::FS &>(SD)
-                                      : static_cast<fs::FS &>(FFat), s, buf, len);
+    return hal::fs_write_all(vol_fs(pf.on_sd), s, buf, len);
 #else
     (void)pf; (void)buf; (void)len; return true;
 #endif
 }
 
-/* Protected files on the SD card: the notes/<leaf>.txt list from
- * hw_get_sd_txt_files (the same NOTES_DIR walk the internal side uses via
- * hw_get_internal_txt_files), plus the journal index at the SD root. */
-#ifdef ARDUINO
-static void collect_sd_protected(std::vector<ProtFile> &out)
+/* P6.27: read only the 8-byte magic. 1 = OpenSSL `enc` blob, 0 = plaintext
+ * (or shorter than the magic), -1 = could not open. */
+static int raw_probe(const ProtFile &pf)
 {
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return;
-    std::vector<std::string> txt;
-    hw_get_sd_txt_files(txt);
-    for (auto &p : txt) {
-        if (notes_crypto_path_is_protected(p.c_str())) out.push_back({p, true});
-    }
-    core::ScopedSpiLock lock;
-    if (SD.exists("/journal_idx.bin")) out.push_back({"/journal_idx.bin", true});
-}
+#ifdef ARDUINO
+    char s[256];
+    normalize_path(pf.path.c_str(), s, sizeof(s));
+    core::MaybeSpiLock lock(pf.on_sd);
+    File f = vol_fs(pf.on_sd).open(s, FILE_READ);
+    if (!f) return -1;
+    uint8_t hdr[8];
+    size_t n = f.read(hdr, sizeof(hdr));
+    f.close();
+    return has_magic(hdr, n) ? 1 : 0;
+#else
+    (void)pf; return -1;
 #endif
+}
 
-static void enumerate_protected(std::vector<ProtFile> &out)
+static bool raw_exists(const ProtFile &pf)
+{
+#ifdef ARDUINO
+    char s[256];
+    normalize_path(pf.path.c_str(), s, sizeof(s));
+    core::MaybeSpiLock lock(pf.on_sd);
+    return vol_fs(pf.on_sd).exists(s);
+#else
+    (void)pf; return false;
+#endif
+}
+
+static bool raw_remove(const ProtFile &pf)
+{
+#ifdef ARDUINO
+    char s[256];
+    normalize_path(pf.path.c_str(), s, sizeof(s));
+    core::MaybeSpiLock lock(pf.on_sd);
+    fs::FS &fs = vol_fs(pf.on_sd);
+    if (!fs.exists(s)) return true;
+    return fs.remove(s);
+#else
+    (void)pf; return true;
+#endif
+}
+
+static bool sd_online()
+{
+#ifdef ARDUINO
+    return (HW_SD_ONLINE & hw_get_device_online()) != 0;
+#else
+    return false;
+#endif
+}
+
+/* Protected names on FFat and/or SD, grouped by name (P7.7): notes/<leaf>.txt
+ * from hw_get_internal_txt_files / hw_get_sd_txt_files (same NOTES_DIR walk,
+ * same path form) plus the journal index at each root. The SD card is mounted
+ * first if it wasn't, so a passphrase set while the card was out still
+ * migrates it on the next rotation. */
+static void enumerate_names(std::vector<nc_migrate::NameCopies> &out,
+                            bool want_ffat, bool want_sd)
 {
     out.clear();
-    std::vector<std::string> txt;
-    hw_get_internal_txt_files(txt);
-    for (auto &p : txt) {
-        if (notes_crypto_path_is_protected(p.c_str())) out.push_back({p, false});
+    std::vector<std::string> f, s;
+    if (want_ffat) {
+        std::vector<std::string> txt;
+        hw_get_internal_txt_files(txt);
+        for (auto &p : txt) {
+            if (notes_crypto_path_is_protected(p.c_str())) f.push_back(p);
+        }
+#ifdef ARDUINO
+        if (FFat.exists("/journal_idx.bin")) f.push_back("/journal_idx.bin");
+#endif
     }
 #ifdef ARDUINO
-    if (FFat.exists("/journal_idx.bin")) {
-        out.push_back({"/journal_idx.bin", false});
+    if (want_sd) {
+        if (!sd_online()) hw_mount_sd();
+        if (sd_online()) {
+            std::vector<std::string> txt;
+            hw_get_sd_txt_files(txt);
+            for (auto &p : txt) {
+                if (notes_crypto_path_is_protected(p.c_str())) s.push_back(p);
+            }
+            core::ScopedSpiLock lock;
+            if (SD.exists("/journal_idx.bin")) s.push_back("/journal_idx.bin");
+        }
     }
-    /* Try to pick up the card if it wasn't mounted yet — a passphrase set
-     * while the card was out should still migrate it on the next rotation. */
-    if (!(HW_SD_ONLINE & hw_get_device_online())) {
-        hw_mount_sd();
-    }
-    collect_sd_protected(out);
+#else
+    (void)want_sd;
 #endif
+    out = nc_migrate::group_by_name(f, s);
+}
+
+/* The selected copies of one name. Either buffer may hold note plaintext, so
+ * both are wiped on the way out. */
+struct Copies {
+    std::vector<uint8_t> f, s;
+    bool f_ok = false, s_ok = false;
+    ~Copies()
+    {
+        if (!f.empty()) zeroize(f.data(), f.size());
+        if (!s.empty()) zeroize(s.data(), s.size());
+    }
+};
+
+/* Read the selected copies of `n` and say how they relate. Byte equality is
+ * checked on the two buffers just read (size, then memcmp), which is exact;
+ * a size+CRC comparison would need the same two reads. */
+static nc_migrate::CopyPlan load_copies(const nc_migrate::NameCopies &n,
+                                        bool want_f, bool want_s, Copies &c)
+{
+    c.f_ok = want_f && n.ffat && raw_read({n.path, false}, c.f);
+    c.s_ok = want_s && n.sd && raw_read({n.path, true}, c.s);
+    bool same = c.f_ok && c.s_ok &&
+                nc_migrate::bytes_equal(c.f.data(), c.f.size(), c.s.data(), c.s.size());
+    return nc_migrate::plan_copies(c.f_ok, c.s_ok, same);
+}
+
+/* ---- NVS state of the change-passphrase protocol (namespace NC_NS). */
+#define NC_KEY_PENDING  "pending"   /* enc(new_pw, NC_CANARY_PT) while a change is in flight */
+#define NC_KEY_PEND_SD  "pend_sd"   /* u8: the in-flight change may have staged files on SD */
+#define NC_KEY_STG_SEC  "stg_s"     /* + slot index: staged secret ciphertext */
+
+static bool nvs_get(const char *key, std::vector<uint8_t> &out)
+{
+    out.clear();
+#ifdef ARDUINO
+    Preferences p;
+    if (!p.begin(NC_NS, true)) return false;
+    size_t len = p.getBytesLength(key);
+    if (len > 0) {
+        out.resize(len);
+        if (p.getBytes(key, out.data(), len) != len) out.clear();
+    }
+    p.end();
+    return !out.empty();
+#else
+    (void)key; return false;
+#endif
+}
+
+[[maybe_unused]] static bool nvs_put(const char *key, const uint8_t *buf, size_t len)
+{
+#ifdef ARDUINO
+    Preferences p;
+    if (!p.begin(NC_NS, false)) return false;
+    bool ok = p.putBytes(key, buf, len) == len;
+    p.end();
+    return ok;
+#else
+    (void)key; (void)buf; (void)len; return false;
+#endif
+}
+
+static void nvs_del(const char *key)
+{
+#ifdef ARDUINO
+    Preferences p;
+    if (!p.begin(NC_NS, false)) return;
+    if (p.isKey(key)) p.remove(key);
+    p.end();
+#else
+    (void)key;
+#endif
+}
+
+static std::string stg_sec_key(size_t i)
+{
+    char k[16];
+    snprintf(k, sizeof(k), NC_KEY_STG_SEC "%u", (unsigned)i);
+    return k;
+}
+
+static bool pending_touches_sd()
+{
+    std::vector<uint8_t> v;
+    return nvs_get(NC_KEY_PEND_SD, v) && v[0] != 0;
+}
+
+/* Install (roll_forward) or delete (!roll_forward) every staged copy and
+ * staged secret left by a change-passphrase. File/NVS moves only, no crypto.
+ * True when nothing staged is left behind, i.e. the pending marker may go.
+ * A staged copy is installed by rewriting the original in place and only then
+ * removing the staged file, so the original never disappears and an
+ * interruption here is simply resumed by the next unlock. */
+static bool settle_staged(bool roll_forward,
+                          const std::vector<nc_migrate::NameCopies> *known = nullptr)
+{
+    bool complete = true;
+    std::vector<nc_migrate::NameCopies> walked;
+    if (!known) {
+        enumerate_names(walked, true, true);
+        known = &walked;
+    }
+    if (pending_touches_sd() && !sd_online()) complete = false;   /* retry with the card in */
+
+    for (const auto &n : *known) {
+        for (int v = 0; v < 2; v++) {
+            bool on_sd = (v == 1);
+            if (on_sd ? !n.sd : !n.ffat) continue;
+            ProtFile st{nc_migrate::staged_path(n.path), on_sd};
+            if (!raw_exists(st)) continue;
+            if (roll_forward) {
+                std::vector<uint8_t> ct;
+                if (!raw_read(st, ct) || !has_magic(ct.data(), ct.size()) ||
+                    !raw_write({n.path, on_sd}, ct.data(), ct.size())) {
+                    complete = false;
+                    continue;
+                }
+            }
+            if (!raw_remove(st)) complete = false;
+        }
+    }
+
+    for (size_t i = 0; i < hal::secret_slot_count(); i++) {
+        std::string k = stg_sec_key(i);
+        std::vector<uint8_t> ct;
+        if (!nvs_get(k.c_str(), ct)) continue;
+        if (roll_forward && !hal::secret_slot_write_raw(i, ct.data(), ct.size())) {
+            complete = false;
+            continue;
+        }
+        nvs_del(k.c_str());
+    }
+    return complete;
+}
+
+static void clear_pending()
+{
+    nvs_del(NC_KEY_PEND_SD);
+    nvs_del(NC_KEY_PENDING);
+}
+
+/* Called by notes_crypto_unlock after `pw` passed the canary, before the
+ * session is published: finish (the commit happened) or undo (it didn't) an
+ * interrupted change-passphrase. See "Change-passphrase ordering" below. */
+static void recover_pending_change(const char *pw)
+{
+    std::vector<uint8_t> pend;
+    if (!nvs_get(NC_KEY_PENDING, pend)) return;
+    std::string dec;
+    bool verifies = decrypt_with_pw(pw, pend.data(), pend.size(), dec) &&
+                    dec == NC_CANARY_PT;
+    if (!dec.empty()) zeroize(&dec[0], dec.size());
+    bool roll_forward =
+        nc_migrate::pending_recovery(true, verifies) == nc_migrate::Recovery::RollForward;
+    printf("[notes_crypto] interrupted passphrase change: %s\n",
+           roll_forward ? "installing staged copies" : "discarding staged copies");
+    if (settle_staged(roll_forward)) clear_pending();
+    else printf("[notes_crypto] staged copies left; retrying on next unlock\n");
 }
 
 } /* namespace */
@@ -641,6 +861,11 @@ bool notes_crypto_unlock(const char *pw)
               dec == NC_CANARY_PT;
     if (!dec.empty()) zeroize(&dec[0], dec.size());
     if (!ok) return false;
+
+    /* P7.7: an interrupted change-passphrase is finished or undone here, before
+     * anything can read notes under this session. No-op (one NVS lookup) when
+     * nothing is pending. */
+    recover_pending_change(pw);
 
     /* Publish only after the canary verified, and atomically with the flush.
      * May run on a worker (ui_lock.cpp's unlock job), so it is done under the
@@ -887,29 +1112,80 @@ bool notes_crypto_set_passphrase(const char *new_pw)
     return true;
 }
 
-void notes_crypto_encrypt_existing(void (*cb)(int cur, int total, const char *name))
+/* Session passphrase copy for a bulk operation running on a worker. Empty when
+ * locked. Read under the mutex because unlock/lock write it from other tasks. */
+static std::string session_passphrase()
 {
-    if (!g_unlocked) return;
+    PrewarmLock lk;
+    return g_unlocked ? g_passphrase : std::string();
+}
 
-    std::vector<ProtFile> files;
-    enumerate_protected(files);
+static void scrub(std::string &s)
+{
+    if (!s.empty()) zeroize(&s[0], s.size());
+    s.clear();
+}
 
-    int total = (int)files.size();
-    int cur = 0;
-    for (const auto &pf : files) {
+/* Encrypt the plaintext copies of every protected name under `pw` (P7.7):
+ * the 8-byte probe skips copies that are already `enc` blobs without reading
+ * them, and a name whose FFat and SD copies are byte-identical is encrypted
+ * once and the same ciphertext (same salt, as hw_save_preferred_* would write)
+ * goes to both. Returns the number of copies rewritten. */
+static int encrypt_plain_names(const std::string &pw, bool want_ffat, bool want_sd,
+                               int *scanned, void (*cb)(int cur, int total, const char *name))
+{
+    std::vector<nc_migrate::NameCopies> names;
+    enumerate_names(names, want_ffat, want_sd);
+    int total = (int)names.size();
+    if (scanned) *scanned = total;
+    int cur = 0, written = 0;
+    for (const auto &n : names) {
         cur++;
-        std::string label = display_label(pf);
-        if (cb) cb(cur, total, label.c_str());
-        std::vector<uint8_t> raw;
-        if (!raw_read(pf, raw)) continue;
-        if (has_magic(raw.data(), raw.size())) continue;    /* already encrypted */
+        if (cb) {
+            std::string label = display_label(n);
+            cb(cur, total, label.c_str());
+        }
+        bool wf = n.ffat && raw_probe({n.path, false}) == 0;
+        bool ws = n.sd && raw_probe({n.path, true}) == 0;
+        if (!wf && !ws) continue;
+
+        Copies c;
+        nc_migrate::CopyPlan plan = load_copies(n, wf, ws, c);
+        /* A write raced the probe: never wrap an `enc` blob a second time. */
+        if (c.f_ok && has_magic(c.f.data(), c.f.size())) c.f_ok = false;
+        if (c.s_ok && has_magic(c.s.data(), c.s.size())) c.s_ok = false;
+        plan = nc_migrate::plan_copies(c.f_ok, c.s_ok, plan == nc_migrate::CopyPlan::Shared);
 
         std::vector<uint8_t> ct;
-        if (!encrypt_with_pw(g_passphrase.c_str(),
-                             raw.data(), raw.size(), ct)) continue;
-        raw_write(pf, ct.data(), ct.size());
+        switch (plan) {
+        case nc_migrate::CopyPlan::Shared:
+            if (encrypt_with_pw(pw.c_str(), c.f.data(), c.f.size(), ct)) {
+                if (raw_write({n.path, false}, ct.data(), ct.size())) written++;
+                if (raw_write({n.path, true},  ct.data(), ct.size())) written++;
+            }
+            break;
+        case nc_migrate::CopyPlan::Separate:
+        case nc_migrate::CopyPlan::FfatOnly:
+        case nc_migrate::CopyPlan::SdOnly:
+            if (c.f_ok && encrypt_with_pw(pw.c_str(), c.f.data(), c.f.size(), ct) &&
+                raw_write({n.path, false}, ct.data(), ct.size())) written++;
+            if (c.s_ok && encrypt_with_pw(pw.c_str(), c.s.data(), c.s.size(), ct) &&
+                raw_write({n.path, true}, ct.data(), ct.size())) written++;
+            break;
+        case nc_migrate::CopyPlan::None:
+            break;
+        }
     }
     if (cb) cb(total, total, "Done");
+    return written;
+}
+
+void notes_crypto_encrypt_existing(void (*cb)(int cur, int total, const char *name))
+{
+    std::string pw = session_passphrase();
+    if (pw.empty()) return;
+    encrypt_plain_names(pw, true, true, nullptr, cb);
+    scrub(pw);
 }
 
 bool notes_crypto_encrypt_sd(int *scanned, int *encrypted,
@@ -917,37 +1193,17 @@ bool notes_crypto_encrypt_sd(int *scanned, int *encrypted,
 {
     if (scanned)   *scanned = 0;
     if (encrypted) *encrypted = 0;
-    if (!notes_crypto_is_enabled() || !g_unlocked) return false;
+    if (!notes_crypto_is_enabled()) return false;
 
 #ifdef ARDUINO
-    if (!(HW_SD_ONLINE & hw_get_device_online())) {
-        hw_mount_sd();
-    }
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
+    std::string pw = session_passphrase();
+    if (pw.empty()) return false;
+    if (!sd_online()) hw_mount_sd();
+    if (!sd_online()) { scrub(pw); return false; }
 
-    std::vector<ProtFile> files;
-    collect_sd_protected(files);
-
-    int total = (int)files.size();
-    int cur = 0;
-    int enc_count = 0;
-    for (const auto &pf : files) {
-        cur++;
-        std::string label = display_label(pf);
-        if (cb) cb(cur, total, label.c_str());
-
-        std::vector<uint8_t> raw;
-        if (!raw_read(pf, raw)) continue;
-        if (has_magic(raw.data(), raw.size())) continue;    /* already encrypted */
-
-        std::vector<uint8_t> ct;
-        if (!encrypt_with_pw(g_passphrase.c_str(),
-                             raw.data(), raw.size(), ct)) continue;
-        if (raw_write(pf, ct.data(), ct.size())) enc_count++;
-    }
-    if (cb) cb(total, total, "Done");
-    if (scanned)   *scanned   = total;
-    if (encrypted) *encrypted = enc_count;
+    int n = encrypt_plain_names(pw, false, true, scanned, cb);
+    if (encrypted) *encrypted = n;
+    scrub(pw);
     return true;
 #else
     (void)cb;
@@ -955,92 +1211,261 @@ bool notes_crypto_encrypt_sd(int *scanned, int *encrypted,
 #endif
 }
 
+/* ---- Change-passphrase ordering (P7.7).
+ *
+ * Invariant: at no point after an interruption (crash, power loss, brown-out)
+ * is a protected file or secret encrypted under a passphrase that the canary
+ * does not verify. Rewriting files in place cannot give that with one canary:
+ * whichever of {files, canary} goes first, a crash in the middle leaves some
+ * files under a key the canary rejects (the old code rewrote files first, so an
+ * interrupted change left the already-rewritten notes unreadable until the
+ * user happened to repeat the same change; that repeat then relied on a wrong-
+ * key decrypt failing its PKCS#7 check, which passes by chance ~1/256 per
+ * file and would have re-encrypted garbage). So the change is staged and the
+ * canary write is the single commit point:
+ *
+ *   0. NVS `pending` = enc(new, canary text) (+ `pend_sd`). Marks the change.
+ *   1. Stage: every protected copy is decrypted under old and its ciphertext
+ *      under new written to `<path>.ncnew` next to it (originals untouched);
+ *      every secret slot's re-encryption goes to NVS `stg_s<i>`. Any write
+ *      failure discards the staged set and fails the change: nothing changed.
+ *   2. Commit: canary = enc(new). NVS replaces a blob atomically.
+ *   3. Switch the session to new, install the staged copies (rewrite the
+ *      original in place, then delete the staged file), clear `pending`.
+ *
+ * An unlock always settles an interrupted change before publishing the
+ * session (recover_pending_change): the canary verifies the passphrase typed;
+ * if `pending` verifies it too, step 2 happened and step 3 is resumed; if not,
+ * the canary is still the old one and the staged copies are deleted. Either
+ * way every original is under the canary's passphrase throughout. Costs: one
+ * extra PBKDF2 at an unlock only while `pending` exists, and room for one
+ * staged copy of every protected file during the change (a full volume fails
+ * the change cleanly at step 1).
+ *
+ * Not covered (unchanged from before): a note written by another task (phone
+ * fs.write, notes sync, an editor save) between its staging and step 3 is
+ * overwritten by the staged copy; a copy that does not decrypt under old is
+ * left as it is. */
 bool notes_crypto_change_passphrase(const char *old_pw, const char *new_pw,
                                     void (*cb)(int cur, int total, const char *name))
 {
     if (!old_pw || !new_pw || !*new_pw) return false;
+    /* Verifies old and settles any interrupted change first. */
     if (!notes_crypto_unlock(old_pw)) return false;
 
+#ifdef ARDUINO
     std::string old_pass = old_pw;
     std::string new_pass = new_pw;
+    struct ScrubBoth {
+        std::string &a, &b;
+        ~ScrubBoth() { scrub(a); scrub(b); }
+    } scrub_both{old_pass, new_pass};
 
-    std::vector<ProtFile> files;
-    enumerate_protected(files);
-
-    int total = (int)files.size();
-    int cur = 0;
-    for (const auto &pf : files) {
-        cur++;
-        std::string label = display_label(pf);
-        if (cb) cb(cur, total, label.c_str());
-
-        std::vector<uint8_t> raw;
-        if (!raw_read(pf, raw)) continue;
-
-        std::string plain;
-        if (has_magic(raw.data(), raw.size())) {
-            if (!decrypt_with_pw(old_pass.c_str(),
-                                 raw.data(), raw.size(), plain)) continue;
-        } else {
-            plain.assign((const char *)raw.data(), raw.size());
-        }
-
-        std::vector<uint8_t> ct;
-        if (!encrypt_with_pw(new_pass.c_str(),
-                             (const uint8_t *)plain.data(), plain.size(), ct)) continue;
-        raw_write(pf, ct.data(), ct.size());
-        zeroize(&plain[0], plain.size());
+    /* A settle that could not finish (SD card out) must complete first: a new
+     * change would otherwise overwrite its `pending` marker. */
+    std::vector<uint8_t> existing;
+    if (nvs_get(NC_KEY_PENDING, existing)) {
+        printf("[notes_crypto] change refused: an interrupted change is still pending\n");
+        return false;
     }
 
-    /* Rotate the canary last — a crash between file rewrites and the canary
-     * update would leave us with mixed keys under the OLD canary, which the
-     * user can still recover from. */
-    std::vector<uint8_t> canary_ct;
-    if (!encrypt_with_pw(new_pass.c_str(),
-                         (const uint8_t *)NC_CANARY_PT,
-                         strlen(NC_CANARY_PT), canary_ct)) return false;
-    if (!write_canary(canary_ct)) return false;
+    std::vector<nc_migrate::NameCopies> names;
+    enumerate_names(names, true, true);
+    /* Staged copies left by a rollback that ran without the SD card. */
+    settle_staged(false, &names);
 
-    zeroize(&old_pass[0], old_pass.size());
+    /* Step 0. */
+    std::vector<uint8_t> marker;
+    if (!encrypt_with_pw(new_pass.c_str(), (const uint8_t *)NC_CANARY_PT,
+                         strlen(NC_CANARY_PT), marker)) return false;
+    uint8_t any_sd = 0;
+    for (const auto &n : names) any_sd |= n.sd ? 1 : 0;
+    if (!nvs_put(NC_KEY_PEND_SD, &any_sd, 1) ||
+        !nvs_put(NC_KEY_PENDING, marker.data(), marker.size())) {
+        clear_pending();
+        return false;
+    }
+
+    /* Step 1. Decrypt each name once; byte-identical FFat/SD copies share one
+     * new ciphertext. */
+    const int total = (int)names.size() + 1;    /* + the secret slots */
+    int cur = 0;
+    bool failed = false;
+    auto to_plain = [&](const std::vector<uint8_t> &raw, std::string &plain) -> bool {
+        if (has_magic(raw.data(), raw.size()))
+            return decrypt_with_pw(old_pass.c_str(), raw.data(), raw.size(), plain);
+        plain.assign((const char *)raw.data(), raw.size());   /* plaintext gets encrypted too */
+        return true;
+    };
+    auto stage_copy = [&](const nc_migrate::NameCopies &n, const std::vector<uint8_t> &raw,
+                          bool to_ffat, bool to_sd) -> bool {
+        std::string plain;
+        if (!to_plain(raw, plain)) {
+            printf("[notes_crypto] %s: not under the current passphrase, left as is\n",
+                   n.path.c_str());
+            scrub(plain);
+            return true;
+        }
+        std::vector<uint8_t> ct;
+        bool ok = encrypt_with_pw(new_pass.c_str(), (const uint8_t *)plain.data(),
+                                  plain.size(), ct);
+        scrub(plain);
+        std::string st = nc_migrate::staged_path(n.path);
+        if (ok && to_ffat) ok = raw_write({st, false}, ct.data(), ct.size());
+        if (ok && to_sd)   ok = raw_write({st, true},  ct.data(), ct.size());
+        return ok;
+    };
+
+    for (const auto &n : names) {
+        cur++;
+        if (cb) {
+            std::string label = display_label(n);
+            cb(cur, total, label.c_str());
+        }
+        Copies c;
+        switch (load_copies(n, true, true, c)) {
+        case nc_migrate::CopyPlan::Shared:
+            failed = !stage_copy(n, c.f, true, true);
+            break;
+        case nc_migrate::CopyPlan::Separate:
+            failed = !stage_copy(n, c.f, true, false) || !stage_copy(n, c.s, false, true);
+            break;
+        case nc_migrate::CopyPlan::FfatOnly:
+            failed = !stage_copy(n, c.f, true, false);
+            break;
+        case nc_migrate::CopyPlan::SdOnly:
+            failed = !stage_copy(n, c.s, false, true);
+            break;
+        case nc_migrate::CopyPlan::None:
+            break;
+        }
+        if (failed) break;
+    }
+
+    /* Secrets: before P7.7 they were not touched here and stopped decrypting
+     * after every passphrase change. */
+    if (!failed) {
+        cur++;
+        if (cb) cb(cur, total, "Secrets");
+        for (size_t i = 0; i < hal::secret_slot_count() && !failed; i++) {
+            std::vector<uint8_t> ct;
+            if (!hal::secret_slot_read_raw(i, ct)) continue;
+            std::string plain;
+            if (!decrypt_with_pw(old_pass.c_str(), ct.data(), ct.size(), plain)) {
+                printf("[notes_crypto] secret %s: not under the current passphrase, left as is\n",
+                       hal::secret_slot_name(i).c_str());
+                continue;
+            }
+            std::vector<uint8_t> nct;
+            bool ok = encrypt_with_pw(new_pass.c_str(), (const uint8_t *)plain.data(),
+                                      plain.size(), nct);
+            scrub(plain);
+            std::string k = stg_sec_key(i);
+            if (!ok || !nvs_put(k.c_str(), nct.data(), nct.size())) failed = true;
+        }
+    }
+
+    std::vector<uint8_t> canary_ct;
+    if (!failed && !encrypt_with_pw(new_pass.c_str(), (const uint8_t *)NC_CANARY_PT,
+                                    strlen(NC_CANARY_PT), canary_ct)) failed = true;
+    if (failed) {
+        printf("[notes_crypto] change failed while staging; nothing changed\n");
+        if (settle_staged(false, &names)) clear_pending();
+        return false;
+    }
+
+    /* Step 2: the commit. If NVS reports a failure, read back to learn which
+     * canary is actually stored, and settle the staged set to match it. */
+    if (!nvs_put(NC_KEY_CANARY, canary_ct.data(), canary_ct.size())) {
+        std::vector<uint8_t> now;
+        bool committed = read_canary(now) && now == canary_ct;
+        if (!committed) {
+            if (settle_staged(false, &names)) clear_pending();
+            return false;
+        }
+    }
+
+    /* Step 3. */
     {
         PrewarmLock lk;
         g_passphrase = new_pass;
         prewarm_clear_locked();     /* may hold a triple primed under the old key */
-#ifdef ARDUINO
-        keycache_flush_locked();    /* the rewrite loop cached derivations under the old key */
-#endif
+        keycache_flush_locked();    /* old-key derivations; also wipes every pin */
         g_unlocked = true;
     }
-    zeroize(&new_pass[0], new_pass.size());
+    if (cb) cb(total, total, "Finishing...");
+    if (settle_staged(true, &names)) clear_pending();
+    else printf("[notes_crypto] staged copies left; the next unlock installs them\n");
+
+    /* The flush wiped the pinned keys (journal index, secrets): re-pin them
+     * under the new passphrase so the next Journal/Telegram open doesn't derive
+     * on the LVGL thread. One PBKDF2 per pinned blob; we are on a worker. */
+    notes_crypto_prewarm_fixed();
     if (cb) cb(total, total, "Done");
     return true;
+#else
+    (void)cb;
+    return false;
+#endif
 }
 
+/* Disable: every protected copy back to plaintext (decrypted once per name
+ * when the FFat and SD copies are identical), then the secret slots are
+ * ERASED, then the canary. Secrets are never stored in plaintext (secret_store
+ * refuses without encryption; secrets.h), and with no canary nothing could
+ * ever unlock them again, so erasing is the only state consistent with
+ * "encryption off": Settings then shows "(not set)" instead of a "(locked)"
+ * that no passphrase opens. Ordering: an interrupted disable leaves plaintext
+ * copies (always readable) next to copies under the canary's passphrase, and
+ * secrets go before the canary so none outlives the canary that opens it. */
 bool notes_crypto_disable(const char *pw, void (*cb)(int cur, int total, const char *name))
 {
     if (!pw) return false;
-    if (!notes_crypto_unlock(pw)) return false;
+    if (!notes_crypto_unlock(pw)) return false;     /* settles a pending change too */
+    std::string pass = pw;
 
-    std::vector<ProtFile> files;
-    enumerate_protected(files);
-    int total = (int)files.size();
+    std::vector<nc_migrate::NameCopies> names;
+    enumerate_names(names, true, true);
+    int total = (int)names.size();
     int cur = 0;
-    for (const auto &pf : files) {
+    for (const auto &n : names) {
         cur++;
-        std::string label = display_label(pf);
-        if (cb) cb(cur, total, label.c_str());
+        if (cb) {
+            std::string label = display_label(n);
+            cb(cur, total, label.c_str());
+        }
+        bool wf = n.ffat && raw_probe({n.path, false}) == 1;
+        bool ws = n.sd && raw_probe({n.path, true}) == 1;
+        if (!wf && !ws) continue;                   /* already plain */
 
-        std::vector<uint8_t> raw;
-        if (!raw_read(pf, raw)) continue;
-        if (!has_magic(raw.data(), raw.size())) continue;  /* already plain */
-
+        Copies c;
+        nc_migrate::CopyPlan plan = load_copies(n, wf, ws, c);
         std::string plain;
-        if (!decrypt_with_pw(g_passphrase.c_str(),
-                             raw.data(), raw.size(), plain)) continue;
-        raw_write(pf, (const uint8_t *)plain.data(), plain.size());
-        zeroize(&plain[0], plain.size());
+        switch (plan) {
+        case nc_migrate::CopyPlan::Shared:
+            if (decrypt_with_pw(pass.c_str(), c.f.data(), c.f.size(), plain)) {
+                raw_write({n.path, false}, (const uint8_t *)plain.data(), plain.size());
+                raw_write({n.path, true},  (const uint8_t *)plain.data(), plain.size());
+            }
+            break;
+        case nc_migrate::CopyPlan::Separate:
+        case nc_migrate::CopyPlan::FfatOnly:
+        case nc_migrate::CopyPlan::SdOnly:
+            if (c.f_ok && decrypt_with_pw(pass.c_str(), c.f.data(), c.f.size(), plain))
+                raw_write({n.path, false}, (const uint8_t *)plain.data(), plain.size());
+            scrub(plain);
+            if (c.s_ok && decrypt_with_pw(pass.c_str(), c.s.data(), c.s.size(), plain))
+                raw_write({n.path, true}, (const uint8_t *)plain.data(), plain.size());
+            break;
+        case nc_migrate::CopyPlan::None:
+            break;
+        }
+        scrub(plain);
     }
+    scrub(pass);
 
+    for (size_t i = 0; i < hal::secret_slot_count(); i++) hal::secret_slot_erase(i);
+    clear_pending();
     erase_canary();
     notes_crypto_lock();
     if (cb) cb(total, total, "Done");
