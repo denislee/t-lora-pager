@@ -99,10 +99,15 @@ bool notes_crypto_set_passphrase(const char *new_pw);
 bool notes_crypto_change_passphrase(const char *old_pw, const char *new_pw,
                                     void (*cb)(int cur, int total, const char *name) = nullptr);
 
-/* Decrypts every protected file back to plaintext, removes the canary, locks
- * the session. */
-bool notes_crypto_disable(const char *pw,
-                          void (*cb)(int cur, int total, const char *name) = nullptr);
+/* Decrypts every protected file back to plaintext, erases the secret slots
+ * and the canary, locks the session. Refuses (NotesDisableResult::Pending)
+ * while an interrupted passphrase change is still unsettled (SD card out), and
+ * keeps encryption on (WriteFailed) when any copy could not be rewritten as
+ * plaintext: erasing the canary then would strand that copy. Either refusal
+ * may leave some copies already plaintext, which is always readable. */
+enum class NotesDisableResult { Ok, WrongPassphrase, Pending, WriteFailed };
+NotesDisableResult notes_crypto_disable(const char *pw,
+                                        void (*cb)(int cur, int total, const char *name) = nullptr);
 
 /* Migration helper: after set_passphrase, walk every protected plaintext file
  * and rewrite it encrypted. Safe to call on a mix — files already carrying the

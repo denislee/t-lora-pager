@@ -1431,11 +1431,23 @@ bool notes_crypto_change_passphrase(const char *old_pw, const char *new_pw,
  * that no passphrase opens. Ordering: an interrupted disable leaves plaintext
  * copies (always readable) next to copies under the canary's passphrase, and
  * secrets go before the canary so none outlives the canary that opens it. */
-bool notes_crypto_disable(const char *pw, void (*cb)(int cur, int total, const char *name))
+NotesDisableResult notes_crypto_disable(const char *pw,
+                                        void (*cb)(int cur, int total, const char *name))
 {
-    if (!pw) return false;
-    if (!notes_crypto_unlock(pw)) return false;     /* settles a pending change too */
+    if (!pw) return NotesDisableResult::WrongPassphrase;
+    if (!notes_crypto_unlock(pw)) return NotesDisableResult::WrongPassphrase;  /* settles a pending change too */
+    /* A change the unlock could not settle (its staged copies or originals are
+     * on an SD card that is out) must finish first: erasing the canary now
+     * would leave the SD originals under a passphrase nothing asks for again. */
+    {
+        std::vector<uint8_t> pend;
+        if (nvs_get(NC_KEY_PENDING, pend)) {
+            printf("[notes_crypto] disable refused: an interrupted change is still pending\n");
+            return NotesDisableResult::Pending;
+        }
+    }
     std::string pass = pw;
+    bool write_failed = false;
 
     std::vector<nc_migrate::NameCopies> names;
     enumerate_names(names, true, true);
@@ -1457,18 +1469,22 @@ bool notes_crypto_disable(const char *pw, void (*cb)(int cur, int total, const c
         switch (plan) {
         case nc_migrate::CopyPlan::Shared:
             if (decrypt_with_pw(pass.c_str(), c.f.data(), c.f.size(), plain)) {
-                raw_write({n.path, false}, (const uint8_t *)plain.data(), plain.size());
-                raw_write({n.path, true},  (const uint8_t *)plain.data(), plain.size());
+                if (!raw_write({n.path, false}, (const uint8_t *)plain.data(), plain.size()))
+                    write_failed = true;
+                if (!raw_write({n.path, true},  (const uint8_t *)plain.data(), plain.size()))
+                    write_failed = true;
             }
             break;
         case nc_migrate::CopyPlan::Separate:
         case nc_migrate::CopyPlan::FfatOnly:
         case nc_migrate::CopyPlan::SdOnly:
-            if (c.f_ok && decrypt_with_pw(pass.c_str(), c.f.data(), c.f.size(), plain))
-                raw_write({n.path, false}, (const uint8_t *)plain.data(), plain.size());
+            if (c.f_ok && decrypt_with_pw(pass.c_str(), c.f.data(), c.f.size(), plain) &&
+                !raw_write({n.path, false}, (const uint8_t *)plain.data(), plain.size()))
+                write_failed = true;
             scrub(plain);
-            if (c.s_ok && decrypt_with_pw(pass.c_str(), c.s.data(), c.s.size(), plain))
-                raw_write({n.path, true}, (const uint8_t *)plain.data(), plain.size());
+            if (c.s_ok && decrypt_with_pw(pass.c_str(), c.s.data(), c.s.size(), plain) &&
+                !raw_write({n.path, true}, (const uint8_t *)plain.data(), plain.size()))
+                write_failed = true;
             break;
         case nc_migrate::CopyPlan::None:
             break;
@@ -1477,10 +1493,20 @@ bool notes_crypto_disable(const char *pw, void (*cb)(int cur, int total, const c
     }
     scrub(pass);
 
+    /* Security review of P7.7: a copy that is still ciphertext because its
+     * plaintext write failed (full or read-only volume) would be unreadable
+     * once the canary is gone. Keep encryption on; a retry resumes, since
+     * the copies already rewritten are skipped as plain. */
+    if (write_failed) {
+        printf("[notes_crypto] disable stopped: a plaintext write failed; encryption stays on\n");
+        if (cb) cb(total, total, "Failed");
+        return NotesDisableResult::WriteFailed;
+    }
+
     for (size_t i = 0; i < hal::secret_slot_count(); i++) hal::secret_slot_erase(i);
     clear_pending();
     erase_canary();
     notes_crypto_lock();
     if (cb) cb(total, total, "Done");
-    return true;
+    return NotesDisableResult::Ok;
 }

@@ -479,12 +479,25 @@ void disable_pw_cb(const char *pw, void *)
     if (!pw) return;
     std::string *p = new std::string(pw);
     bool started = start_sec_job("Decrypting notes", [p]() -> SecResult * {
-        bool ok = notes_crypto_disable(p->c_str(), storage_progress_post);
+        NotesDisableResult res = notes_crypto_disable(p->c_str(), storage_progress_post);
         hal::secret_scrub(*p);
         delete p;
         auto *r = new SecResult();
-        r->msg = ok ? "Encryption disabled. Notes are plaintext again.\nSaved tokens were erased."
-                    : "Wrong passphrase.";
+        switch (res) {
+        case NotesDisableResult::Ok:
+            r->msg = "Encryption disabled. Notes are plaintext again.\nSaved tokens were erased.";
+            break;
+        case NotesDisableResult::Pending:
+            r->msg = "An interrupted passphrase change needs the SD card.\nInsert it, unlock, then retry.";
+            break;
+        case NotesDisableResult::WriteFailed:
+            r->msg = "Some notes could not be written.\nEncryption stays on; free space and retry.";
+            break;
+        case NotesDisableResult::WrongPassphrase:
+        default:
+            r->msg = "Wrong passphrase.";
+            break;
+        }
         r->to_main = true;
         return r;
     });
