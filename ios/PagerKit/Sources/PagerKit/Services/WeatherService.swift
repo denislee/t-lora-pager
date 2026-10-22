@@ -31,11 +31,14 @@ public struct WeatherService: Sendable {
     public static let ipGeoURL = URL(string: "https://ipwho.is/")!
     /// Per-request timeout; three requests must fit the pager's 15 s.
     public static let requestTimeout: TimeInterval = 5
+    /// How long a forecast for one location is reused (P7.60).
+    public static let forecastTTL: TimeInterval = 10 * 60
 
     private let session: LinkSession
     private let http: URLSession
     private let locator: (@Sendable () async throws -> WeatherPlace)?
     private let now: @Sendable () -> Date
+    private let cache = WeatherCache()
 
     public init(
         session: LinkSession,
@@ -74,13 +77,21 @@ public struct WeatherService: Sendable {
             throw RPCError(code: "invalid_argument", msg: "key must be 1..64 bytes")
         }
         let place = try await resolve(key: key)
-        let body = try await get(Self.forecastQuery(lat: place.lat, lon: place.lon), stage: "forecast")
+        let url = Self.forecastQuery(lat: place.lat, lon: place.lon)
+        let cached = cache.forecast(url.absoluteString, now: now(), ttl: Self.forecastTTL)
+        let body: Data
+        if let cached {
+            body = cached
+        } else {
+            body = try await get(url, stage: "forecast")
+        }
         let forecast: OpenMeteoForecast
         do {
             forecast = try JSONDecoder().decode(OpenMeteoForecast.self, from: body)
         } catch {
             throw RPCError(code: "http_error", msg: "forecast: bad response")
         }
+        if cached == nil { cache.store(forecast: body, for: url.absoluteString, at: now()) }
         return Self.build(key: key, place: place, forecast: forecast, ts: now())
     }
 
@@ -97,6 +108,7 @@ public struct WeatherService: Sendable {
     }
 
     private func geocode(city: String) async throws -> WeatherPlace {
+        if let place = cache.place(city) { return place }
         var c = URLComponents(url: Self.geocodeURL, resolvingAgainstBaseURL: false)!
         c.queryItems = [
             URLQueryItem(name: "name", value: city),
@@ -111,7 +123,9 @@ public struct WeatherService: Sendable {
         guard let r = (try? JSONDecoder().decode(Reply.self, from: body))?.results?.first else {
             throw RPCError(code: "not_found", msg: "city not found")
         }
-        return WeatherPlace(lat: r.latitude, lon: r.longitude, city: city)
+        let place = WeatherPlace(lat: r.latitude, lon: r.longitude, city: city)
+        cache.store(place: place, for: city)
+        return place
     }
 
     private func ipPlace() async throws -> WeatherPlace {
@@ -242,4 +256,41 @@ struct OpenMeteoForecast: Decodable {
     }
     let hourly: Hourly?
     let daily: Daily?
+}
+
+/// Geocoded places per city key (coordinates don't move) and forecast bodies
+/// per request URL for `WeatherService.forecastTTL` (P7.60). Shared by copies
+/// of one `WeatherService`.
+final class WeatherCache: @unchecked Sendable {
+    static let maxEntries = 32
+
+    private let lock = NSLock()
+    private var places: [String: WeatherPlace] = [:]
+    private var forecasts: [String: (body: Data, at: Date)] = [:]
+
+    func place(_ key: String) -> WeatherPlace? {
+        lock.withLock { places[key] }
+    }
+
+    func store(place: WeatherPlace, for key: String) {
+        lock.withLock {
+            if places.count >= Self.maxEntries, places[key] == nil { places.removeAll() }
+            places[key] = place
+        }
+    }
+
+    func forecast(_ key: String, now: Date, ttl: TimeInterval) -> Data? {
+        lock.withLock {
+            guard let entry = forecasts[key] else { return nil }
+            let age = now.timeIntervalSince(entry.at)
+            return age >= 0 && age < ttl ? entry.body : nil
+        }
+    }
+
+    func store(forecast body: Data, for key: String, at: Date) {
+        lock.withLock {
+            if forecasts.count >= Self.maxEntries, forecasts[key] == nil { forecasts.removeAll() }
+            forecasts[key] = (body, at)
+        }
+    }
 }

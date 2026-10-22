@@ -52,6 +52,13 @@ public protocol NotesRemote: Sendable {
     func existingNames() async throws -> Set<String>
     /// Add `files` (none of which exist remotely); `already` stays 0.
     func commit(_ files: [NoteFile]) async -> NotesPushResult
+    /// Identifies the remote `existingNames` lists (repo and branch), so a
+    /// cached listing is dropped when it changes. nil: don't cache.
+    var cacheKey: String? { get }
+}
+
+extension NotesRemote {
+    public var cacheKey: String? { nil }
 }
 
 /// The user's notes repo on GitHub. Repo, branch and token come from `config`
@@ -103,6 +110,11 @@ public struct GitHubNotesBackend: NotesRemote {
         self.baseBackoff = baseBackoff
     }
 
+    public var cacheKey: String? {
+        guard let cfg = config() else { return nil }
+        return "\(cfg.repo)@\(cfg.branch)"
+    }
+
     /// lilyhub `runSync`: list, skip names already there (and unsafe names),
     /// commit the rest in one commit.
     public func push(_ files: [NoteFile]) async throws -> NotesPushResult {
@@ -128,20 +140,26 @@ public struct GitHubNotesBackend: NotesRemote {
     }
 
     /// lilyhub `listRemote`: names under `notes/` on the branch; a 404 means
-    /// the folder does not exist yet.
+    /// the folder (or branch) does not exist yet. Uses the Git Trees API on
+    /// `<branch>:notes` (P7.58): the Contents API stops at 1,000 entries, and
+    /// the notes past it would look missing and be pulled and pushed again. A
+    /// `truncated` tree is an error for the same reason.
     public func existingNames() async throws -> Set<String> {
         let cfg = try validConfig()
-        let url = "\(apiBase)/repos/\(cfg.repo)/contents/notes?ref=\(Self.queryEscape(cfg.branch))"
+        let url = "\(apiBase)/repos/\(cfg.repo)/git/trees/\(Self.refPathEscape(cfg.branch)):notes"
         let reply = try await exchange("GET", url, cfg, body: nil, attempts: 2)
         if reply.status == 404 { return [] }
         guard reply.status == 200 else { throw NotesSyncError(Self.githubError(reply)) }
-        guard case .array(let entries) = try JSONValue.decode(bytes: Array(reply.body)) else {
-            throw NotesSyncError("parse: listing is not an array")
+        let listing = try JSONValue.decode(bytes: Array(reply.body))
+        guard case .array(let entries)? = listing["tree"] else {
+            throw NotesSyncError("parse: listing has no tree")
+        }
+        if listing["truncated"]?.boolValue == true {
+            throw NotesSyncError("notes listing truncated")
         }
         var names = Set<String>()
         for entry in entries {
-            let type = entry["type"]?.stringValue ?? ""
-            guard type.isEmpty || type == "file", let name = entry["name"]?.stringValue else { continue }
+            guard entry["type"]?.stringValue == "blob", let name = entry["path"]?.stringValue else { continue }
             names.insert(name)
         }
         return names
@@ -372,6 +390,9 @@ public struct GitHubNotesBackend: NotesRemote {
 public actor NotesSyncService {
     /// Idle bound per file pull.
     public static let defaultReadTimeout: Duration = .seconds(60)
+    /// How long one remote listing serves later jobs (P7.57): the pager sends
+    /// a large manifest as several `notes.sync` batches back to back.
+    public static let defaultRemoteNamesTTL: Duration = .seconds(120)
 
     private struct Entry {
         let name: String
@@ -386,13 +407,39 @@ public actor NotesSyncService {
     private let readTimeout: Duration
     private var job = 0
     private var running: [Int: Task<Void, Never>] = [:]
+    private let remoteNamesTTL: Duration
+    private let now: @Sendable () -> ContinuousClock.Instant
+    private var remoteCache: (key: String, names: Set<String>, at: ContinuousClock.Instant)?
 
     public init(session: LinkSession, github: (any NotesRemote)?, phoneDirectory: URL?,
-                readTimeout: Duration = NotesSyncService.defaultReadTimeout) {
+                readTimeout: Duration = NotesSyncService.defaultReadTimeout,
+                remoteNamesTTL: Duration = NotesSyncService.defaultRemoteNamesTTL,
+                now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.session = session
         self.github = github
         self.phoneDirectory = phoneDirectory
         self.readTimeout = readTimeout
+        self.remoteNamesTTL = remoteNamesTTL
+        self.now = now
+    }
+
+    /// The remote's names, from a listing younger than `remoteNamesTTL` for
+    /// the same repo and branch when there is one.
+    private func remoteNames(_ github: any NotesRemote) async throws -> Set<String> {
+        let key = github.cacheKey
+        if let key, let cache = remoteCache, cache.key == key, now() - cache.at < remoteNamesTTL {
+            return cache.names
+        }
+        let names = try await github.existingNames()
+        if let key { remoteCache = (key, names, now()) }
+        return names
+    }
+
+    /// Record names a commit just added, so a cached listing stays current.
+    private func remember(_ added: [String], key: String?) {
+        guard let key, var cache = remoteCache, cache.key == key else { return }
+        cache.names.formUnion(added)
+        remoteCache = cache
     }
 
     /// Install the `notes.sync` handler on the session.
@@ -446,7 +493,7 @@ public actor NotesSyncService {
 
         var remote: Set<String>?
         if wantGitHub, let github {
-            remote = try? await github.existingNames()
+            remote = try? await remoteNames(github)
         }
 
         var queue: [NoteFile] = []
@@ -464,6 +511,8 @@ public actor NotesSyncService {
             let result = await github.commit(queue)
             uploaded += result.uploaded
             errors.append(contentsOf: result.errors.map(\.name))
+            let failed = Set(result.errors.map(\.name))
+            remember(queue.map(\.name).filter { !failed.contains($0) }, key: github.cacheKey)
         }
         await emit(job, uploaded, already, errors, done: true)
     }
@@ -480,7 +529,9 @@ public actor NotesSyncService {
                          phone wantPhone: Bool) async -> Outcome {
         guard GitHubNotesBackend.safeName(file.name), !(wantGitHub && remote == nil) else { return .error }
         let inRepo = wantGitHub && remote?.contains(file.name) == true
-        if inRepo && !wantPhone { return .already }
+        // A phone copy with the manifest's size and CRC32 needs no pull (P7.63).
+        let onPhone = wantPhone && phoneHas(file)
+        if (inRepo || !wantGitHub) && (onPhone || !wantPhone) { return .already }
 
         let bytes: [UInt8]
         do {
@@ -493,10 +544,17 @@ public actor NotesSyncService {
         guard UInt32(exactly: bytes.count) == file.size, CRC32.checksum(bytes) == file.crc32 else {
             return .error
         }
-        if wantPhone, !store(file.name, bytes) { return .error }
+        if wantPhone, !onPhone, !store(file.name, bytes) { return .error }
         if inRepo { return .already }
         if wantGitHub { return .queued(NoteFile(name: file.name, bytes: bytes)) }
         return .uploaded
+    }
+
+    /// The phone folder already holds `file` byte for byte.
+    private func phoneHas(_ file: Entry) -> Bool {
+        guard let url = phoneDirectory?.appendingPathComponent(file.name),
+              let data = try? Data(contentsOf: url), data.count == Int(file.size) else { return false }
+        return CRC32.checksum(Array(data)) == file.crc32
     }
 
     /// Write `bytes` verbatim into the phone folder (atomic replace).

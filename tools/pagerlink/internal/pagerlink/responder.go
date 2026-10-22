@@ -154,14 +154,18 @@ func (c *Client) AcceptBytes(size uint32, crc uint32) (uint16, func(timeout time
 			},
 		)
 
+		// One idle timer, restarted per message (not a time.After each loop).
+		idle := time.NewTimer(timeout)
+		defer idle.Stop()
 		for r.State() == XferActive {
 			select {
 			case msg := <-ch:
+				resetTimer(idle, timeout)
 				if msg.Type == Data {
 					r.OnData(msg.Payload)
 				}
 				// ACK messages do not belong on a download; ignore them.
-			case <-time.After(timeout):
+			case <-idle.C:
 				return nil, errors.New("accept: timeout")
 			case <-c.done:
 				return nil, ErrDisconnected

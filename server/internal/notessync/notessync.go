@@ -311,13 +311,16 @@ func commitMessage(names []string) string {
 // listRemote fetches the names currently in `notes/` on the given branch.
 // 404 is not an error — it means the folder doesn't exist yet, so every
 // local file is a candidate. We only ask for names; SHAs aren't needed for
-// additive-only writes.
+// additive-only writes. It reads the Git Trees API on `<branch>:notes`: the
+// Contents API stops at 1,000 entries, and notes past the cap would look
+// missing and be uploaded again. A truncated tree is an error for the same
+// reason.
 func (h *Handler) listRemote(ctx context.Context, req *SyncRequest) ([]string, error) {
 	// req.Repo is validated (validRepo) to owner/name with URL-safe chars and
 	// no "."/".." segments, so it interpolates directly. req.Branch is caller-
 	// controlled and unvalidated, so escape it before it lands in the query.
-	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/contents/notes?ref=%s",
-		req.Repo, url.QueryEscape(req.Branch))
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s:notes",
+		req.Repo, refPathEscape(req.Branch))
 	httpReq, err := h.newGitHubRequest(ctx, http.MethodGet, endpoint, req.Token, nil)
 	if err != nil {
 		return nil, err
@@ -334,19 +337,25 @@ func (h *Handler) listRemote(ctx context.Context, req *SyncRequest) ([]string, e
 		return nil, githubError(status, body)
 	}
 
-	var entries []struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
+	var listing struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"tree"`
+		Truncated bool `json:"truncated"`
 	}
-	if err := json.Unmarshal(body, &entries); err != nil {
+	if err := json.Unmarshal(body, &listing); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.Type != "" && e.Type != "file" {
+	if listing.Truncated {
+		return nil, errors.New("notes listing truncated")
+	}
+	out := make([]string, 0, len(listing.Tree))
+	for _, e := range listing.Tree {
+		if e.Type != "blob" {
 			continue
 		}
-		out = append(out, e.Name)
+		out = append(out, e.Path)
 	}
 	return out, nil
 }

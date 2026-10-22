@@ -143,12 +143,17 @@ struct DashboardView: View {
         return value ? "Yes" : "No"
     }
 
-    private func uptime(_ seconds: Int?) -> String {
-        guard let seconds else { return "—" }
+    /// Built once rather than per render (P7.63).
+    @MainActor private static let uptimeFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.day, .hour, .minute]
         formatter.unitsStyle = .abbreviated
-        return formatter.string(from: TimeInterval(seconds)) ?? "\(seconds) s"
+        return formatter
+    }()
+
+    private func uptime(_ seconds: Int?) -> String {
+        guard let seconds else { return "—" }
+        return Self.uptimeFormatter.string(from: TimeInterval(seconds)) ?? "\(seconds) s"
     }
 
     private func volume(_ volume: JSONValue?, mounted: Bool? = nil) -> String {

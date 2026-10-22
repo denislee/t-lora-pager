@@ -83,4 +83,120 @@ final class WeatherServiceTests: XCTestCase {
         XCTAssertTrue(WeatherService.validKey(String(repeating: "a", count: 64)))
         XCTAssertFalse(WeatherService.validKey(String(repeating: "a", count: 65)))
     }
+
+    // MARK: - Caching (P7.60)
+
+    /// A minimal reply the pager can reduce (see `OpenMeteoForecast`).
+    private static let forecastBody = #"""
+        {"hourly":{"time":["2026-10-22T00:00"],"temperature_2m":[25],
+          "weathercode":[1],"precipitation_probability":[10]},
+         "daily":{"time":["2026-10-22"],"weathercode":[1],
+          "temperature_2m_max":[30],"temperature_2m_min":[22],
+          "precipitation_probability_max":[20]}}
+        """#
+
+    private static func answer(_ request: StubRequest) -> StubResponse {
+        if request.path.hasSuffix("/v1/search") {
+            return .json(200, #"{"results":[{"latitude":-8.05,"longitude":-34.9}]}"#)
+        }
+        if request.path.hasSuffix("/v1/forecast") {
+            return .json(200, forecastBody)
+        }
+        return StubResponse(status: 404)
+    }
+
+    private func service(_ server: StubServer, now: @escaping @Sendable () -> Date) -> WeatherService {
+        let (a, _) = LoopbackTransport.pair(packetSize: PagerLink.tcpPacket)
+        return WeatherService(session: LinkSession(transport: a),
+                              urlSession: StubURLProtocol.session(server),
+                              now: now)
+    }
+
+    func testGeocodeCachedPerKey() async throws {
+        let clock = DateBox(Date(timeIntervalSince1970: 1_792_000_000))
+        let server = StubServer { Self.answer($0) }
+        let weather = service(server, now: { clock.now })
+
+        _ = try await weather.payload(key: "Recife")
+        _ = try await weather.payload(key: "Recife")
+        XCTAssertEqual(server.requests(path: "/v1/search").count, 1)
+
+        _ = try await weather.payload(key: "Olinda")
+        XCTAssertEqual(server.requests(path: "/v1/search").count, 2)
+    }
+
+    func testForecastCachedForTenMinutes() async throws {
+        let start = Date(timeIntervalSince1970: 1_792_000_000)
+        let clock = DateBox(start)
+        let server = StubServer { Self.answer($0) }
+        let weather = service(server, now: { clock.now })
+
+        _ = try await weather.payload(key: "Recife")
+        _ = try await weather.payload(key: "Recife")
+        XCTAssertEqual(server.requests(path: "/v1/forecast").count, 1)
+
+        clock.set(start.addingTimeInterval(599))
+        _ = try await weather.payload(key: "Recife")
+        XCTAssertEqual(server.requests(path: "/v1/forecast").count, 1)
+
+        clock.set(start.addingTimeInterval(601))
+        _ = try await weather.payload(key: "Recife")
+        XCTAssertEqual(server.requests(path: "/v1/forecast").count, 2)
+    }
+
+    func testFailedForecastNotCached() async throws {
+        let clock = DateBox(Date(timeIntervalSince1970: 1_792_000_000))
+        let counter = CounterBox()
+        let server = StubServer { request in
+            if request.path.hasSuffix("/v1/forecast") {
+                return counter.next() == 1 ? StubResponse(status: 500) : Self.answer(request)
+            }
+            return Self.answer(request)
+        }
+        let weather = service(server, now: { clock.now })
+
+        do {
+            _ = try await weather.payload(key: "Recife")
+            XCTFail("expected error")
+        } catch let error as RPCError {
+            XCTAssertEqual(error.code, "http_error")
+        }
+
+        let payload = try await weather.payload(key: "Recife")
+        XCTAssertEqual(payload["key"]?.stringValue, "Recife")
+        XCTAssertEqual(server.requests(path: "/v1/forecast").count, 2)
+    }
+}
+
+/// The clock `WeatherService` reads, mutable from the test and `Sendable` for
+/// the escaping `now` closure.
+private final class DateBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    var now: Date {
+        lock.withLock { value }
+    }
+
+    func set(_ date: Date) {
+        lock.withLock { value = date }
+    }
+}
+
+/// A monotonic counter for `StubServer`'s synchronous handler.
+private final class CounterBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    /// The next count, starting at 1.
+    func next() -> Int {
+        lock.withLock {
+            value += 1
+            return value
+        }
+    }
 }

@@ -119,7 +119,8 @@ public actor LinkSession {
     private let writerTask: Task<Void, Never>
 
     private var pending: [UInt16: Pending] = [:]
-    private var handlers: [String: @Sendable (JSONValue) async throws -> JSONValue] = [:]
+    /// Handlers answer with the RES payload bytes (see `handleEncoded`).
+    private var handlers: [String: @Sendable (JSONValue) async throws -> [UInt8]] = [:]
     private var nextId: UInt16
     private var nextXfer: UInt16
     private var inbound: [UInt16: Inbound] = [:]
@@ -223,6 +224,12 @@ public actor LinkSession {
 
     /// Register or replace the handler for `method`.
     public func handle(_ method: String, _ handler: @escaping @Sendable (JSONValue) async throws -> JSONValue) {
+        handlers[method] = { params in try await handler(params).encoded() }
+    }
+
+    /// Register a handler that returns its RES payload already encoded as
+    /// JSON, so a reply it measured is not encoded a second time (P7.56).
+    public func handleEncoded(_ method: String, _ handler: @escaping @Sendable (JSONValue) async throws -> [UInt8]) {
         handlers[method] = handler
     }
 
@@ -390,9 +397,15 @@ public actor LinkSession {
         return UInt32(number)
     }
 
+    /// Largest receive buffer reserved before the bytes arrive.
+    static let maxReserve = 4 << 20
+
     /// Give a receive transfer its size and replay any early DATA.
     private func arm(_ xfer: UInt16, size: UInt32) {
         guard let transfer = inbound[xfer], transfer.receiver == nil else { return }
+        // One allocation for the whole body (P7.63); the size is the peer's
+        // claim, so cap what is reserved up front.
+        transfer.data.reserveCapacity(min(Int(size), Self.maxReserve))
         let receiver = XferReceiver(
             size: size, window: Xfer.initialCredits, ackEvery: Self.ackEvery, start: 0,
             write: { [unowned transfer] _, bytes in transfer.data.append(contentsOf: bytes) },
@@ -718,10 +731,14 @@ public actor LinkSession {
         }
 
         do {
-            let result = try await handler(params)
-            if let payload = try? result.encoded() {
-                sendMessage(type: .res, id: message.id, payload: payload)
+            let payload = try await handler(params)
+            // A RES the frame can't carry would be dropped and leave the pager
+            // waiting out its timeout; answer ERR now instead (P7.63).
+            guard payload.count <= PagerLink.maxPayload else {
+                sendError(id: message.id, code: "internal", msg: "reply too large")
+                return
             }
+            sendMessage(type: .res, id: message.id, payload: payload)
         } catch let error as RPCError {
             sendError(id: message.id, code: error.code, msg: error.msg)
         } catch {

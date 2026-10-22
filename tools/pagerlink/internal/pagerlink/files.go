@@ -68,14 +68,18 @@ func (c *Client) ReadFile(vol, path string, timeout time.Duration) ([]byte, File
 		},
 	)
 
+	// One idle timer, restarted per message (not a time.After each loop).
+	idle := time.NewTimer(timeout)
+	defer idle.Stop()
 	for r.State() == XferActive {
 		select {
 		case msg := <-ch:
+			resetTimer(idle, timeout)
 			if msg.Type == Data {
 				r.OnData(msg.Payload)
 			}
 			// ACK messages do not belong on a download; ignore them.
-		case <-time.After(timeout):
+		case <-idle.C:
 			return nil, info, errors.New("fs.read: timeout")
 		case <-c.done:
 			return nil, info, ErrDisconnected

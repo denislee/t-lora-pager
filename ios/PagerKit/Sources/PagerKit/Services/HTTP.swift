@@ -47,17 +47,30 @@ enum HTTP {
     /// transport errors and 429/5xx, backing off `baseBackoff` doubling per
     /// retry (capped at 2 s). Returns the final reply without judging its
     /// status; throws only when no reply was obtained.
+    ///
+    /// With a `deadline`, every attempt gets only the time left (its
+    /// `timeoutInterval` is capped to it) and no retry starts after it; a
+    /// deadline already past throws the last error, or `URLError(.timedOut)`.
     static func sendWithRetry(
         _ request: URLRequest,
         using session: URLSession,
         attempts: Int,
-        baseBackoff: Duration
+        baseBackoff: Duration,
+        deadline: ContinuousClock.Instant? = nil
     ) async throws -> HTTPReply {
         let attempts = max(1, attempts)
-        var lastError: Error = URLError(.unknown)
+        var lastError: Error = URLError(.timedOut)
         for attempt in 1...attempts {
             if attempt > 1 {
-                try await Task.sleep(for: backoff(attempt: attempt, base: baseBackoff))
+                let delay = backoff(attempt: attempt, base: baseBackoff)
+                if let deadline, ContinuousClock.now + delay >= deadline { throw lastError }
+                try await Task.sleep(for: delay)
+            }
+            var request = request
+            if let deadline {
+                let left = deadline - ContinuousClock.now
+                guard left > .zero else { throw lastError }
+                request.timeoutInterval = min(request.timeoutInterval, seconds(left))
             }
             do {
                 let reply = try await send(request, using: session)
@@ -73,6 +86,11 @@ enum HTTP {
             }
         }
         throw lastError
+    }
+
+    static func seconds(_ duration: Duration) -> TimeInterval {
+        let (whole, atto) = duration.components
+        return TimeInterval(whole) + TimeInterval(atto) / 1e18
     }
 
     static func retryable(_ status: Int) -> Bool {

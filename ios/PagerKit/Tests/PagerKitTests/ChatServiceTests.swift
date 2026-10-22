@@ -506,4 +506,179 @@ final class ChatServiceTests: XCTestCase {
         await phone.stop()
         await pager.stop()
     }
+
+    // MARK: - Deadlines (P7.59) and the upload cap (P7.63)
+
+    /// Records every deadline a `ChatService` hands it (both the STT and the LLM
+    /// path) and always answers "ok". `@unchecked Sendable` because `NSLock`
+    /// guards every access.
+    private final class DeadlineRecorder: ChatBackend, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _deadlines: [ContinuousClock.Instant] = []
+
+        /// Every deadline passed to a deadline-aware method, in order.
+        var deadlines: [ContinuousClock.Instant] {
+            lock.lock()
+            defer { lock.unlock() }
+            return _deadlines
+        }
+
+        private func record(_ deadline: ContinuousClock.Instant) {
+            lock.lock()
+            defer { lock.unlock() }
+            _deadlines.append(deadline)
+        }
+
+        func transcribe(wav: [UInt8]) async throws -> String { "ok" }
+
+        func complete(history: [ChatTurn]) async throws -> String { "ok" }
+
+        func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String {
+            record(deadline)
+            return "ok"
+        }
+
+        func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String {
+            record(deadline)
+            return "ok"
+        }
+    }
+
+    /// A retry whose backoff would land at or after the deadline must not start:
+    /// one 500 attempt, then the backend surfaces that error right away.
+    func testDeadlineStopsRetries() async throws {
+        let server = StubServer { _ in .json(500, "{}") }
+        let backend = GroqChatBackend(
+            apiKey: { "test-key" },
+            session: StubURLProtocol.session(server),
+            baseURL: URL(string: "https://groq.test/openai/v1")!,
+            baseBackoff: .milliseconds(200))
+
+        let start = ContinuousClock.now
+        do {
+            _ = try await backend.complete(
+                history: [ChatTurn(role: "user", content: "hi")],
+                deadline: .now + .milliseconds(150))
+            XCTFail("expected error")
+        } catch let error as ChatBackendError {
+            guard case .upstream = error else {
+                XCTFail("expected upstream error, got \(error)")
+                return
+            }
+        }
+
+        let elapsed = ContinuousClock.now - start
+        XCTAssertEqual(server.requests.count, 1, "the 200 ms backoff would end past the deadline")
+        XCTAssertLessThan(elapsed, .seconds(1), "must give up instead of sleeping past the deadline")
+    }
+
+    /// With room to spare in the budget all three attempts happen, so the final
+    /// 500 is what surfaces.
+    func testDeadlineAllowsRetriesWithinBudget() async throws {
+        let server = StubServer { _ in .json(500, "{}") }
+        let backend = GroqChatBackend(
+            apiKey: { "test-key" },
+            session: StubURLProtocol.session(server),
+            baseURL: URL(string: "https://groq.test/openai/v1")!,
+            baseBackoff: .milliseconds(10))
+
+        do {
+            _ = try await backend.complete(
+                history: [ChatTurn(role: "user", content: "hi")],
+                deadline: .now + .seconds(5))
+            XCTFail("expected error")
+        } catch let error as ChatBackendError {
+            guard case .upstream = error else {
+                XCTFail("expected upstream error, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertEqual(server.requests.count, GroqChatBackend.maxAttempts)
+    }
+
+    /// A deadline already past throws without touching the network.
+    func testPastDeadlineSendsNothing() async throws {
+        let server = StubServer { _ in .json(200, "{}") }
+        let backend = GroqChatBackend(
+            apiKey: { "test-key" },
+            session: StubURLProtocol.session(server),
+            baseURL: URL(string: "https://groq.test/openai/v1")!,
+            baseBackoff: .milliseconds(10))
+
+        do {
+            _ = try await backend.complete(
+                history: [ChatTurn(role: "user", content: "hi")],
+                deadline: .now - .milliseconds(1))
+            XCTFail("expected error")
+        } catch let error as ChatBackendError {
+            guard case .upstream = error else {
+                XCTFail("expected upstream error, got \(error)")
+                return
+            }
+        }
+
+        do {
+            _ = try await backend.transcribe(wav: [1, 2, 3], deadline: .now - .milliseconds(1))
+            XCTFail("expected error")
+        } catch let error as ChatBackendError {
+            guard case .upstream = error else {
+                XCTFail("expected upstream error, got \(error)")
+                return
+            }
+        }
+
+        XCTAssertTrue(server.requests.isEmpty)
+    }
+
+    /// `chat.ask` computes one deadline up front (now + askBudget) and hands the
+    /// same instant to the backend.
+    func testAskPassesOneDeadline() async throws {
+        let (phone, pager) = makePair()
+        await phone.start()
+        await pager.start()
+
+        let recorder = DeadlineRecorder()
+        let chat = ChatService(session: phone, backend: recorder, askBudget: .seconds(7))
+        await chat.register()
+
+        let result = try await pager.call("chat.ask", params: ["text": "hi"], timeout: .seconds(5))
+        XCTAssertEqual(result["reply"]?.stringValue, "ok")
+
+        let deadlines = recorder.deadlines
+        XCTAssertEqual(deadlines.count, 1)
+        let deadline = try XCTUnwrap(deadlines.first)
+        let remaining = deadline - ContinuousClock.now
+        XCTAssertGreaterThan(remaining, .seconds(5))
+        XCTAssertLessThanOrEqual(remaining, .seconds(7))
+
+        await phone.stop()
+        await pager.stop()
+    }
+
+    /// A third `chat.audio.begin` drops the oldest upload, so WAVs the pager
+    /// never asks about don't pile up.
+    func testUploadsCappedAtTwo() async throws {
+        let (phone, pager) = makePair()
+        await phone.start()
+        await pager.start()
+
+        let fake = FakeChatBackend()
+        let chat = ChatService(session: phone, backend: fake)
+
+        for _ in 0..<3 {
+            _ = try await chat.audioBegin([
+                "size": .number(10_000),
+                "crc32": .number(1),
+                "fmt": "wav",
+            ])
+        }
+
+        let count = await chat.uploadCount
+        XCTAssertEqual(count, ChatService.maxUploads)
+        XCTAssertEqual(count, 2)
+
+        await phone.stop()
+        await pager.stop()
+    }
 }

@@ -72,10 +72,27 @@ final class TDJSONClient: TDQuerying, @unchecked Sendable {
         String(decoding: bytes, as: UTF8.self).withCString { td_send(id, $0) }
     }
 
+    /// Update types handed to `onUpdate`. Anything else without an `@extra`
+    /// is dropped on this thread before it is decoded (P7.55). Add a type here
+    /// to forward it (e.g. chat-list updates, P7.61).
+    static let forwardedUpdates: Set<Substring> = ["updateAuthorizationState"]
+
+    /// The `@type` TDLib writes first in every object, read without decoding.
+    private static func leadingType(_ text: String) -> Substring? {
+        let prefix = #"{"@type":""#
+        guard text.hasPrefix(prefix) else { return nil }
+        let rest = text.dropFirst(prefix.count)
+        guard let end = rest.firstIndex(of: "\"") else { return nil }
+        return rest[..<end]
+    }
+
     private func receiveLoop() {
         while true {
             guard let raw = td_receive(1.0) else { continue }
             let text = String(cString: raw)
+            // Only replies to our queries and forwarded updates are worth a decode.
+            let forwarded = Self.leadingType(text).map { Self.forwardedUpdates.contains($0) } ?? true
+            guard forwarded || text.contains(#""@extra":"#) else { continue }
             guard let value = try? JSONValue.decode(bytes: Array(text.utf8)) else { continue }
             let current = state.withLock { $0.clientID }
             if let from = value["@client_id"]?.intValue, from != Int(current) { continue }
@@ -87,7 +104,7 @@ final class TDJSONClient: TDQuerying, @unchecked Sendable {
                 } else {
                     waiter?.resume(returning: value)
                 }
-            } else {
+            } else if let type = value["@type"]?.stringValue, Self.forwardedUpdates.contains(Substring(type)) {
                 onUpdate(value)
             }
         }

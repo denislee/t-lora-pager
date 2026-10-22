@@ -45,15 +45,15 @@ public struct TelegramService: Sendable {
     /// Install the `tg.*` handlers on the session.
     public func register() async {
         let service = self
-        await session.handle("tg.chats") { params in try await service.chats(params) }
-        await session.handle("tg.messages") { params in try await service.messages(params) }
+        await session.handleEncoded("tg.chats") { params in try await service.chats(params) }
+        await session.handleEncoded("tg.messages") { params in try await service.messages(params) }
         await session.handle("tg.read") { params in try await service.read(params) }
         await session.handle("tg.send") { params in try await service.send(params) }
     }
 
     // MARK: - Handlers
 
-    func chats(_ params: JSONValue) async throws -> JSONValue {
+    func chats(_ params: JSONValue) async throws -> [UInt8] {
         let route = try await route(params)
         let limit = try Self.limit(params)
         let xfer = try Self.xfer(params)
@@ -66,7 +66,7 @@ public struct TelegramService: Sendable {
         }
     }
 
-    func messages(_ params: JSONValue) async throws -> JSONValue {
+    func messages(_ params: JSONValue) async throws -> [UInt8] {
         let route = try await route(params)
         let limit = try Self.limit(params)
         let chatID = try Self.integer(params, "chat_id")
@@ -134,10 +134,11 @@ public struct TelegramService: Sendable {
 
     /// mock `tgReply`: inline when `{"body":…}` fits a RES, else DATA under
     /// the pager's xfer (which may overtake the RES; the pager buffers it).
-    func reply(_ trimmed: JSONValue, xfer: UInt16) async throws -> JSONValue {
+    /// Returns the RES payload bytes, reusing the body it already encoded.
+    func reply(_ trimmed: JSONValue, xfer: UInt16) async throws -> [UInt8] {
         let body = try trimmed.encoded()
         if body.count + #"{"body":}"#.utf8.count <= Self.inlineLimit {
-            return ["body": trimmed]
+            return Array(#"{"body":"#.utf8) + body + Array("}".utf8)
         }
         guard xfer != 0 else {
             throw RPCError(code: "invalid_argument", msg: "reply over 4096 B needs xfer")
@@ -146,11 +147,11 @@ public struct TelegramService: Sendable {
         Task {
             try? await session.sendBytes(xfer: xfer, data: body, timeout: TelegramService.bulkTimeout)
         }
-        return [
+        return try JSONValue.object([
             "xfer": .number(Double(xfer)),
             "size": .number(Double(body.count)),
             "crc32": .number(Double(CRC32.checksum(body))),
-        ]
+        ]).encoded()
     }
 
     // MARK: - Bridge HTTP

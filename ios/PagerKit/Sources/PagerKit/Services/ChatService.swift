@@ -29,6 +29,20 @@ public enum ChatBackendError: Error, Equatable, Sendable {
 public protocol ChatBackend: Sendable {
     func transcribe(wav: [UInt8]) async throws -> String
     func complete(history: [ChatTurn]) async throws -> String
+    /// The same, finishing (retries included) by `deadline` (P7.59).
+    func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String
+    func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String
+}
+
+extension ChatBackend {
+    /// Backends without a time budget ignore the deadline.
+    public func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String {
+        try await transcribe(wav: wav)
+    }
+
+    public func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String {
+        try await complete(history: history)
+    }
 }
 
 /// Groq's OpenAI-compatible API: Whisper for speech, Llama for the reply. A
@@ -49,8 +63,10 @@ public struct GroqChatBackend: ChatBackend {
         + "ônibus, trem, geladeira, abacaxi, açaí, cafezinho, computador."
     /// Upstream attempts per call (lilyhub `httpx.DoWithRetry(…, 3, …)`).
     public static let maxAttempts = 3
-    /// Per-request timeout (lilyhub `clientTimeout`).
+    /// Per-request timeout (lilyhub `clientTimeout`); a deadline caps it.
     public static let requestTimeout: TimeInterval = 60
+    /// Budget for a call made without a deadline.
+    public static let defaultBudget: Duration = .seconds(55)
 
     private let apiKey: @Sendable () -> String?
     private let session: URLSession
@@ -86,6 +102,10 @@ public struct GroqChatBackend: ChatBackend {
     /// named `audio.wav` so Groq's sniffer accepts it) and return the trimmed
     /// text.
     public func transcribe(wav: [UInt8]) async throws -> String {
+        try await transcribe(wav: wav, deadline: .now + Self.defaultBudget)
+    }
+
+    public func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String {
         let key = try key()
         let boundary = "pagerkit-" + UUID().uuidString
         var fields: [(String, String)] = [("model", Self.sttModel), ("response_format", "json")]
@@ -110,7 +130,7 @@ public struct GroqChatBackend: ChatBackend {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
 
-        let value = try await exchange(request)
+        let value = try await exchange(request, deadline: deadline)
         if let message = value["error"]?["message"]?.stringValue {
             throw ChatBackendError.upstream("groq: \(message)")
         }
@@ -120,6 +140,10 @@ public struct GroqChatBackend: ChatBackend {
     /// POST `{model, messages:[system] + history}` to `/chat/completions` and
     /// return the first choice's trimmed content.
     public func complete(history: [ChatTurn]) async throws -> String {
+        try await complete(history: history, deadline: .now + Self.defaultBudget)
+    }
+
+    public func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String {
         let key = try key()
         var messages: [JSONValue] = [["role": "system", "content": .string(Self.systemPrompt)]]
         for turn in history {
@@ -134,7 +158,7 @@ public struct GroqChatBackend: ChatBackend {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(try payload.encoded())
 
-        let value = try await exchange(request)
+        let value = try await exchange(request, deadline: deadline)
         if let message = value["error"]?["message"]?.stringValue {
             throw ChatBackendError.upstream("groq: \(message)")
         }
@@ -145,11 +169,11 @@ public struct GroqChatBackend: ChatBackend {
     }
 
     /// lilyhub `do`: retried exchange; non-2xx becomes `upstream N: <body>`.
-    private func exchange(_ request: URLRequest) async throws -> JSONValue {
+    private func exchange(_ request: URLRequest, deadline: ContinuousClock.Instant) async throws -> JSONValue {
         let reply: HTTPReply
         do {
-            reply = try await HTTP.sendWithRetry(request, using: session,
-                                                 attempts: Self.maxAttempts, baseBackoff: baseBackoff)
+            reply = try await HTTP.sendWithRetry(request, using: session, attempts: Self.maxAttempts,
+                                                 baseBackoff: baseBackoff, deadline: deadline)
         } catch let error as HTTPStatusError {
             throw ChatBackendError.upstream("upstream \(error.status): \(error.body)")
         } catch is CancellationError {
@@ -182,6 +206,13 @@ public actor ChatService {
     public static let defaultAudioWait: Duration = .seconds(30)
     /// Idle bound on a voice upload's DATA (the mock's `wait(60 s)`).
     public static let uploadTimeout: Duration = .seconds(60)
+    /// One deadline per `chat.ask` covering the upload wait, STT and LLM with
+    /// their retries, under the pager's 60 s `CHAT_ASK_TIMEOUT_MS` (P7.59), so
+    /// the phone stops spending quota once the pager has given up.
+    public static let defaultAskBudget: Duration = .seconds(55)
+    /// Voice uploads kept for a `chat.ask`; an older one is dropped (P7.63),
+    /// so WAVs the pager never asked about don't pile up.
+    public static let maxUploads = 2
 
     /// One `chat.audio.begin` upload: its outcome once known, and any
     /// `chat.ask` waiting for it.
@@ -193,13 +224,17 @@ public actor ChatService {
     private let session: LinkSession
     private let backend: ChatBackend
     private let audioWait: Duration
+    private let askBudget: Duration
     private var history: [ChatTurn] = []
     private var uploads: [UInt16: Upload] = [:]
+    private var uploadOrder: [UInt16] = []
 
-    public init(session: LinkSession, backend: ChatBackend, audioWait: Duration = ChatService.defaultAudioWait) {
+    public init(session: LinkSession, backend: ChatBackend, audioWait: Duration = ChatService.defaultAudioWait,
+                askBudget: Duration = ChatService.defaultAskBudget) {
         self.session = session
         self.backend = backend
         self.audioWait = audioWait
+        self.askBudget = askBudget
     }
 
     /// Install the `chat.*` handlers on the session.
@@ -229,6 +264,11 @@ public actor ChatService {
         }
         let incoming = await session.acceptBytes(size: size, crc32: crc)
         uploads[incoming.xfer] = Upload()
+        uploadOrder.removeAll { $0 == incoming.xfer }
+        uploadOrder.append(incoming.xfer)
+        while uploadOrder.count > Self.maxUploads {
+            dropUpload(uploadOrder.removeFirst())
+        }
         Task { [weak self] in
             let outcome: Result<[UInt8], RPCError>
             do {
@@ -242,6 +282,18 @@ public actor ChatService {
         }
         return ["xfer": .number(Double(incoming.xfer))]
     }
+
+    /// Forget an upload; a `chat.ask` still waiting for it sees "not finished".
+    private func dropUpload(_ xfer: UInt16) {
+        uploadOrder.removeAll { $0 == xfer }
+        guard let upload = uploads.removeValue(forKey: xfer) else { return }
+        let waiters = upload.waiters
+        upload.waiters.removeAll()
+        for (_, waiter) in waiters { waiter.resume(returning: nil) }
+    }
+
+    /// Uploads currently held (tests).
+    public var uploadCount: Int { uploads.count }
 
     private func finishUpload(_ xfer: UInt16, _ outcome: Result<[UInt8], RPCError>) {
         guard let upload = uploads[xfer] else { return }
@@ -287,6 +339,7 @@ public actor ChatService {
     // MARK: - chat.ask
 
     func ask(_ params: JSONValue) async throws -> JSONValue {
+        let deadline = ContinuousClock.now + askBudget
         let text = params["text"]
         let audio = params["audio_xfer"]
         let reset = params["reset"]
@@ -310,7 +363,7 @@ public actor ChatService {
             guard let outcome = await awaitUpload(xfer) else {
                 throw RPCError(code: "busy", msg: "audio upload not finished")
             }
-            uploads[xfer] = nil
+            dropUpload(xfer)
             let wav: [UInt8]
             switch outcome {
             case .success(let bytes): wav = bytes
@@ -318,7 +371,7 @@ public actor ChatService {
                 throw RPCError(code: "invalid_argument", msg: "audio upload failed: \(error.msg)")
             }
             do {
-                transcript = try await backend.transcribe(wav: wav)
+                transcript = try await backend.transcribe(wav: wav, deadline: deadline)
             } catch {
                 throw Self.backendFailure(error, stage: "stt")
             }
@@ -337,7 +390,7 @@ public actor ChatService {
 
         let reply: String
         do {
-            reply = try await backend.complete(history: snapshot)
+            reply = try await backend.complete(history: snapshot, deadline: deadline)
         } catch {
             throw Self.backendFailure(error, stage: "llm")
         }

@@ -1,7 +1,7 @@
 import Foundation
 
 /// A JSON value modelled as a Swift enum (PROTOCOL.md §3.1 payloads). Encodes
-/// with `JSONEncoder` (sorted keys) and decodes with `JSONDecoder`.
+/// with a shared `JSONEncoder` and decodes from `JSONSerialization` output.
 public enum JSONValue: Codable, Equatable, Sendable, Hashable {
     case null
     case bool(Bool)
@@ -79,17 +79,67 @@ extension JSONValue {
         return value
     }
 
-    /// Compact UTF-8 JSON bytes with sorted keys.
-    public func encoded() throws -> [UInt8] {
+    // One encoder each, configured once and never mutated, so sharing them
+    // across tasks is safe (P7.56: a new JSONEncoder per call cost 58 µs/KB).
+    nonisolated(unsafe) private static let compactEncoder = JSONEncoder()
+    nonisolated(unsafe) private static let sortedEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return Array(try encoder.encode(self))
+        return encoder
+    }()
+
+    /// Compact UTF-8 JSON bytes. Key order is unspecified: no peer depends on
+    /// it and the golden vectors carry frame bytes, not JSON key order.
+    public func encoded() throws -> [UInt8] {
+        Array(try Self.compactEncoder.encode(self))
     }
 
-    /// Decode UTF-8 JSON bytes.
-    public static func decode(bytes: [UInt8]) throws -> JSONValue {
-        try JSONDecoder().decode(JSONValue.self, from: Data(bytes))
+    /// Compact UTF-8 JSON bytes with sorted keys, for deterministic output.
+    public func encodedSorted() throws -> [UInt8] {
+        Array(try Self.sortedEncoder.encode(self))
     }
+
+    /// Decode UTF-8 JSON bytes. Built from `JSONSerialization` output rather
+    /// than `JSONDecoder` (P7.56: ~6x cheaper, no thrown error per node).
+    public static func decode(bytes: [UInt8]) throws -> JSONValue {
+        let object = try JSONSerialization.jsonObject(with: Data(bytes), options: [.fragmentsAllowed])
+        return try JSONValue(serialized: object)
+    }
+
+    /// A value as `JSONSerialization` returns it.
+    init(serialized object: Any) throws {
+        switch object {
+        case is NSNull:
+            self = .null
+        case let number as NSNumber:
+            // `NSNumber(1) is Bool` is true, so tell booleans apart by type.
+            self = Self.isBoolean(number) ? .bool(number.boolValue) : .number(number.doubleValue)
+        case let string as String:
+            self = .string(string)
+        case let array as [Any]:
+            self = .array(try array.map { try JSONValue(serialized: $0) })
+        case let dictionary as [String: Any]:
+            var result: [String: JSONValue] = [:]
+            result.reserveCapacity(dictionary.count)
+            for (key, value) in dictionary { result[key] = try JSONValue(serialized: value) }
+            self = .object(result)
+        default:
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "unknown JSON value"))
+        }
+    }
+
+    #if canImport(Darwin)
+    private static func isBoolean(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+    #else
+    // swift-corelibs-foundation returns its `__NSCFBoolean` singletons for
+    // `true`/`false`, the same class as `NSNumber(value: true)`.
+    nonisolated(unsafe) private static let booleanClass: AnyClass = type(of: NSNumber(value: true))
+    private static func isBoolean(_ number: NSNumber) -> Bool {
+        ObjectIdentifier(type(of: number)) == ObjectIdentifier(booleanClass)
+    }
+    #endif
 }
 
 extension JSONValue: ExpressibleByNilLiteral {

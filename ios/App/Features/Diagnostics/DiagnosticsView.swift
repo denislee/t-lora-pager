@@ -15,16 +15,7 @@ struct DiagnosticsView: View {
                     LabeledContent("Last RTT", value: rttText)
                 }
                 Section("Log") {
-                    if session.log.isEmpty {
-                        Text("No log entries yet.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(session.log.indices), id: \.self) { index in
-                            Text(session.log[index])
-                                .font(.system(.caption, design: .monospaced))
-                                .textSelection(.enabled)
-                        }
-                    }
+                    LogRows(log: session.log)
                 }
             }
             .navigationTitle("Diagnostics")
@@ -39,6 +30,24 @@ struct DiagnosticsView: View {
     private var rttText: String {
         guard let rtt = session.lastRTT else { return "—" }
         return PagerSession.describe(rtt)
+    }
+}
+
+/// The log lines, observed on their own (`SessionLog`), keyed by stable ids.
+private struct LogRows: View {
+    @ObservedObject var log: SessionLog
+
+    var body: some View {
+        if log.lines.isEmpty {
+            Text("No log entries yet.")
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(log.lines) { line in
+                Text(line.text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
     }
 }
 

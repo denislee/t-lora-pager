@@ -37,8 +37,10 @@ final class PagerSession: ObservableObject {
         }
     }
 
-    /// Rolling session log, newest last, capped at 200 lines.
-    @Published private(set) var log: [String] = []
+    /// Rolling session log, newest last, capped at 200 lines. Its own
+    /// observable, so an appended line re-renders only the log view rather
+    /// than every view watching the session (P7.63).
+    let log = SessionLog()
 
     private var session: LinkSession?
     private var eventsTask: Task<Void, Never>?
@@ -343,8 +345,28 @@ final class PagerSession: ObservableObject {
         // Mirror to the unified log so the Mac can read it: Console.app,
         // `make device-console` (iOS 17+) or `make device-log` (any iOS).
         Self.logger.notice("[pagerlink] \(line, privacy: .public)")
-        if log.count > 200 {
-            log.removeFirst(log.count - 200)
+    }
+}
+
+/// The session log's lines, each with an id that stays put when the cap
+/// drops the oldest, so SwiftUI rows don't all shift on rotation.
+@MainActor
+final class SessionLog: ObservableObject {
+    struct Line: Identifiable {
+        let id: Int
+        let text: String
+    }
+
+    static let capacity = 200
+
+    @Published private(set) var lines: [Line] = []
+    private var nextID = 0
+
+    func append(_ text: String) {
+        lines.append(Line(id: nextID, text: text))
+        nextID += 1
+        if lines.count > Self.capacity {
+            lines.removeFirst(lines.count - Self.capacity)
         }
     }
 }

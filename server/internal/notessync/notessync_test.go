@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,6 +122,8 @@ type mockGitHubState struct {
 	mu sync.Mutex
 
 	notesFiles       map[string]bool // listRemote result
+	listTruncated    bool            // GET .../git/trees/<ref>:notes reports truncated
+	listCalls        int             // GET .../git/trees/<ref>:notes count
 	headSHA          string
 	treeSHA          string
 	blobFailContent  map[string]bool // content_b64 -> fail this blob create
@@ -149,21 +152,30 @@ func newMockGitHubServer(t *testing.T, st *mockGitHubState) *httptest.Server {
 		defer st.mu.Unlock()
 
 		switch {
-		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/contents/notes"):
-			type entry struct {
-				Name string `json:"name"`
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/trees/") && strings.HasSuffix(r.URL.Path, ":notes"):
+			st.listCalls++
+			type treeItem struct {
+				Path string `json:"path"`
 				Type string `json:"type"`
+				Mode string `json:"mode"`
+				SHA  string `json:"sha"`
 			}
-			entries := make([]entry, 0, len(st.notesFiles))
-			for n := range st.notesFiles {
-				entries = append(entries, entry{Name: n, Type: "file"})
-			}
-			if len(entries) == 0 {
+			if len(st.notesFiles) == 0 {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
+			tree := make([]treeItem, 0, len(st.notesFiles)+1)
+			for n := range st.notesFiles {
+				tree = append(tree, treeItem{Path: n, Type: "blob", Mode: "100644", SHA: "s"})
+			}
+			// A non-blob entry the listing parser must ignore.
+			tree = append(tree, treeItem{Path: "subdir", Type: "tree", Mode: "040000", SHA: "d"})
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(entries)
+			_ = json.NewEncoder(w).Encode(struct {
+				SHA       string     `json:"sha"`
+				Tree      []treeItem `json:"tree"`
+				Truncated bool       `json:"truncated"`
+			}{SHA: "notes-tree", Tree: tree, Truncated: st.listTruncated})
 
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/branches/"):
 			st.branchHeadCalls++
@@ -583,5 +595,65 @@ func TestSyncHandlerListFailureIs502(t *testing.T) {
 	rec := serve(h, httptest.NewRequest(http.MethodPost, "/api/notes/sync", strings.NewReader(body)))
 	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "github 401") {
 		t.Fatalf("code=%d body=%q, want 502 naming github 401", rec.Code, rec.Body.String())
+	}
+}
+
+// listRemote reads the Git Trees API on "<branch>:notes" instead of the
+// Contents API (which stops at 1,000 entries): only blob entries are note
+// names, and the subdirectory entry the tree listing carries must be ignored.
+func TestListRemoteUsesTreesAndIgnoresNonBlobs(t *testing.T) {
+	st := newMockGitHubState()
+	st.notesFiles["a.txt"] = true
+	st.notesFiles["b.txt"] = true
+	h := newMockHandler(t, st)
+
+	names, err := h.listRemote(context.Background(), testSyncRequest())
+	if err != nil {
+		t.Fatalf("listRemote: %v", err)
+	}
+	sort.Strings(names)
+	if got, want := strings.Join(names, ","), "a.txt,b.txt"; got != want {
+		t.Errorf("names = %q, want %q (non-blob entries must be dropped)", got, want)
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.listCalls != 1 {
+		t.Errorf("listCalls = %d, want 1", st.listCalls)
+	}
+}
+
+// A truncated tree means notes past the API's cap are missing from the
+// listing; treating them as absent would re-upload them, so it must error.
+func TestListRemoteTruncatedErrors(t *testing.T) {
+	st := newMockGitHubState()
+	st.notesFiles["a.txt"] = true
+	st.listTruncated = true
+	h := newMockHandler(t, st)
+
+	names, err := h.listRemote(context.Background(), testSyncRequest())
+	if err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("listRemote = %v, %v; want an error mentioning truncated", names, err)
+	}
+}
+
+// 404 on the notes tree means the folder doesn't exist yet: no names, no
+// error, so every local file is a candidate.
+func TestListRemoteMissingFolderIsEmpty(t *testing.T) {
+	st := newMockGitHubState()
+	h := newMockHandler(t, st)
+
+	names, err := h.listRemote(context.Background(), testSyncRequest())
+	if err != nil {
+		t.Fatalf("listRemote: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("names = %v, want none", names)
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.listCalls != 1 {
+		t.Errorf("listCalls = %d, want 1", st.listCalls)
 	}
 }

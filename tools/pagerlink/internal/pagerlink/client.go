@@ -65,8 +65,9 @@ type result struct {
 // on Events().
 type Client struct {
 	conn net.Conn
+	bw   *bufio.Writer // buffers a message's records; flushed once per message
 
-	wmu sync.Mutex // serializes writes and the send-side sequence
+	wmu sync.Mutex // serializes writes (and bw) and the send-side sequence
 	seg Segmenter
 	re  Reassembler // receive side; touched only by the reader goroutine
 
@@ -109,6 +110,7 @@ func Dial(addr string, timeout time.Duration) (*Client, error) {
 func newClient(conn net.Conn) *Client {
 	c := &Client{
 		conn:     conn,
+		bw:       bufio.NewWriterSize(conn, 2*MaxMessage),
 		nextID:   2, // the phone side uses even ids, starting at 2
 		pending:  make(map[uint16]chan result),
 		handlers: make(map[string]Handler),
@@ -157,10 +159,12 @@ func (c *Client) Call(method string, params any, timeout time.Duration) (json.Ra
 		return nil, err
 	}
 
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case r := <-ch:
 		return r.payload, r.err
-	case <-time.After(timeout):
+	case <-timer.C:
 		c.unregister(id)
 		return nil, ErrTimeout
 	case <-c.done:
@@ -175,7 +179,10 @@ func (c *Client) Call(method string, params any, timeout time.Duration) (json.Ra
 func (c *Client) SendRaw(packet []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	return c.writeRecord(packet)
+	if err := c.writeRecord(packet); err != nil {
+		return err
+	}
+	return c.bw.Flush()
 }
 
 // SendBulk encodes one DATA or ACK message and sends it through the same
@@ -289,25 +296,29 @@ func nextEven(id uint16) uint16 {
 	return id
 }
 
-// send segments raw and writes every packet. Caller holds wmu.
+// send segments raw, buffers every packet's record and flushes them as one
+// write. Caller holds wmu.
 func (c *Client) send(raw []byte) error {
 	for _, pkt := range c.seg.Segment(raw, TCPPacketSize) {
 		if err := c.writeRecord(pkt); err != nil {
 			return err
 		}
 	}
-	return nil
+	return c.bw.Flush()
 }
 
-// writeRecord writes one u16 length + packet record. Caller holds wmu.
+// writeRecord buffers one u16 length + packet record in bw; the caller
+// flushes. Caller holds wmu.
 func (c *Client) writeRecord(pkt []byte) error {
 	if len(pkt) == 0 || len(pkt) > 0xFFFF {
 		return fmt.Errorf("pagerlink: packet length %d out of range", len(pkt))
 	}
-	rec := make([]byte, 2+len(pkt))
-	binary.LittleEndian.PutUint16(rec, uint16(len(pkt)))
-	copy(rec[2:], pkt)
-	_, err := c.conn.Write(rec)
+	var hdr [2]byte
+	binary.LittleEndian.PutUint16(hdr[:], uint16(len(pkt)))
+	if _, err := c.bw.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := c.bw.Write(pkt)
 	return err
 }
 
