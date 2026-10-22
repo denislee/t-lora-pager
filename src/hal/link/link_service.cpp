@@ -221,8 +221,9 @@ void finish_inbound(size_t i, bool ok) {
     State &s = state();
     State::Inbound &in = s.inbound[i];
     if (ok) {
-        const uint32_t got = crc32_update(0, reinterpret_cast<const uint8_t *>(in.buf.data()),
-                                          in.buf.size());
+        /* The receiver's running CRC covers exactly the bytes appended to buf
+         * (P7.34), so no second pass over the body. */
+        const uint32_t got = in.rx ? in.rx->crc() : 0u; /* CRC-32 of nothing */
         if (got != in.crc) {
             LINK_LOG("accept crc mismatch id=%u", static_cast<unsigned>(in.xfer));
             ok = false;
