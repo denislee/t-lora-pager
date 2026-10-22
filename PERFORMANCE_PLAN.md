@@ -731,6 +731,7 @@ Value = expected payoff. Risk = chance of regression. "HW" = needs a hardware te
   - Cap PagerLink's outstanding notifies (count them via `onStatus`) so 2–3 mbufs stay free.
   - Raise `CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT` to 24–32 (about +3–5 KB internal RAM).
 - **Verify:** HW, typing while a voice memo uploads.
+- **Status (2026-10-20): ✅ code, HW typing test owed.** HID notifies retry ~50 ms, `link_tx` leaves 4 msys blocks free, pool raised to 24 blocks. Details: §16 "P7.31".
 
 ### P7.32: Notify back-pressure is a 2 ms poll with a 200 ms budget, under `g_mutex` (MED)
 - **Where:** `link_transport_ble.cpp` `send_packet` (`NOTIFY_RETRIES=100`, `NOTIFY_RETRY_MS=2`); `link_service.cpp` `service_send_bytes`; `XferSender::pump`; `Segmenter::send`.
@@ -741,6 +742,7 @@ Value = expected payoff. Risk = chance of regression. "HW" = needs a hardware te
   - Event-driven flow control: a semaphore given from `onStatus`, or a counter of mbufs in flight.
   - A stall timeout of seconds, tied to the supervision timeout.
   - Pump only on `link_task`, and never wait for radio space while holding `g_mutex`.
+- **Status (2026-10-20): ✅ code, HW upload test owed.** The semaphore idea does not work: NimBLE fires `BLE_GAP_EVENT_NOTIFY_TX` synchronously inside `ble_gattc_notify_custom` with the same code `notify()` returns (`ble_gattc.c:4628`), so there is no "space freed" signal. Instead nothing waits for radio space under `g_mutex` any more: `send_packet` enqueues into a PSRAM tx queue and a new `link_tx` task notifies outside the mutex, with a stall budget tied to the supervision timeout. Details: §16 "P7.32".
 
 ### P7.33: No transfer connection parameters, stale MTU, no DLE/2M (MED, MED risk)
 - **Where:**
@@ -1134,8 +1136,8 @@ never overwrite rows.
 **Phase C: transfer reliability** (needs `make protocol-test` plus hardware)
 1. **P7.29** engine fix in all three implementations, with lossy tests. ✅ code 2026-10-19 (§16); HW smoke test owed.
 2. **P7.30** BLE grant and queue. ✅ code 2026-10-19 (§16); HW upload test owed.
-3. **P7.32** event-driven notify.
-4. **P7.31** HID starvation.
+3. **P7.32** event-driven notify. ✅ code 2026-10-20 (§16); HW upload test owed.
+4. **P7.31** HID starvation. ✅ code 2026-10-20 (§16); HW typing test owed.
 5. **P7.33** connection params, MTU change, DLE.
 6. **P7.34** file I/O.
 
@@ -1217,6 +1219,8 @@ _Append-only. One row per run: date, commit, scenario, what was measured, result
 | 2026-10-19 | c9c1a96 + §16 (P7.29) | negative control: new Go tests against the `c9c1a96` `xfer.go` | interleaved 100 KB #5 / 256 KB #0 | 1,285 sends (limit 52) / livelock: 1,117,506 sends in 200k steps |
 | 2026-10-19 | c9c1a96 + §16 (P7.29) | `pio run -e tlora_pager` | image / static DRAM | 2,869,113 B (68.4 %) / 94,712 B |
 | 2026-10-19 | 57c44e2 + P7.30 working tree | `pio run -e tlora_pager` | image / static DRAM | 2,869,904 B (68.4 %) / 94,192 B (−520: the two static `Event`s shrink with `MAX_PACKET` 512 → 244) |
+| 2026-10-20 | 2f0fc28 + P7.32 working tree | `pio run -e tlora_pager` | image / static DRAM | 2,870,561 B (68.4 %) / 95,088 B (+896: three static `TxPacket` staging buffers); tx queue 336 × 252 B ≈ 84 KB PSRAM at runtime |
+| 2026-10-20 | 2f0fc28 + P7.32 + P7.31 working tree | `pio run -e tlora_pager` / `twatchs3` / `twatch_ultra` | image / static DRAM | 2,870,621 B / 95,088 B (unchanged; the msys pool is heap: +12 × 256 B ≈ +3 KB at BLE init) · 2,493,573 B / 78,336 B · 2,715,441 B / 85,392 B |
 
 Scratch artifacts from this audit (not in the repo, may be cleaned by the OS):
 - `/tmp/xsim` (transfer simulation)
@@ -1287,3 +1291,27 @@ emulator's simulated battery %. No other visual change from P6.7, P7.11 or P7.3.
 **Next open items**, in order:
 1. The `tlora_pager_profile` hardware session plus every ☐ above (no device was attached in this session).
 2. Phase C: P7.32 (event-driven notify, pump off the caller's worker), then P7.31, P7.33, P7.34.
+
+### 2026-10-20: P7.32
+
+| ID | Status | What changed | Verified | HW owed |
+|---|---|---|---|---|
+| P7.32 | ✅ code | **No radio wait under `g_mutex`:** `link_transport_ble.cpp` `send_packet` is now a non-blocking enqueue into a PSRAM tx queue (`TX_QUEUE_DEPTH` = 16 × 17 + 64 = 336 `TxPacket`s, ~84 KB; internal fallback 42). A new `link_tx` task (4 KB stack, priority 1, core 0, like `link_task`) drains it with `notify()`, polling every 2 ms while the host is out of mbufs. **Stall budget** = 2 × the peer's supervision timeout, clamped to 2–12 s (`companion_up`); on a stall the task logs and flushes the queue (the link is dead and the disconnect is coming). This replaces the old 100 × 2 ms = 200 ms per-packet budget that failed whole transfers. **Whole messages only:** new optional `TransportOps::tx_room(packets)`; the service's Rpc send checks it with `packets_per_message` before segmenting, so a message is queued whole or not at all (TCP leaves it empty and still blocks in `send`). **Sessions:** each packet carries a `g_epoch` bumped by `companion_up`, so a resubscribe on the same handle never receives the old session's packets. Drops are counted (`g_tx_dropped`) and logged by `link_task`. **Not event-driven, by necessity:** NimBLE 2.5's `onStatus` / `BLE_GAP_EVENT_NOTIFY_TX` fires synchronously inside `ble_gattc_notify_custom` with the same rc (`ble_gattc.c:4628`); it never signals freed mbufs. The poll now runs on its own task, outside every lock. **Pump stays on the caller's worker:** with sends reduced to an enqueue, the first window costs memcpys (~272 × 250 B), not 2–3 s of radio waits, so moving the pump to `link_task` would add no benefit. | `tlora_pager`, `twatchs3`, `twatch_ultra`, `emulator_lora_pager` build; native 146/146; `make protocol-test` exit 0; emulator `pagerlink smoke` all steps passed (TCP path; `tx_room` unset). | ☐ 256 KB pager → phone upload (voice memo): no `[link] notify stalled` / `dropped … tx packets` lines; `[prof]` shows no ≥ 50 ms `service_send_bytes` LinkLock span |
+
+**Behaviour change to watch:** a send now fails at once when the tx queue lacks room for the whole message, where the old code retried each packet for 200 ms. With credits respected, that happens only when more than one credit window is outstanding (two bulk transfers at once). A failed DATA is recovered by P7.29's retransmit; a failed RPC response surfaces as a phone-side timeout, as a notify failure did before.
+
+**Next open items**, in order:
+1. The `tlora_pager_profile` hardware session plus every ☐ above (still no device attached).
+2. Phase C: P7.31 (HID starvation: the `link_tx` task is now the single place to reserve mbufs for HID), then P7.33, P7.34.
+
+### 2026-10-20: P7.31
+
+| ID | Status | What changed | Verified | HW owed |
+|---|---|---|---|---|
+| P7.31 | ✅ code | **HID retries:** `ble_hid.cpp` `send_report` retries a failed `notify()` up to 25 × 2 ms (~50 ms) per keyboard peer instead of dropping it, so a lost key-up no longer leaves a key repeating on the iPhone. The extra wait happens only on ENOMEM. **Reserve:** `link_transport_ble.cpp` `tx_task` notifies only while `os_msys_num_free() >= HID_MBUF_RESERVE` (4); below that it waits like a failed notify (it counts toward the P7.32 stall budget). The cap is on free blocks, not on outstanding notifies via `onStatus`: P7.32 found that `onStatus` fires synchronously, so it can't count in-flight packets. **Pool:** `platformio.ini` `[env_arduino]` `-D CONFIG_BT_NIMBLE_MSYS1_BLOCK_COUNT=24` (was NimBLE-Arduino's default 12; the spelling `MSYS1`, without the underscore, is the one `nimconfig.h` reads). The flag was confirmed on the `os_msys_init.c` compile line (`pio run -v`). | `tlora_pager`, `twatchs3`, `twatch_ultra`, `emulator_lora_pager` build; native 146/146. Engine and TCP path unchanged, so `protocol-test`/smoke were not rerun. | ☐ type in Notes (HID to the iPhone) while a voice memo uploads: no dropped or stuck keys |
+
+Note: `pio run -v` fails at the `firmware.bin` step with a PlatformIO `TypeError` (`'_Null' + 'str'`) while it prints the `elf2image` action. The verbose printout is broken; compile and link are fine. Build without `-v` for images.
+
+**Next open items**, in order:
+1. The `tlora_pager_profile` hardware session plus every ☐ above (still no device attached).
+2. Phase C: P7.33 (transfer connection params, `onMTUChange`, DLE/2M; needs HW throughput numbers), then P7.34.
