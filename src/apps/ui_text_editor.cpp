@@ -481,12 +481,6 @@ static void editor_build_ui(lv_obj_t *parent)
     }
     update_word_count();
 
-    // Pre-derive the note-encryption key now, while the user is just opening
-    // the editor, so the save that fires on exit only pays for the AES pass and
-    // not the ~10k-iteration PBKDF2. Self-guards to a no-op when notes crypto
-    // is off/locked.
-    notes_crypto_prewarm();
-
 #ifdef USING_TOUCHPAD
     quit_btn = create_floating_button([](lv_event_t *e) {
         do_exit();
@@ -498,6 +492,13 @@ static void editor_build_ui(lv_obj_t *parent)
         p.swap(s_pending_open_path);
         ui_text_editor_open_file(p.c_str());
     }
+
+    // Pre-derive the note-encryption key for the save that fires on exit, so
+    // that save only pays for the AES pass and not the PBKDF2. Called after the
+    // open+decrypt above (P7.5) so the background derive doesn't compete with
+    // the foreground one for the CPU. Self-guards to a no-op when notes crypto
+    // is off/locked or a triple is already primed.
+    notes_crypto_prewarm();
 }
 
 void ui_text_editor_open_file(const char *path)

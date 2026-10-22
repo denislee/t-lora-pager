@@ -49,7 +49,52 @@ void mask_forget(const char *ns, const char *key)
     g_masks.erase(slot_id(ns, key));
 }
 
+/* Secret slots whose keys stay pinned while unlocked (P6.22b). The strings
+ * mirror their owners' constants (hal can't include app headers):
+ *   ui_telegram.cpp   TG_PREFS_NS "tgbridge"  / "token_enc"
+ *   ui_notes_sync.cpp NSYNC_PREFS_NS "notesync" / "token_enc"
+ *   ui_ssh.cpp        SSH_NS "ssh"           / SSH_PW_KEY "pw_enc"
+ * A slot missing here only loses the pin, never correctness. */
+struct PinnedSlot { const char *ns; const char *key; };
+constexpr PinnedSlot kPinnedSlots[] = {
+    {"tgbridge", "token_enc"},
+    {"notesync", "token_enc"},
+    {"ssh",      "pw_enc"},
+};
+static_assert(NC_PIN_SECRET_FIRST + sizeof(kPinnedSlots) / sizeof(kPinnedSlots[0]) <= NC_PIN_N,
+              "notes_crypto.h NC_PIN_N too small for the pinned secret slots");
+
+[[maybe_unused]] int pinned_tag(const char *ns, const char *key)
+{
+    for (size_t i = 0; i < sizeof(kPinnedSlots) / sizeof(kPinnedSlots[0]); i++) {
+        if (strcmp(kPinnedSlots[i].ns, ns) == 0 && strcmp(kPinnedSlots[i].key, key) == 0)
+            return NC_PIN_SECRET_FIRST + (int)i;
+    }
+    return -1;
+}
+
 } // namespace
+
+void secret_prewarm_pinned()
+{
+#ifdef ARDUINO
+    for (size_t i = 0; i < sizeof(kPinnedSlots) / sizeof(kPinnedSlots[0]); i++) {
+        if (!notes_crypto_is_unlocked()) return;
+        std::vector<uint8_t> ct;
+        Preferences p;
+        if (!p.begin(kPinnedSlots[i].ns, true)) continue;
+        size_t len = p.getBytesLength(kPinnedSlots[i].key);
+        if (len > 0) {
+            ct.resize(len);
+            if (p.getBytes(kPinnedSlots[i].key, ct.data(), len) != len) ct.clear();
+        }
+        p.end();
+        if (ct.empty()) continue;
+        notes_crypto_pin_key(NC_PIN_SECRET_FIRST + (int)i, ct.data(), ct.size(),
+                             /*derive=*/true);
+    }
+#endif
+}
 
 bool secret_exists(const char *ns, const char *key)
 {
@@ -128,6 +173,13 @@ bool secret_store(const char *ns, const char *key, const char *plaintext,
     if (clear) p.remove(key);
     else       p.putBytes(key, ct.data(), ct.size());
     p.end();
+    /* Keep a pinned slot pointing at the salt now on flash: the encrypt above
+     * just cached its key, so this costs no derive. */
+    int tag = pinned_tag(ns, key);
+    if (tag >= 0) {
+        if (clear) notes_crypto_unpin_key(tag);
+        else       notes_crypto_pin_key(tag, ct.data(), ct.size(), /*derive=*/false);
+    }
     if (clear) mask_forget(ns, key);
     else       mask_remember(ns, key, mask);
     return true;

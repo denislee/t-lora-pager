@@ -9,7 +9,9 @@
 #include "../hal_interface.h"
 #include "../core/spi_lock.h"
 #include "pbkdf2_sha256.h"
+#include "secrets.h"
 
+#include <atomic>
 #include <cstring>
 #include <cstdio>
 #include <new>
@@ -47,6 +49,14 @@ namespace {
 bool g_unlocked = false;
 std::string g_passphrase;   /* Held in RAM while unlocked. */
 
+/* Key-material generation. Bumped (under prewarm_mutex) by every cache flush,
+ * i.e. on every lock, unlock and passphrase change. Anything that derives a
+ * key outside the mutex (decrypt, the prewarm task, the pin path, the unlock
+ * verify) snapshots it first and only publishes if it is unchanged, so a
+ * derivation that straddles a lock() can never leave key material behind it
+ * or re-open the session. */
+uint32_t g_key_epoch = 0;
+
 /* One pre-derived (salt, key, iv) triple, primed by notes_crypto_prewarm() and
  * consumed by the next encrypt so it can skip the ~10k-iteration PBKDF2. Bound
  * to the passphrase it was derived under so a mid-session rotation can't hand a
@@ -80,7 +90,7 @@ struct PrewarmLock {
 };
 /* At most one derivation task in flight; set on the UI thread before spawn,
  * cleared by the worker as it exits (same discipline as s_prune_task_running). */
-static volatile bool s_prewarm_running = false;
+static std::atomic<bool> s_prewarm_running{false};
 #else
 struct PrewarmLock { PrewarmLock() {} ~PrewarmLock() {} };
 #endif
@@ -106,12 +116,6 @@ static void prewarm_clear_locked()
     if (!g_prewarm.pw.empty()) zeroize(&g_prewarm.pw[0], g_prewarm.pw.size());
     g_prewarm.pw.clear();
     g_prewarm.valid = false;
-}
-
-static void prewarm_clear()
-{
-    PrewarmLock lk;
-    prewarm_clear_locked();
 }
 
 /* ---- Read-side key cache ----
@@ -141,12 +145,37 @@ struct KeyCacheEntry {
 constexpr int NC_KEYCACHE_N = 6;
 KeyCacheEntry g_keycache[NC_KEYCACHE_N];
 
+/* Pinned set (P6.22b): one slot per fixed-salt blob that is read far more
+ * often than it is written (the journal index, the secret slots; tags in
+ * notes_crypto.h). Same entry type and the same rules as the LRU (session key
+ * only, flushed with it), but outside the LRU so six note previews can't evict
+ * them. Separate slots rather than a bigger LRU because a bigger LRU still
+ * gives no guarantee; cost is NC_PIN_N x sizeof(KeyCacheEntry) = 4 x 57 B of
+ * .bss. A slot is replaced when its blob is rewritten (new salt), so it never
+ * holds more than one key per blob. */
+KeyCacheEntry g_pinned[NC_PIN_N];
+
+static void entry_wipe(KeyCacheEntry &e)
+{
+    zeroize(e.salt, NC_SALT_LEN);
+    zeroize(e.key, NC_KEY_LEN);
+    zeroize(e.iv,  NC_IV_LEN);
+    e.valid = false;
+}
+
 /* Callers must hold prewarm_mutex(). Returns the cached derivation for `salt`
- * and promotes it to MRU. */
+ * (pinned set first) and promotes an LRU hit to MRU. */
 static bool keycache_lookup_locked(const uint8_t salt[NC_SALT_LEN],
                                    uint8_t key_out[NC_KEY_LEN],
                                    uint8_t iv_out[NC_IV_LEN])
 {
+    for (int i = 0; i < NC_PIN_N; i++) {
+        if (!g_pinned[i].valid) continue;
+        if (memcmp(g_pinned[i].salt, salt, NC_SALT_LEN) != 0) continue;
+        memcpy(key_out, g_pinned[i].key, NC_KEY_LEN);
+        memcpy(iv_out,  g_pinned[i].iv,  NC_IV_LEN);
+        return true;
+    }
     for (int i = 0; i < NC_KEYCACHE_N; i++) {
         if (!g_keycache[i].valid) continue;
         if (memcmp(g_keycache[i].salt, salt, NC_SALT_LEN) != 0) continue;
@@ -168,6 +197,10 @@ static void keycache_store_locked(const uint8_t salt[NC_SALT_LEN],
                                   const uint8_t key[NC_KEY_LEN],
                                   const uint8_t iv[NC_IV_LEN])
 {
+    for (int i = 0; i < NC_PIN_N; i++) {
+        if (g_pinned[i].valid &&
+            memcmp(g_pinned[i].salt, salt, NC_SALT_LEN) == 0) return;
+    }
     for (int i = 0; i < NC_KEYCACHE_N; i++) {
         if (g_keycache[i].valid &&
             memcmp(g_keycache[i].salt, salt, NC_SALT_LEN) == 0) return;
@@ -182,7 +215,20 @@ static void keycache_store_locked(const uint8_t salt[NC_SALT_LEN],
     memcpy(g_keycache[0].iv,   iv,   NC_IV_LEN);
 }
 
-/* Callers must hold prewarm_mutex(). */
+/* Callers must hold prewarm_mutex(). Replaces pinned slot `tag`. */
+static void pinned_set_locked(int tag, const uint8_t salt[NC_SALT_LEN],
+                              const uint8_t key[NC_KEY_LEN],
+                              const uint8_t iv[NC_IV_LEN])
+{
+    entry_wipe(g_pinned[tag]);
+    memcpy(g_pinned[tag].salt, salt, NC_SALT_LEN);
+    memcpy(g_pinned[tag].key,  key,  NC_KEY_LEN);
+    memcpy(g_pinned[tag].iv,   iv,   NC_IV_LEN);
+    g_pinned[tag].valid = true;
+}
+
+/* Callers must hold prewarm_mutex(). Drops every derived key, pinned ones
+ * included, and starts a new key epoch (see g_key_epoch). */
 static void keycache_flush_locked()
 {
     for (int i = 0; i < NC_KEYCACHE_N; i++) {
@@ -191,14 +237,9 @@ static void keycache_flush_locked()
         zeroize(g_keycache[i].iv,  NC_IV_LEN);
         g_keycache[i].valid = false;
     }
+    for (int i = 0; i < NC_PIN_N; i++) entry_wipe(g_pinned[i]);
+    g_key_epoch++;
 }
-static void keycache_flush()
-{
-    PrewarmLock lk;
-    keycache_flush_locked();
-}
-#else
-static void keycache_flush() {}
 #endif
 
 static bool has_magic(const uint8_t *buf, size_t n)
@@ -334,8 +375,10 @@ static bool encrypt_with_pw(const char *pw,
      * and used once. The check/copy/clear runs under the prewarm mutex because
      * the background derivation task may be publishing into the slot right now. */
     bool consumed = false;
+    uint32_t epoch;
     {
         PrewarmLock lk;
+        epoch = g_key_epoch;
         if (g_prewarm.valid && g_prewarm.pw == pw) {
             memcpy(salt, g_prewarm.salt, NC_SALT_LEN);
             memcpy(key, g_prewarm.key, NC_KEY_LEN);
@@ -372,13 +415,18 @@ static bool encrypt_with_pw(const char *pw,
      * file just written (reopen after edit, journal snippet, index reload) would
      * otherwise pay a full PBKDF2 for a key we already hold. Same gate as the
      * decrypt side, so only live-session keys are ever cached. */
-    if (ok && g_unlocked && g_passphrase == pw) {
+    if (ok) {
         PrewarmLock lk;
-        keycache_store_locked(salt, key, iv);
+        if (g_unlocked && g_key_epoch == epoch && g_passphrase == pw)
+            keycache_store_locked(salt, key, iv);
     }
     zeroize(key, sizeof(key));
     zeroize(iv, sizeof(iv));
     zeroize(body.data(), body.size());
+    /* Re-arm (P6.22a): the primed triple is single-use, so the next save in
+     * the same editing session would otherwise pay the full derive again.
+     * No-op unless unlocked; any thread. */
+    if (consumed) notes_crypto_prewarm();
     if (!ok) return false;
 
     out.clear();
@@ -415,17 +463,22 @@ static bool decrypt_with_pw(const char *pw,
      * session key. Only cache while `pw` is the current session passphrase: the
      * canary probe in notes_crypto_unlock() decrypts a fixed salt under arbitrary
      * candidate passphrases, which must never poison the salt-keyed cache. */
-    bool cacheable = g_unlocked && (g_passphrase == pw);
+    bool cacheable = false;
     bool have_key = false;
-    if (cacheable) {
+    uint32_t epoch = 0;
+    {
         PrewarmLock lk;
-        have_key = keycache_lookup_locked(salt, key, iv);
+        cacheable = g_unlocked && (g_passphrase == pw);
+        epoch = g_key_epoch;
+        if (cacheable) have_key = keycache_lookup_locked(salt, key, iv);
     }
     if (!have_key) {
         if (!derive_key_iv(pw, salt, key, iv)) return false;
         if (cacheable) {
             PrewarmLock lk;
-            keycache_store_locked(salt, key, iv);
+            /* A lock()/unlock that ran during the derive flushed the cache;
+             * don't put this key back behind it. */
+            if (g_unlocked && g_key_epoch == epoch) keycache_store_locked(salt, key, iv);
         }
     }
 
@@ -575,15 +628,31 @@ bool notes_crypto_should_encrypt()
 bool notes_crypto_unlock(const char *pw)
 {
     if (!pw) return false;
+    uint32_t epoch;
+    {
+        PrewarmLock lk;
+        epoch = g_key_epoch;
+    }
     std::vector<uint8_t> canary;
     if (!read_canary(canary)) return false;
 
     std::string dec;
-    if (!decrypt_with_pw(pw, canary.data(), canary.size(), dec)) return false;
-    if (dec != NC_CANARY_PT) return false;
+    bool ok = decrypt_with_pw(pw, canary.data(), canary.size(), dec) &&
+              dec == NC_CANARY_PT;
+    if (!dec.empty()) zeroize(&dec[0], dec.size());
+    if (!ok) return false;
 
-    prewarm_clear();
-    keycache_flush();       /* stale entries from any prior session */
+    /* Publish only after the canary verified, and atomically with the flush.
+     * May run on a worker (ui_lock.cpp's unlock job), so it is done under the
+     * mutex every reader of the cache takes; if a lock() or another unlock
+     * landed while we were deriving, the epoch moved and we leave the session
+     * as that call left it. */
+    PrewarmLock lk;
+    if (g_key_epoch != epoch) return false;
+    prewarm_clear_locked();
+#ifdef ARDUINO
+    keycache_flush_locked();    /* stale entries from any prior session */
+#endif
     g_passphrase = pw;
     g_unlocked = true;
     return true;
@@ -600,13 +669,15 @@ void notes_crypto_lock()
         g_unlocked = false;
         prewarm_clear_locked();
 #ifdef ARDUINO
-        keycache_flush_locked();    /* drop every derived key with the passphrase */
+        keycache_flush_locked();    /* every derived key, pinned ones included */
 #endif
+        /* Under the mutex too: unlock and the pin path read g_passphrase
+         * under it from worker threads. */
+        if (!g_passphrase.empty()) {
+            zeroize(&g_passphrase[0], g_passphrase.size());
+        }
+        g_passphrase.clear();
     }
-    if (!g_passphrase.empty()) {
-        zeroize(&g_passphrase[0], g_passphrase.size());
-    }
-    g_passphrase.clear();
 }
 
 bool notes_crypto_encrypt_buffer(const uint8_t *pt, size_t pt_len,
@@ -621,7 +692,7 @@ bool notes_crypto_encrypt_buffer(const uint8_t *pt, size_t pt_len,
  * unless the session locked or another primer beat us to it in the meantime.
  * The ~10k-iteration PBKDF2 is the expensive part and runs before the lock is
  * taken, so the mutex is held only for the memcpy that publishes the result. */
-static void prewarm_derive_and_publish(const std::string &pw)
+static void prewarm_derive_and_publish(const std::string &pw, uint32_t epoch)
 {
     uint8_t salt[NC_SALT_LEN];
     esp_fill_random(salt, NC_SALT_LEN);
@@ -633,7 +704,7 @@ static void prewarm_derive_and_publish(const std::string &pw)
         /* Only publish while still unlocked and unprimed: a lock() that raced us
          * has already flipped g_unlocked under this same mutex, so we drop the
          * derived key rather than leave material behind. */
-        if (g_unlocked && !g_prewarm.valid) {
+        if (g_unlocked && g_key_epoch == epoch && !g_prewarm.valid) {
             memcpy(g_prewarm.salt, salt, NC_SALT_LEN);
             memcpy(g_prewarm.key, key, NC_KEY_LEN);
             memcpy(g_prewarm.iv, iv, NC_IV_LEN);
@@ -649,12 +720,17 @@ static void prewarm_derive_and_publish(const std::string &pw)
 /* One-shot worker that runs PBKDF2 off the UI thread. The passphrase arrives as
  * a private heap copy (the worker never touches g_passphrase) and is zeroized
  * before the task exits. */
+struct PrewarmArg {
+    std::string pw;
+    uint32_t epoch;
+};
+
 static void prewarm_task(void *arg)
 {
-    std::string *pw = static_cast<std::string *>(arg);
-    prewarm_derive_and_publish(*pw);
-    if (!pw->empty()) zeroize(&(*pw)[0], pw->size());
-    delete pw;
+    PrewarmArg *a = static_cast<PrewarmArg *>(arg);
+    prewarm_derive_and_publish(a->pw, a->epoch);
+    if (!a->pw.empty()) zeroize(&a->pw[0], a->pw.size());
+    delete a;
     s_prewarm_running = false;
     vTaskDelete(nullptr);
 }
@@ -664,27 +740,120 @@ void notes_crypto_prewarm()
 {
 #ifdef ARDUINO
     if (!g_unlocked) return;
+    /* At most one derivation in flight; claimed atomically so a re-arm from a
+     * save worker (encrypt_with_pw) and the editor can't both spawn one. */
+    if (s_prewarm_running.exchange(true)) return;
+
+    /* Snapshot the passphrase (and the epoch it belongs to) under the mutex so
+     * the worker can never race a concurrent lock()/rotation of g_passphrase;
+     * the worker owns and zeroizes this copy. */
+    PrewarmArg *a = new (std::nothrow) PrewarmArg();
+    if (!a) { s_prewarm_running = false; return; }
     {
         PrewarmLock lk;
-        if (g_prewarm.valid) return;    /* already primed */
+        if (!g_unlocked || g_prewarm.valid) {   /* locked, or already primed */
+            delete a;
+            s_prewarm_running = false;
+            return;
+        }
+        a->pw = g_passphrase;
+        a->epoch = g_key_epoch;
     }
-    if (s_prewarm_running) return;      /* a derivation is already in flight */
 
-    /* Snapshot the passphrase so the worker can never race a concurrent
-     * lock()/rotation of g_passphrase; the worker owns and zeroizes this copy. */
-    std::string *pw = new (std::nothrow) std::string(g_passphrase);
-    if (!pw) return;
-
-    s_prewarm_running = true;
     /* Derive on a low-priority background task so opening the editor never blocks
      * on PBKDF2. If FreeRTOS can't spawn it, derive inline as a fallback — that
-     * path pays the old tens-of-ms hitch, but only when task slots are exhausted. */
-    if (xTaskCreate(prewarm_task, "notes_prewarm", 8192, pw, 1, nullptr) != pdPASS) {
+     * path pays the full derive, but only when task slots are exhausted. */
+    if (xTaskCreate(prewarm_task, "notes_prewarm", 8192, a, 1, nullptr) != pdPASS) {
+        prewarm_derive_and_publish(a->pw, a->epoch);
+        if (!a->pw.empty()) zeroize(&a->pw[0], a->pw.size());
+        delete a;
         s_prewarm_running = false;
-        prewarm_derive_and_publish(*pw);
-        if (!pw->empty()) zeroize(&(*pw)[0], pw->size());
-        delete pw;
     }
+#endif
+}
+
+bool notes_crypto_pin_key(int tag, const uint8_t *ct, size_t ct_len, bool derive)
+{
+#ifdef ARDUINO
+    if (tag < 0 || tag >= NC_PIN_N) return false;
+    if (!ct || ct_len < 8 + NC_SALT_LEN || !has_magic(ct, ct_len)) return false;
+    uint8_t salt[NC_SALT_LEN];
+    memcpy(salt, ct + 8, NC_SALT_LEN);
+    uint8_t key[NC_KEY_LEN];
+    uint8_t iv[NC_IV_LEN];
+    std::string pw;
+    uint32_t epoch;
+    {
+        PrewarmLock lk;
+        if (!g_unlocked) return false;
+        if (keycache_lookup_locked(salt, key, iv)) {
+            pinned_set_locked(tag, salt, key, iv);
+            zeroize(key, sizeof(key));
+            zeroize(iv, sizeof(iv));
+            return true;
+        }
+        if (!derive) return false;
+        pw = g_passphrase;      /* private copy; wiped below */
+        epoch = g_key_epoch;
+    }
+    bool ok = derive_key_iv(pw.c_str(), salt, key, iv);
+    if (!pw.empty()) zeroize(&pw[0], pw.size());
+    if (ok) {
+        PrewarmLock lk;
+        ok = g_unlocked && g_key_epoch == epoch;
+        if (ok) pinned_set_locked(tag, salt, key, iv);
+    }
+    zeroize(key, sizeof(key));
+    zeroize(iv, sizeof(iv));
+    return ok;
+#else
+    (void)tag; (void)ct; (void)ct_len; (void)derive;
+    return false;
+#endif
+}
+
+void notes_crypto_unpin_key(int tag)
+{
+#ifdef ARDUINO
+    if (tag < 0 || tag >= NC_PIN_N) return;
+    PrewarmLock lk;
+    entry_wipe(g_pinned[tag]);
+#else
+    (void)tag;
+#endif
+}
+
+#ifdef ARDUINO
+/* First 16 bytes (magic + salt) of a root file, FFat first then SD — the
+ * same order hw_read_preferred_bytes uses, without reading the whole index. */
+static bool read_preferred_header(const char *path, uint8_t out[8 + NC_SALT_LEN])
+{
+    const size_t n = 8 + NC_SALT_LEN;
+    File f = FFat.open(path, FILE_READ);
+    if (f) {
+        bool ok = f.read(out, n) == n;
+        f.close();
+        return ok;
+    }
+    if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
+    core::ScopedSpiLock lock;
+    f = SD.open(path, FILE_READ);
+    if (!f) return false;
+    bool ok = f.read(out, n) == n;
+    f.close();
+    return ok;
+}
+#endif
+
+void notes_crypto_prewarm_fixed()
+{
+#ifdef ARDUINO
+    if (!g_unlocked) return;
+    uint8_t hdr[8 + NC_SALT_LEN];
+    if (read_preferred_header("/journal_idx.bin", hdr)) {
+        notes_crypto_pin_key(NC_PIN_JOURNAL_INDEX, hdr, sizeof(hdr), /*derive=*/true);
+    }
+    hal::secret_prewarm_pinned();
 #endif
 }
 
@@ -708,8 +877,11 @@ bool notes_crypto_set_passphrase(const char *new_pw)
                          strlen(NC_CANARY_PT), canary_ct)) return false;
     if (!write_canary(canary_ct)) return false;
 
-    prewarm_clear();
-    keycache_flush();
+    PrewarmLock lk;
+    prewarm_clear_locked();
+#ifdef ARDUINO
+    keycache_flush_locked();
+#endif
     g_passphrase = new_pw;
     g_unlocked = true;
     return true;
@@ -830,10 +1002,16 @@ bool notes_crypto_change_passphrase(const char *old_pw, const char *new_pw,
     if (!write_canary(canary_ct)) return false;
 
     zeroize(&old_pass[0], old_pass.size());
-    g_passphrase = new_pass;
-    keycache_flush();   /* the rewrite loop cached derivations under the old key */
+    {
+        PrewarmLock lk;
+        g_passphrase = new_pass;
+        prewarm_clear_locked();     /* may hold a triple primed under the old key */
+#ifdef ARDUINO
+        keycache_flush_locked();    /* the rewrite loop cached derivations under the old key */
+#endif
+        g_unlocked = true;
+    }
     zeroize(&new_pass[0], new_pass.size());
-    g_unlocked = true;
     if (cb) cb(total, total, "Done");
     return true;
 }

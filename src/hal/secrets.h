@@ -47,6 +47,13 @@ std::string secret_mask_display(const char *ns, const char *key);
  * secret_mask_display off the UI thread then (it remembers the result). */
 bool secret_mask_peek(const char *ns, const char *key, std::string &out);
 
+/* Derive and pin (notes_crypto_pin_key) the key of every secret slot in the
+ * pinned table that holds ciphertext — Telegram token, Notes Sync token, SSH
+ * password. One PBKDF2 per slot present; BLOCKS, worker only. Called by
+ * notes_crypto_prewarm_fixed() after an unlock. secret_store re-pins a slot
+ * it rewrites (from the key the encrypt just cached, no extra derive). */
+void secret_prewarm_pinned();
+
 /* Drop a plaintext predecessor key that pre-dates encryption (e.g. the
  * bare "token" slot that lived next to "token_enc" during migration).
  * Idempotent — safe to call on every boot. */

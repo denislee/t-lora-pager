@@ -6,12 +6,30 @@
  * buttons. Callers supply a callback; the prompt fires it with either the
  * typed passphrase (or true/false for the verify-unlock variant) once the
  * user dismisses the modal. Only one prompt at a time.
+ *
+ * State reset (not a core::App; the modal owns its state):
+ *   g_ctx                 — the open prompt; freed by tear_down() (OK/Cancel/
+ *                           a successful unlock). Never torn down while
+ *                           ctx->busy: OK and Cancel are ignored then.
+ *   ctx->loading          — "Unlocking…" ui_loading_t, open only while busy;
+ *                           closed in unlock_done.
+ *   s_unlock_job (unlock) — OneShotJob running notes_crypto_unlock + the
+ *                           fixed-salt prewarm (P7.4). Its worker touches no
+ *                           LVGL and owns a heap copy of the passphrase, which
+ *                           it scrubs; unlock_done applies the result on the
+ *                           LVGL thread and drops it if the submit token no
+ *                           longer matches the open prompt. Callers whose app
+ *                           can stop while a prompt is open guard their own
+ *                           callback (e.g. journal/editor pending_*_parent).
  */
 #include "ui_define.h"
 #include "hal/notes_crypto.h"
+#include "hal/secrets.h"
+#include "core/one_shot_job.h"
 
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
 
 namespace {
@@ -28,6 +46,9 @@ struct LockCtx {
     ui_passphrase_result_cb cb_pw     = nullptr;
     ui_passphrase_unlock_cb cb_unlock = nullptr;
     void *ud               = nullptr;
+    bool busy              = false;   // unlock job in flight (verify_unlock only)
+    uint32_t submit        = 0;       // token of the in-flight submit
+    ui_loading_t loading   = {};
 };
 
 /* Single-instance guard — the caller is expected to wait for one modal
@@ -52,10 +73,77 @@ static void tear_down(LockCtx *ctx)
     ui_overlay_close(&owned->ov);
 }
 
+/* ---- Unlock on a worker (P7.4) ----
+ * The canary check (one PBKDF2) and, on success, the fixed-salt prewarm
+ * (journal index + secret slots, P6.22b) run on s_unlock_job so the LVGL
+ * thread keeps drawing the "Unlocking…" loader. notes_crypto_unlock publishes
+ * the unlocked state itself, only after the canary verified. */
+struct UnlockResult {
+    bool ok;
+    uint32_t submit;
+};
+static uint32_t s_submit_seq = 0;
+
+static UnlockResult *run_unlock(std::string *pw, uint32_t submit)
+{
+    bool ok = notes_crypto_unlock(pw->c_str());
+    hal::secret_scrub(*pw);     // the job's copy; g_passphrase holds the live one
+    delete pw;
+    if (ok) notes_crypto_prewarm_fixed();
+    return new UnlockResult{ok, submit};
+}
+
+static void unlock_done(UnlockResult &r)
+{
+    LockCtx *ctx = g_ctx.get();
+    if (!ctx || !ctx->busy || ctx->submit != r.submit) return;
+    ctx->busy = false;
+    ui_loading_close(&ctx->loading);
+    if (!r.ok) {
+        lv_obj_remove_state(ctx->ta1, LV_STATE_DISABLED);
+        set_error(ctx, "Wrong passphrase.");
+        /* Clear the field so the user can retype rather than hand-delete. */
+        lv_textarea_set_text(ctx->ta1, "");
+        lv_group_focus_obj(ctx->ta1);
+        return;
+    }
+    ui_passphrase_unlock_cb cb = ctx->cb_unlock;
+    void *ud = ctx->ud;
+    tear_down(ctx);
+    if (cb) cb(true, ud);
+}
+
+static core::OneShotJob<UnlockResult> s_unlock_job(unlock_done);
+
+static void unlock_submit(LockCtx *ctx, const char *p1)
+{
+    if (ctx->busy || s_unlock_job.busy()) return;   // double submit
+    std::string *pw = new (std::nothrow) std::string(p1);
+    if (!pw) return;
+    ctx->busy = true;
+    ctx->submit = ++s_submit_seq;
+    const uint32_t submit = ctx->submit;
+    lv_obj_add_state(ctx->ta1, LV_STATE_DISABLED);
+    set_error(ctx, "");
+    ui_loading_open(&ctx->loading, "Unlocking\xE2\x80\xA6", nullptr);
+    /* Priority 1 = the LVGL loop's, so the loader keeps animating while both
+     * cores derive (P7.2 runs T2 on the other core at the caller's priority).
+     * Emulator: runs inline and unlock_done has already fired on return. */
+    auto st = s_unlock_job.start([pw, submit]() { return run_unlock(pw, submit); },
+                                 8192, "unlock", 1);
+    if (st == core::OneShotJob<UnlockResult>::Start::Failed) {
+        /* No task: the closure never ran, so `pw` is still ours. Do it
+         * inline, as before P7.4. */
+        UnlockResult *r = run_unlock(pw, submit);
+        unlock_done(*r);
+        delete r;
+    }
+}
+
 static void cancel_event_cb(lv_event_t *e)
 {
     LockCtx *ctx = (LockCtx *)lv_event_get_user_data(e);
-    if (!ctx) return;
+    if (!ctx || ctx->busy) return;
     ui_passphrase_result_cb cb_pw  = ctx->cb_pw;
     ui_passphrase_unlock_cb cb_un  = ctx->cb_unlock;
     void *ud = ctx->ud;
@@ -67,7 +155,7 @@ static void cancel_event_cb(lv_event_t *e)
 static void ok_event_cb(lv_event_t *e)
 {
     LockCtx *ctx = (LockCtx *)lv_event_get_user_data(e);
-    if (!ctx) return;
+    if (!ctx || ctx->busy) return;
 
     const char *p1 = lv_textarea_get_text(ctx->ta1);
     if ((!p1 || !*p1) && !ctx->allow_empty) {
@@ -85,16 +173,7 @@ static void ok_event_cb(lv_event_t *e)
     }
 
     if (ctx->verify_unlock) {
-        if (!notes_crypto_unlock(p1)) {
-            set_error(ctx, "Wrong passphrase.");
-            /* Clear the field so the user can retype rather than hand-delete. */
-            lv_textarea_set_text(ctx->ta1, "");
-            return;
-        }
-        ui_passphrase_unlock_cb cb = ctx->cb_unlock;
-        void *ud = ctx->ud;
-        tear_down(ctx);
-        if (cb) cb(true, ud);
+        unlock_submit(ctx, p1);     // result lands in unlock_done
         return;
     }
 

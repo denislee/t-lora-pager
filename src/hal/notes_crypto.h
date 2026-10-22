@@ -54,6 +54,36 @@ bool notes_crypto_decrypt_buffer(const uint8_t *ct, size_t ct_len,
  * `enc` compatibility) is preserved. Call from the UI thread. */
 void notes_crypto_prewarm();
 
+/* Pinned keys for fixed-salt blobs (P6.22b / IS.10 option b). A blob that is
+ * read much more often than it is rewritten keeps one salt between writes, so
+ * its derived key can stay resident: these slots sit outside the 6-entry LRU
+ * (nothing evicts them) and are flushed with it on lock/unlock/passphrase
+ * change. Tags: */
+enum : int {
+    NC_PIN_JOURNAL_INDEX = 0,   /* /journal_idx.bin (ui_journal.cpp) */
+    NC_PIN_SECRET_FIRST  = 1,   /* secrets.cpp kPinnedSlots, in table order */
+    NC_PIN_N             = 4,
+};
+
+/* Pin the session key for the salt of OpenSSL-`enc` blob `ct` (only its
+ * 16-byte header is read) into slot `tag`, replacing what the slot held.
+ * Taken from the cache when present (e.g. just seeded by the encrypt that
+ * wrote `ct`); otherwise derived only when `derive` is true, which blocks
+ * for one PBKDF2 — call that form from a worker. False if locked, `ct` is not
+ * an `enc` blob, the key wasn't available, or the session changed meanwhile.
+ * Any thread. */
+bool notes_crypto_pin_key(int tag, const uint8_t *ct, size_t ct_len, bool derive);
+
+/* Drop pinned slot `tag` (its blob was deleted). Any thread. */
+void notes_crypto_unpin_key(int tag);
+
+/* Derive and pin every fixed-salt key that exists on this device: the
+ * journal index (FFat first, then SD, like hw_read_preferred_bytes) and the
+ * secret slots (hal::secret_prewarm_pinned). One PBKDF2 per blob present;
+ * BLOCKS — call it from a worker right after notes_crypto_unlock() succeeds
+ * (ui_lock.cpp's unlock job). No-op when locked. */
+void notes_crypto_prewarm_fixed();
+
 /* First-time setup: refuses if crypto is already enabled. Writes the canary
  * and unlocks the session. The caller is responsible for migrating any
  * existing plaintext files afterwards. */

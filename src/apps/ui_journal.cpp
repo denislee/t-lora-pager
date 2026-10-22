@@ -169,6 +169,8 @@ void save_index_file(const std::vector<JournalEntry> &entries)
         std::vector<uint8_t> ct;
         if (notes_crypto_encrypt_buffer(buf.data(), buf.size(), ct)) {
             hw_save_preferred_bytes(kIndexPath, ct.data(), ct.size());
+            // Re-pin the index key to the new salt (cached by the encrypt; no derive).
+            notes_crypto_pin_key(NC_PIN_JOURNAL_INDEX, ct.data(), ct.size(), false);
             return;
         }
         /* Encryption failure falls through to the plaintext write so we don't
