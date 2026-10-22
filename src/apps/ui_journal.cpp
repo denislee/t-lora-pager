@@ -37,6 +37,7 @@
 #include "../core/input_profile.h"
 #include "../hal/storage.h"
 #include <vector>
+#include <memory>
 #include <string>
 #include <algorithm>
 #include <cstdint>
@@ -48,17 +49,30 @@ namespace {
 struct JournalEntry {
     std::string filename;
     uint32_t mtime;
-    std::string snippet;
+    // P7.25: immutable once built, and shared (not copied) between the page's
+    // journal_entries and the background worker's snapshot, so handing the
+    // worker a snapshot costs (name, mtime, handle) per entry instead of a
+    // second 1.5 KB copy of every snippet. The worker still reuses unchanged
+    // entries (IS.9/P7.6: no re-decrypt) and still writes the full index.
+    // shared_ptr's count is atomic, so either thread may drop its copy.
+    std::shared_ptr<const std::string> snippet;
     bool truncated;
 };
+
+// Text of an entry's snippet; empty for a default-constructed entry.
+const std::string &snippet_of(const JournalEntry &e)
+{
+    static const std::string kEmpty;
+    return e.snippet ? *e.snippet : kEmpty;
+}
 
 constexpr const char *kIndexPath = "/journal_idx.bin";
 constexpr uint32_t kIndexMagic = 0x4A524E4Cu; // 'JRNL' little-endian
 constexpr uint8_t  kIndexVersion = 1;
 /* Per-note preview cached in the (static, always-resident) journal index and
- * shown in the ~125 px scrollable box on the list. The whole index lives in
- * internal heap, so this directly gates how much RAM 100+ notes pin away from
- * WiFi/TLS. 1.5 KB is still several screenfuls in that box; the full note opens
+ * shown in the ~125 px scrollable box on the list. Since P7.48 a snippet over
+ * 1 KB lives in PSRAM; shorter ones, names and handles stay in internal heap
+ * (P7.12 owns the length call). 1.5 KB is still several screenfuls in that box; the full note opens
  * in the editor on tap. The on-disk index is length-prefixed, so shrinking this
  * needs no migration — longer snippets from an older index stay valid until
  * their note is next re-scanned. */
@@ -138,7 +152,7 @@ bool load_index_file(std::vector<JournalEntry> &out)
         uint16_t snip_len;
         if (!read_u16le(raw, pos, snip_len)) return false;
         if (pos + snip_len + 1 > raw.size()) return false;
-        e.snippet.assign((const char *)&raw[pos], snip_len);
+        e.snippet = std::make_shared<std::string>((const char *)&raw[pos], snip_len);
         pos += snip_len;
         e.truncated = (raw[pos++] != 0);
 
@@ -152,7 +166,7 @@ void save_index_file(const std::vector<JournalEntry> &entries)
     std::vector<uint8_t> buf;
     size_t est_size = 16;
     for (const auto &e : entries) {
-        est_size += 8 + e.filename.size() + e.snippet.size();
+        est_size += 8 + e.filename.size() + snippet_of(e).size();
     }
     buf.reserve(est_size);
 
@@ -164,9 +178,10 @@ void save_index_file(const std::vector<JournalEntry> &entries)
         uint8_t name_len = (uint8_t)std::min<size_t>(e.filename.size(), 255);
         buf.push_back(name_len);
         buf.insert(buf.end(), e.filename.begin(), e.filename.begin() + name_len);
-        uint16_t snip_len = (uint16_t)std::min<size_t>(e.snippet.size(), 65535);
+        const std::string &snip = snippet_of(e);
+        uint16_t snip_len = (uint16_t)std::min<size_t>(snip.size(), 65535);
         write_u16le(buf, snip_len);
-        buf.insert(buf.end(), e.snippet.begin(), e.snippet.begin() + snip_len);
+        buf.insert(buf.end(), snip.begin(), snip.begin() + snip_len);
         buf.push_back(e.truncated ? 1 : 0);
     }
 
@@ -288,7 +303,7 @@ bool refresh_journal_entries(std::vector<JournalEntry> &entries, ProgressFn cb =
             std::string snippet;
             bool truncated = false;
             hw_read_preferred_file_snippet(name.c_str(), snippet, kSnippetBytes, &truncated);
-            e.snippet = std::move(snippet);
+            e.snippet = std::make_shared<std::string>(std::move(snippet));
             e.truncated = truncated;
             next.push_back(std::move(e));
             dirty = true;
@@ -471,7 +486,8 @@ static void bg_refresh_timer_cb(lv_timer_t *t)
     // through bg_refresh_done, which reschedules if that result is stale.
     if (s_bg_job.busy()) return;
     BgRefreshResult *seed = new BgRefreshResult();
-    seed->entries = journal_entries;  // copy: the worker owns it, the page keeps journal_entries
+    // P7.25: copies names, mtimes and shared snippet handles, not snippet text.
+    seed->entries = journal_entries;
     seed->entries_gen = s_entries_gen;
     seed->fs_gen = hw_get_filesystem_generation();
     auto started = s_bg_job.start([seed]() {
@@ -947,7 +963,7 @@ static void journal_build_ui(lv_obj_t *parent)
             lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
             /* set_text copies into the label's own buffer; feed it the cached
              * snippet directly rather than taking a second heap copy per entry. */
-            lv_label_set_text(label, entry.snippet.c_str());
+            lv_label_set_text(label, snippet_of(entry).c_str());
             lv_obj_set_width(label, lv_pct(100));
             lv_obj_set_style_text_font(label, font, 0);
             lv_obj_set_style_text_color(label, UI_COLOR_FG, 0);

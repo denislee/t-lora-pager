@@ -22,6 +22,23 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "ble_stack.h"
+#include <esp_heap_caps.h>
+
+// P7.48: a plain malloc/new (std::string, std::vector, String, std::function)
+// larger than this goes to PSRAM first, falling back to internal DRAM; one this
+// size or smaller stays internal first. The framework sets 4096
+// (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL) in psramInit() before setup(), and
+// hw_init() lowers it. Audit (PERFORMANCE_PLAN.md §16, P7.48): nothing in the
+// 1025-4096 B band is handed to a DMA engine, read by an IRAM ISR, used with the
+// flash cache disabled, or used as a static FreeRTOS buffer. Code that needs
+// internal or DMA memory must ask for it with heap_caps_malloc(MALLOC_CAP_INTERNAL
+// / MALLOC_CAP_DMA). With CONFIG_SPIRAM_USE_MALLOC, any plain malloc already lands
+// in PSRAM once internal RAM runs out. Why 1024 and not 512: what this targets
+// (1.5 KB journal snippets, HTTP/stream buffers, Telegram strings) is above 1 KB.
+// 512 would also move small hot objects (dynamic queues, since pvPortMalloc is
+// malloc, plus short strings) to slower PSRAM for little gain. Read P7.49
+// `[prof] heap` before going lower.
+static constexpr size_t kMallocInternalMaxBytes = 1024;
 #endif
 
 using std::string;
@@ -339,6 +356,8 @@ const uint8_t mic_gain = 10;
 void hw_init()
 {
 #ifdef ARDUINO
+    heap_caps_malloc_extmem_enable(kMallocInternalMaxBytes);  // P7.48, see above
+
     // P2.4: route all cJSON allocations to PSRAM. cJSON mints one small node
     // plus duplicated strings per JSON element, and the Arduino-ESP32 unified
     // allocator forces small allocations into internal DRAM — so a ~5 KB
