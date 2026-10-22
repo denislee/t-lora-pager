@@ -28,6 +28,8 @@
 #include "power.h"
 #include "task_util.h"
 
+LV_FONT_DECLARE(font_montserrat_48_subset);  // P7.51 src/fonts/font_montserrat_48_subset.c
+
 namespace {
 
 constexpr UBaseType_t kTaskPriority       = 3;
@@ -91,7 +93,7 @@ lv_obj_t *build_charge_overlay()
     lv_obj_t *icon = lv_label_create(overlay);
     lv_label_set_text(icon, LV_SYMBOL_CHARGE);
     lv_obj_set_style_text_color(icon, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_set_style_text_font(icon, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(icon, &font_montserrat_48_subset, 0);
     lv_obj_set_style_text_opa(icon, LV_OPA_COVER, 0);
 
     lv_anim_t a;
@@ -108,7 +110,7 @@ lv_obj_t *build_charge_overlay()
     lv_obj_t *pct = lv_label_create(overlay);
     lv_label_set_text_fmt(pct, "%d%%", p.battery_percent);
     lv_obj_set_style_text_color(pct, UI_COLOR_FG, 0);
-    lv_obj_set_style_text_font(pct, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(pct, &font_montserrat_48_subset, 0);
 
     // Battery progress bar — concrete read of how full the cell is right now.
     // Ranged 0..100 so the user sees absolute fill, not a relative animation.

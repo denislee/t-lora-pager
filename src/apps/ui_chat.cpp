@@ -22,7 +22,7 @@
  *            s_status_lbl                  — nulled (deleted with parent)
  *   timers:  s_poll_timer (also drives the
  *            15 s recording cap)           — lv_timer_del + null
- *   tasks:   send_task (FreeRTOS task on hardware, detached std::thread on
+ *   tasks:   send_task (FreeRTOS task on hardware, detached pthread on
  *            the emulator; no handle kept) — abandoned via s_ctx handoff
  *   hw:      mic recording                 — stopped via hw_rec_stop()
  *   ctx:     s_ctx (SendCtx*)              — abandoned + freed if worker done
@@ -61,7 +61,7 @@ extern "C" {
 #include "cJSON.h"
 }
 #else
-#include <thread>
+#include <pthread.h>
 #endif
 
 namespace {
@@ -654,12 +654,16 @@ static bool spawn_send_task(SendCtx *ctx)
 #else
     // Emulator: no FreeRTOS; a detached thread plays the worker task (the
     // link test hook does the same).
-    try {
-        std::thread(send_task, ctx).detach();
-        return true;
-    } catch (...) {
+    // P7.52: pthread + return-code check instead of std::thread + catch (...).
+    pthread_t th;
+    if (pthread_create(&th, nullptr, [](void *arg) -> void * {
+            send_task(arg);
+            return nullptr;
+        }, ctx) != 0) {
         return false;
     }
+    pthread_detach(th);
+    return true;
 #endif
 }
 

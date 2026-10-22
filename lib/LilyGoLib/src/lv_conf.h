@@ -143,12 +143,16 @@
 	 * - bitmaps with transparency may use ARGB8888
 	 */
 
+	/* [LOCAL PATCH] P6.44: RGB565A8/RGB888/XRGB8888/L8 off. Display and the two
+	 * runtime backdrops are RGB565, layers ARGB8888, glyphs A8. RGB888 is only a
+	 * source for HOR/complex gradients (src uses VER only): add one, re-enable.
+	 * RGB565A8 off also drops rotate/scale of RGB565 images/layers (none used). */
 	#define LV_DRAW_SW_SUPPORT_RGB565		1
-	#define LV_DRAW_SW_SUPPORT_RGB565A8		1
-	#define LV_DRAW_SW_SUPPORT_RGB888		1
-	#define LV_DRAW_SW_SUPPORT_XRGB8888		1
+	#define LV_DRAW_SW_SUPPORT_RGB565A8		0
+	#define LV_DRAW_SW_SUPPORT_RGB888		0
+	#define LV_DRAW_SW_SUPPORT_XRGB8888		0
 	#define LV_DRAW_SW_SUPPORT_ARGB8888		1
-	#define LV_DRAW_SW_SUPPORT_L8			1
+	#define LV_DRAW_SW_SUPPORT_L8			0
 	#define LV_DRAW_SW_SUPPORT_AL88			0
 	#define LV_DRAW_SW_SUPPORT_A8			1
 	#define LV_DRAW_SW_SUPPORT_I1			0
@@ -504,7 +508,8 @@
 #define LV_FONT_MONTSERRAT_42 0
 #define LV_FONT_MONTSERRAT_44 0
 #define LV_FONT_MONTSERRAT_46 0
-#define LV_FONT_MONTSERRAT_48 1
+/* [LOCAL PATCH] P7.51: the three 48 px users take src/fonts/font_montserrat_48_subset.c. */
+#define LV_FONT_MONTSERRAT_48 0
 
 /*Demonstrate special features*/
 #define LV_FONT_MONTSERRAT_28_COMPRESSED 0  /*bpp = 3*/
@@ -594,7 +599,8 @@
 
 #define LV_USE_BUTTON        1
 
-#define LV_USE_BUTTONMATRIX  1
+/* [LOCAL PATCH] P7.53: unused in src/; LVGL 9.5/9.6 msgbox does not need it (9.2 does: emulator keeps it). */
+#define LV_USE_BUTTONMATRIX  0
 
 #define LV_USE_CALENDAR   0
 #if LV_USE_CALENDAR
@@ -623,7 +629,8 @@
 
 #define LV_USE_IMAGEBUTTON     0
 
-#define LV_USE_KEYBOARD   1
+/* [LOCAL PATCH] P7.53: unused in src/. */
+#define LV_USE_KEYBOARD   0
 
 #define LV_USE_LABEL      1
 #if LV_USE_LABEL
@@ -667,9 +674,11 @@
     #define LV_TEXTAREA_DEF_PWD_SHOW_TIME 1500    /*ms*/
 #endif
 
-#define LV_USE_TABLE      1
+/* [LOCAL PATCH] P7.53: unused in src/. */
+#define LV_USE_TABLE      0
 
-#define LV_USE_TABVIEW    1
+/* [LOCAL PATCH] P7.53: unused in src/. */
+#define LV_USE_TABVIEW    0
 
 #define LV_USE_TILEVIEW   1
 

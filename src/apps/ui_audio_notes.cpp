@@ -43,6 +43,8 @@
 #include <freertos/task.h>
 #endif
 
+LV_FONT_DECLARE(font_montserrat_48_subset);  // P7.51 src/fonts/font_montserrat_48_subset.c
+
 namespace {
 
 static const char *NOTES_DIR = "/mental_notes";
@@ -397,7 +399,7 @@ static void build_record_view()
     rec_time_lbl = lv_label_create(main_page);
     lv_label_set_text(rec_time_lbl, "00:00");
     lv_obj_set_style_text_color(rec_time_lbl, UI_COLOR_FG, 0);
-    lv_obj_set_style_text_font(rec_time_lbl, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(rec_time_lbl, &font_montserrat_48_subset, 0);
 
     // Progress bar: fraction of HW_REC_MAX_MS used.
     rec_bar = lv_bar_create(main_page);

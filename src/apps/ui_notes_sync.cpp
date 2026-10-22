@@ -41,7 +41,7 @@
  *                                                      hardware, s_log_mu on
  *                                                      the emulator)
  *   tasks:   sync worker (FreeRTOS s_bg_task on      — left to finish and
- *            hardware, detached std::thread +          self-delete/exit; it
+ *            hardware, detached pthread +              self-delete/exit; it
  *            s_bg_running on the emulator)             only touches the log
  *                                                      queue
  * If you add a new cached LVGL pointer, timer, or FreeRTOS task, list it
@@ -82,7 +82,7 @@ extern "C" {
 }
 #else
 #include <mutex>
-#include <thread>
+#include <pthread.h>
 #endif
 
 namespace {
@@ -554,17 +554,19 @@ static void start_sync()
     // Emulator: no FreeRTOS; a detached thread plays the worker task (as in
     // ui_chat).
     s_bg_running = true;
-    try {
-        std::thread([] {
+    // P7.52: pthread + return-code check instead of std::thread + catch (...).
+    pthread_t th;
+    if (pthread_create(&th, nullptr, [](void *) -> void * {
             notes_sync_worker();
             s_bg_running = false;
-        }).detach();
-    } catch (...) {
+            return nullptr;
+        }, nullptr) != 0) {
         s_bg_running = false;
         log_append("ERR: failed to start sync task");
         s_syncing = false;
         return;
     }
+    pthread_detach(th);
 #endif
     if (!s_bg_timer) {
         s_bg_timer = lv_timer_create(notes_sync_drain_tick, 100, nullptr);

@@ -34,6 +34,7 @@
 LV_FONT_DECLARE(lv_font_montserrat_12);
 LV_FONT_DECLARE(lv_font_montserrat_14);
 LV_FONT_DECLARE(lv_font_montserrat_18);
+LV_FONT_DECLARE(font_montserrat_48_subset);  // P7.51 src/fonts/font_montserrat_48_subset.c
 
 namespace apps {
 
@@ -178,7 +179,7 @@ static void update_badges(lv_timer_t *t) {
 // panels (240px, 192px, 380px-tall menu areas). Only uses sizes enabled in
 // every build environment (including the native emulator).
 const lv_font_t* pick_icon_font(int32_t tile_h) {
-    if (tile_h >= 140) return &lv_font_montserrat_48;
+    if (tile_h >= 140) return &font_montserrat_48_subset;
     if (tile_h >= 90)  return &lv_font_montserrat_32;
     if (tile_h >= 70)  return &lv_font_montserrat_28;
     if (tile_h >= 55)  return &lv_font_montserrat_24;
