@@ -21,6 +21,7 @@
 #ifdef ARDUINO
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include "ble_stack.h"
 #endif
 
 using std::string;
@@ -123,7 +124,16 @@ static constexpr uint32_t FAKE_SLEEP_IDLE_FREQ_MHZ = 20;
 
 uint32_t hw_fake_sleep_target_freq()
 {
-    bool link_up = hw_get_ble_kb_connected() || hw_get_wifi_connected();
+    // P7.35: any BLE connection (keyboard, PagerLink companion or both), BLE
+    // advertising, or Wi-Fi enabled (associated or still trying to) keeps the
+    // >= 80 MHz floor. hw_get_ble_kb_connected() alone only saw HID-subscribed
+    // peers, so a companion-only phone dropped to 20 MHz with its link up.
+    bool link_up = hw_get_wifi_enable() || hw_get_wifi_connected();
+#ifdef ARDUINO
+    link_up = link_up || hal::ble::connected_count() > 0 || hal::ble::enabled();
+#else
+    link_up = link_up || hw_get_ble_kb_connected();
+#endif
     return link_up ? 80 : FAKE_SLEEP_IDLE_FREQ_MHZ;
 }
 
@@ -868,7 +878,10 @@ void hw_power_up_all()
     // hw_power_down_all(). configure()'s top-of-function radio.standby() self-heals
     // the chip from sleep before re-applying settings. hw_set_radio_enable →
     // hw_set_radio_params already takes ScopedSpiLock internally — no extra lock here.
-    hw_set_radio_enable(user_setting.radio_enable);
+    // P7.46: a disabled radio is already asleep (hw_power_down_all), so skip the
+    // standby + setFrequency + modulation + sleep round trip; enabling it later
+    // goes through hw_set_radio_enable(true) → configure() as before.
+    if (user_setting.radio_enable) hw_set_radio_enable(true);
 
     // PB.2 — restore WiFi power-save to MIN_MODEM after fake sleep.
     // Reverts the MAX_MODEM escalation applied in hw_power_down_all() so normal

@@ -15,9 +15,10 @@
  *    below runs on the LVGL thread inside `lv_timer_handler()`, which already
  *    holds that (non-recursive) lock, so none of them re-take it — doing so
  *    would self-deadlock.
- *  - `on_done(result)` runs on the LVGL thread from a 100 ms drain timer. The
- *    job deletes the result once the callback returns. A null result skips
- *    the callback.
+ *  - `on_done(result)` runs on the LVGL thread from the drain timer, which the
+ *    worker readies and wakes as it publishes (P7.47; the 100 ms period is only
+ *    a fallback). The job deletes the result once the callback returns. A null
+ *    result skips the callback.
  *  - `start()` while a worker is still running does not spawn a second one: it
  *    re-attaches the drain so that worker's result still lands (e.g. the app
  *    was left and re-opened mid-job).
@@ -38,6 +39,7 @@
 #include <utility>
 
 #include "scoped_lock.h"
+#include "system_hooks.h"  // hw_lvgl_task_notify_wake (P7.47)
 
 #ifdef ARDUINO
 #include <freertos/FreeRTOS.h>
@@ -141,6 +143,11 @@ private:
                 if (job->result_) delete job->result_;
                 job->result_ = res;
                 job->done_ = true;
+                // P7.47: run the drain on the LVGL task's next pass instead of up to
+                // 100 ms later. Safe here: lv_timer_handler() runs under this same
+                // instance lock, so timer_ and lv_timer_ready() can't race the handler.
+                if (job->timer_) lv_timer_ready(job->timer_);
+                hw_lvgl_task_notify_wake();
             }
             job->detached_ = false;
             job->task_ = nullptr;

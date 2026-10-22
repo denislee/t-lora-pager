@@ -75,6 +75,8 @@ struct State {
     std::function<bool(size_t packets)> tx_room;
     /** TransportOps::bulk_activity; may be empty. */
     std::function<void()> bulk_activity;
+    /** TransportOps::wake; may be empty. */
+    std::function<void()> wake;
 
     /* Counters for the current connection. */
     uint32_t rx_packets = 0;
@@ -143,6 +145,14 @@ void note_bulk_activity() {
     State &s = state();
     if (s.bulk_activity) {
         s.bulk_activity();
+    }
+}
+
+/** A deadline was registered off the transport task (P7.35). Caller holds g_mutex. */
+void note_new_deadline() {
+    State &s = state();
+    if (s.wake) {
+        s.wake();
     }
 }
 
@@ -355,6 +365,7 @@ void service_on_connect(const TransportOps &ops) {
     s.send_packet = ops.send_packet;
     s.tx_room = ops.tx_room;
     s.bulk_activity = ops.bulk_activity;
+    s.wake = ops.wake;
     s.packet_size = ops.packet_size;
     s.rx_queue_packets = ops.rx_queue_packets;
     s.peer_name = ops.peer_name;
@@ -464,11 +475,20 @@ void service_on_disconnect() {
     s.send_packet = nullptr;
     s.tx_room = nullptr;
     s.bulk_activity = nullptr;
+    s.wake = nullptr;
 
     LINK_LOG("disconnected: %s", s.peer_name.c_str());
 }
 
 void service_tick() {
+    if (!g_connected.load()) {
+        return;
+    }
+    /* The gauge read (I2C) happens before g_mutex, so a slow bus never holds
+     * up handlers or pager-initiated calls (P7.35, the IS.8 residual). */
+    monitor_params_t mp;
+    hw_get_monitor_params(mp);
+
     LinkLock lock(__func__);
     State &s = state();
     if (!s.connected || !s.rpc) {
@@ -529,8 +549,6 @@ void service_tick() {
         s.rpc->emit("evt.fs.changed", "{}");
     }
 
-    monitor_params_t mp;
-    hw_get_monitor_params(mp);
     const int pct = mp.battery_percent;
     const bool charging = mp.is_charging;
 
@@ -551,6 +569,33 @@ void service_tick() {
         s.last_charging = charging;
         s.have_batt = true;
     }
+}
+
+uint32_t service_next_tick_ms(uint32_t cap) {
+    LinkLock lock(__func__);
+    State &s = state();
+    if (!s.connected || !s.rpc) {
+        return cap;
+    }
+    /* hw_set_filesystem_dirty() wakes the transport (storage.h generation hook);
+     * a moved generation makes the tick due now so evt.fs.changed goes out. */
+    if (hw_get_filesystem_generation() != s.last_fs_gen) {
+        return 0;
+    }
+    uint32_t wait = s.rpc->next_wait_ms(cap);
+    wait = fs_next_wait_ms(wait);
+    const uint32_t now = steady_ms();
+    /* The checks service_tick() makes; the stall ones are strict `>`. */
+    for (const State::Outbound &o : s.outbound) {
+        wait = min_wait_ms(wait, now, o.rto_ms + XFER_RETRANSMIT_MS);
+        wait = min_wait_ms(wait, now, o.last_ms + o.stall_ms + 1);
+    }
+    for (const State::Inbound &in : s.inbound) {
+        if (in.done) {
+            wait = min_wait_ms(wait, now, in.last_ms + in.stall_ms + 1);
+        }
+    }
+    return wait;
 }
 
 bool service_connected() {
@@ -610,7 +655,11 @@ bool service_call(const std::string &method, const std::string &params_json, uin
     if (!s.connected || !s.rpc) {
         return false;
     }
-    return s.rpc->call(method, params_json, std::move(cb), timeout_ms);
+    const bool ok = s.rpc->call(method, params_json, std::move(cb), timeout_ms);
+    if (ok) {
+        note_new_deadline();
+    }
+    return ok;
 }
 
 bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t stall_ms,
@@ -653,6 +702,7 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
         0));
     s.outbound.push_back(std::move(o));
     note_bulk_activity();
+    note_new_deadline();
 
     LINK_LOG("send start id=%u size=%u", static_cast<unsigned>(xfer),
              static_cast<unsigned>(len));
@@ -718,6 +768,7 @@ bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_
     in.buf.clear();
     in.buf.reserve(size);
     note_bulk_activity();
+    note_new_deadline();
     uint16_t credits = 0;
     unsigned ack_every = 0;
     service_rx_window(credits, ack_every);

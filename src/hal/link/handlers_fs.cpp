@@ -689,6 +689,20 @@ void fs_tick(uint32_t now) {
     }
 }
 
+uint32_t fs_next_wait_ms(uint32_t cap) {
+    /* The same two deadlines fs_tick() checks: a read's retransmit timer, and
+     * the stall drop (strict `>`, hence the + 1). */
+    const uint32_t now = now_ms();
+    uint32_t wait = cap;
+    for (const Transfer &t : g_xfers) {
+        if (t.tx && !t.upload) {
+            wait = min_wait_ms(wait, now, t.rto_ms + XFER_RETRANSMIT_MS);
+        }
+        wait = min_wait_ms(wait, now, t.last_ms + STALL_MS + 1);
+    }
+    return wait;
+}
+
 void fs_reset() {
     while (!g_xfers.empty()) {
         drop(g_xfers.front().id);

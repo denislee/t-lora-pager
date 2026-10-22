@@ -42,6 +42,12 @@ struct TransportOps {
      * either direction, with the service lock held — so it must only flag (BLE
      * holds its transfer connection parameters on it, P7.33). Empty = ignored. */
     std::function<void()> bulk_activity;
+    /** Optional: a request or transfer deadline was registered from outside the
+     * transport task (service_call, service_send_bytes, service_accept_expect),
+     * so a transport that sleeps until service_next_tick_ms() must re-evaluate
+     * its wait. Runs with the service lock held: it must only signal (P7.35).
+     * Empty = ignored (TCP ticks on its own cadence). */
+    std::function<void()> wake;
     /** Human-readable peer name, e.g. "tcp:127.0.0.1:54321". */
     std::string peer_name;
 };
@@ -52,8 +58,16 @@ void service_on_connect(const TransportOps &ops);
 void service_on_packet(const uint8_t *pkt, size_t len);
 /** The transport dropped: fail outstanding requests and tear the RPC down. */
 void service_on_disconnect();
-/** Periodic pump: expire requests and stalled transfers; publish battery and fs changes. */
+/** Periodic pump: expire requests and stalled transfers; publish battery and fs
+ * changes. The battery is read before the service lock is taken (P7.35). */
 void service_tick();
+/**
+ * Milliseconds until service_tick() next has work, capped at `cap`: the nearest
+ * RPC deadline, read retransmit/stall, outbound retransmit/stall or inbound
+ * stall; 0 when one is due or the filesystem generation moved since the last
+ * evt.fs.changed. `cap` when disconnected. Transport task only (P7.35).
+ */
+uint32_t service_next_tick_ms(uint32_t cap);
 
 /** True while a transport is connected. */
 bool service_connected();
@@ -91,6 +105,9 @@ void register_weather_handlers(Rpc &rpc);
 bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);
 /** Periodic pump: drop transfers idle for longer than the stall timeout. */
 void fs_tick(uint32_t now_ms);
+/** Milliseconds until fs_tick() next has work (a read retransmit or a stall
+ * drop), capped at `cap`; 0 when some is due (P7.35). */
+uint32_t fs_next_wait_ms(uint32_t cap);
 /** The link dropped: abort every transfer and delete upload `.part` files. */
 void fs_reset();
 

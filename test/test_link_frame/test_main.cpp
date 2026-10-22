@@ -347,6 +347,28 @@ static void test_next_conn_band(void)
                      pagerlink::ConnBand::Transfer); /* 1280 ms */
 }
 
+static void test_min_wait_ms(void)
+{
+    /* A future deadline shortens the wait, but never below `best`. */
+    TEST_ASSERT_EQUAL_UINT32(2000, min_wait_ms(10000, 1000, 3000));
+    TEST_ASSERT_EQUAL_UINT32(500, min_wait_ms(500, 1000, 3000));
+
+    /* A deadline at or behind now contributes nothing. */
+    TEST_ASSERT_EQUAL_UINT32(0, min_wait_ms(10000, 1000, 1000));
+    TEST_ASSERT_EQUAL_UINT32(0, min_wait_ms(10000, 5000, 1000));
+
+    /* Folding several deadlines keeps the nearest future one. */
+    uint32_t w = 10000;
+    w = min_wait_ms(w, 100, 2100);
+    w = min_wait_ms(w, 100, 900);
+    w = min_wait_ms(w, 100, 30100);
+    TEST_ASSERT_EQUAL_UINT32(800, w);
+
+    /* The deadline subtraction must wrap safely. */
+    TEST_ASSERT_EQUAL_UINT32(512, min_wait_ms(10000, 0xFFFFFF00, 0x00000100));
+    TEST_ASSERT_EQUAL_UINT32(0, min_wait_ms(10000, 0x00000100, 0xFFFFFF00));
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -364,5 +386,6 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_rx_window);
     RUN_TEST(test_packet_size_for_mtu);
     RUN_TEST(test_next_conn_band);
+    RUN_TEST(test_min_wait_ms);
     return UNITY_END();
 }

@@ -355,6 +355,18 @@ void Rpc::tick() {
     /* A callback may have added new pendings; those keep their own deadlines. */
 }
 
+uint32_t Rpc::next_wait_ms(uint32_t cap) const {
+    if (pending_.empty()) {
+        return cap;
+    }
+    const uint32_t now = clock_();
+    uint32_t wait = cap;
+    for (const Pending &p : pending_) {
+        wait = min_wait_ms(wait, now, p.deadline);
+    }
+    return wait;
+}
+
 void Rpc::disconnect() {
     std::vector<Pending> doomed;
     doomed.swap(pending_);

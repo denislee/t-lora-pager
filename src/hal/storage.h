@@ -77,6 +77,10 @@ void hw_set_filesystem_dirty(bool dirty);
 // Incremented by every hw_set_filesystem_dirty(true). Lets an observer notice
 // writes without clearing the flag the apps rely on.
 uint32_t hw_get_filesystem_generation();
+// One observer called right after every generation bump, on the bumping task
+// (PagerLink wakes its link task so evt.fs.changed goes out without a poll,
+// P7.35). It must only signal: no locks, no blocking. nullptr clears it.
+void hw_set_filesystem_generation_hook(void (*hook)());
 
 // Note writes: the encoded payload goes to internal FFat and is mirrored to
 // the SD card when it is mounted; the result reflects the internal write.

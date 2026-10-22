@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../ui_define.h"
+#include "system_hooks.h"  // hw_lvgl_task_notify_wake (P6.18 / P7.47)
 
 #ifdef ARDUINO
 #include "../hal_interface.h"  // hw_feedback
@@ -153,6 +154,9 @@ uint32_t post(Notification n)
         n.id = id;
         s_queue.push_back(std::move(n));
     }
+    // pump() runs on every LVGL task pass; wake it so the banner doesn't wait
+    // for the next timer deadline (up to 200 ms on a static screen).
+    hw_lvgl_task_notify_wake();
     return id;
 }
 

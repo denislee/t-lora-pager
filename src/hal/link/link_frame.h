@@ -88,6 +88,13 @@ enum class ConnBand : uint8_t { Idle, Transfer };
  */
 ConnBand next_conn_band(ConnBand cur, bool activity, uint32_t now_ms, uint32_t last_activity_ms);
 
+/**
+ * Fold one deadline into a transport's wait (P7.35): min(`best`, ms from
+ * `now_ms` until `due_ms`), 0 once `due_ms` has passed. Wrap-safe for
+ * deadlines within ±2^31 ms of `now_ms`.
+ */
+uint32_t min_wait_ms(uint32_t best, uint32_t now_ms, uint32_t due_ms);
+
 /** Message type field. */
 enum class MsgType : uint8_t { Req = 0, Res = 1, Err = 2, Evt = 3, Data = 4, Ack = 5 };
 

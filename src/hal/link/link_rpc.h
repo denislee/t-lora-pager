@@ -120,6 +120,9 @@ public:
     void on_link_reset(ResetReason r);
     /** Expire requests whose deadline has passed, failing each with `timeout`. */
     void tick();
+    /** Milliseconds until the nearest request deadline, capped at `cap`; 0 when
+     * one is already due (the transport's tick wait, P7.35). */
+    uint32_t next_wait_ms(uint32_t cap) const;
     /** Fail every outstanding request with `disconnected`. */
     void disconnect();
 

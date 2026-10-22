@@ -15,8 +15,10 @@
  * Threading (IOS_COMPANION_PLAN.md §5.2): NimBLE host-task callbacks only copy
  * the event into a queue and return. The `link` task drains it and is the
  * only caller of the service lifecycle (connect / packet / tick /
- * disconnect). It blocks indefinitely while no companion is connected, and
- * pumps service_tick() at 1 Hz while one is. The queue holds a whole credit
+ * disconnect). It blocks indefinitely while no companion is connected; while
+ * one is, it sleeps until the nearest RPC/transfer deadline or the
+ * transfer-band restore, at most IDLE_TICK_MS (P7.35). A deadline registered
+ * from another task, or a filesystem generation bump, wakes it early. The queue holds a whole credit
  * window (P7.30); a packet that still finds it full is dropped rather than
  * blocking the host task. Outbound packets go the other way through a second
  * queue: the service enqueues them without waiting, and the `link_tx` task
@@ -54,6 +56,7 @@
 #include "hal/link/link_frame.h"
 #include "hal/link/link_service.h"
 #include "hal/link/link_uuids.h"
+#include "hal/storage.h"
 #include "hal/system.h"
 
 #define LINK_LOG(...) log_i(__VA_ARGS__)
@@ -74,7 +77,13 @@ constexpr UBaseType_t RX_SLACK = 32;
 constexpr UBaseType_t QUEUE_DEPTH =
     INITIAL_CREDITS * packets_per_message(MAX_MESSAGE, MAX_PACKET) + RX_SLACK;
 constexpr UBaseType_t QUEUE_DEPTH_INTERNAL = 16;
-constexpr uint32_t TICK_MS = 1000;
+/** Longest link_task sleep while a companion is up and nothing is pending: the
+ * battery evt cadence. Deadlines (RPC timeouts, retransmit RTO, stalls, the
+ * BULK_IDLE_MS band restore) cut it short (P7.35). */
+constexpr uint32_t IDLE_TICK_MS = 10000;
+/** Minimum gap between two service_tick() runs, so a deadline that stays due
+ * can't spin the task. */
+constexpr uint32_t MIN_TICK_GAP_MS = 20;
 constexpr uint32_t TASK_STACK = 8192;
 /** Outbound packets queued for the tx task: a whole credit window of max-size
  * messages plus slack for RPC traffic (~84 KB of PSRAM, P7.32). */
@@ -93,7 +102,7 @@ constexpr int HID_MBUF_RESERVE = 4;
 constexpr uint32_t NOTIFY_STALL_MIN_MS = 2000;
 constexpr uint32_t NOTIFY_STALL_MAX_MS = 12000;
 
-enum class Kind : uint8_t { Subscribe, Unsubscribe, Disconnect, Packet, Drop, Mtu };
+enum class Kind : uint8_t { Subscribe, Unsubscribe, Disconnect, Packet, Drop, Mtu, Wake };
 
 struct Event {
     Kind kind;
@@ -140,6 +149,8 @@ std::atomic<uint32_t> g_bulk_ms{0};
 ConnBand g_band = ConnBand::Idle;
 /** Queue depth in use; 0 until create_queue() picks a path. */
 UBaseType_t g_queue_depth = 0;
+/** A Kind::Wake is queued and not yet consumed (at most one in flight). */
+std::atomic<bool> g_wake_queued{false};
 
 bool accepting() { return g_bt_on.load() && !g_user_off.load(); }
 
@@ -170,6 +181,22 @@ void post(Kind kind, uint16_t conn, const uint8_t *data, size_t len) {
         g_dropped_total.fetch_add(1);
     }
     xSemaphoreGive(g_post_lock);
+}
+
+/**
+ * Make link_task re-evaluate its wait (P7.35): a deadline was registered from
+ * another task (TransportOps::wake, service lock held) or the filesystem
+ * generation moved (storage hook, any task). Lock-free and never blocks: one
+ * Wake in flight at most; a full queue means link_task is about to loop anyway.
+ */
+void wake_link() {
+    if (!g_queue || g_wake_queued.exchange(true)) {
+        return;
+    }
+    static const Event wake_ev = {Kind::Wake, NO_HANDLE, 0, {}};
+    if (xQueueSend(g_queue, &wake_ev, 0) != pdTRUE) {
+        g_wake_queued.store(false);
+    }
 }
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
@@ -300,6 +327,7 @@ void companion_up(uint16_t conn, const std::string &addr) {
         g_bulk_ms.store(millis());
         g_bulk_seen.store(true);
     };
+    ops.wake = [] { wake_link(); };
     ops.packet_size = packet;
     ops.rx_queue_packets =
         g_queue_depth > 2 * RX_SLACK ? g_queue_depth - RX_SLACK : g_queue_depth / 2;
@@ -324,9 +352,9 @@ void companion_up(uint16_t conn, const std::string &addr) {
 
 /**
  * Hold the transfer band while bulk bytes move and drop back to idle
- * BULK_IDLE_MS after the last DATA/ACK (P7.33). Link task only; it wakes at
- * least every TICK_MS while a companion is up, so idle returns 2–3 s after
- * the last bulk message.
+ * BULK_IDLE_MS after the last DATA/ACK (P7.33). Link task only; link_wait_ms()
+ * includes the restore deadline, so idle returns BULK_IDLE_MS (+ MIN_TICK_GAP_MS
+ * at worst) after the last bulk message.
  */
 void update_conn_band() {
     const uint16_t conn = g_companion.load();
@@ -397,6 +425,8 @@ void handle(const Event &ev) {
             service_on_packet(ev.data, ev.len);
         }
         break;
+    case Kind::Wake:
+        break; /* consumed in link_task; the loop re-evaluates the wait */
     case Kind::Mtu:
         // An MTU exchange after the subscribe (P7.33); before it, companion_up
         // reads the current MTU itself.
@@ -409,19 +439,49 @@ void handle(const Event &ev) {
     }
 }
 
+/**
+ * How long link_task may sleep while a companion is up (P7.35): the nearest
+ * service deadline (RPC timeout, retransmit RTO, stalls, a pending
+ * evt.fs.changed), the transfer-band restore, and IDLE_TICK_MS since the last
+ * tick (measured from that tick, so steady traffic can't starve the battery evt).
+ */
+uint32_t link_wait_ms(uint32_t last_tick) {
+    const uint32_t now = millis();
+    uint32_t wait = service_next_tick_ms(IDLE_TICK_MS);
+    wait = min_wait_ms(wait, now, last_tick + IDLE_TICK_MS);
+    if (g_band == ConnBand::Transfer) {
+        wait = min_wait_ms(wait, now, g_bulk_ms.load() + BULK_IDLE_MS);
+    }
+    /* A transfer started on another task sets g_bulk_seen and wakes us
+     * (TransportOps::wake); update_conn_band() after the receive handles it. */
+    return wait;
+}
+
 void link_task(void *) {
     // Event is ~250 B; static so the task stack only carries handler depth.
     static Event ev;
     uint32_t last_tick = millis();
     for (;;) {
-        const bool active = g_companion.load() != NO_HANDLE;
-        const TickType_t wait = active ? pdMS_TO_TICKS(TICK_MS) : portMAX_DELAY;
-        if (xQueueReceive(g_queue, &ev, wait) == pdTRUE) {
-            handle(ev);
+        TickType_t wait = portMAX_DELAY;
+        if (g_companion.load() != NO_HANDLE) {
+            uint32_t wait_ms = link_wait_ms(last_tick);
+            if (wait_ms == 0 && millis() - last_tick >= MIN_TICK_GAP_MS) {
+                last_tick = millis();
+                service_tick();
+                update_conn_band();
+                wait_ms = link_wait_ms(last_tick);
+            }
+            if (wait_ms < MIN_TICK_GAP_MS) {
+                wait_ms = MIN_TICK_GAP_MS;
+            }
+            wait = pdMS_TO_TICKS(wait_ms);
         }
-        if (g_companion.load() != NO_HANDLE && millis() - last_tick >= TICK_MS) {
-            last_tick = millis();
-            service_tick();
+        if (xQueueReceive(g_queue, &ev, wait) == pdTRUE) {
+            if (ev.kind == Kind::Wake) {
+                g_wake_queued.store(false);
+            } else {
+                handle(ev);
+            }
         }
         update_conn_band();
         const uint32_t dropped = g_dropped.exchange(0);
@@ -516,6 +576,9 @@ void build(NimBLEServer *server) {
         vTaskDelete(g_task);
         g_task = nullptr;
         g_tx_task = nullptr;
+    }
+    if (g_task) {
+        hw_set_filesystem_generation_hook(wake_link); /* evt.fs.changed, P7.35 */
     }
 }
 

@@ -193,14 +193,24 @@ bool hw_get_filesystem_dirty()
 // must not steal it (the PagerLink evt.fs.changed) watch this counter instead.
 static std::atomic<uint32_t> filesystem_generation{0};
 
+static std::atomic<void (*)()> filesystem_generation_hook{nullptr};
+
 uint32_t hw_get_filesystem_generation()
 {
     return filesystem_generation.load();
 }
 
+void hw_set_filesystem_generation_hook(void (*hook)())
+{
+    filesystem_generation_hook.store(hook);
+}
+
 void hw_set_filesystem_dirty(bool dirty)
 {
-    if (dirty) filesystem_generation++;
+    if (dirty) {
+        filesystem_generation++;
+        if (void (*hook)() = filesystem_generation_hook.load()) hook();
+    }
     load_filesystem_dirty();
     if (filesystem_dirty == dirty) return;
     filesystem_dirty = dirty;

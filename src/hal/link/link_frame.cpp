@@ -284,4 +284,10 @@ ConnBand next_conn_band(ConnBand cur, bool activity, uint32_t now_ms, uint32_t l
     return cur;
 }
 
+uint32_t min_wait_ms(uint32_t best, uint32_t now_ms, uint32_t due_ms) {
+    const int32_t left = static_cast<int32_t>(due_ms - now_ms);
+    const uint32_t wait = left > 0 ? static_cast<uint32_t>(left) : 0;
+    return wait < best ? wait : best;
+}
+
 }  // namespace pagerlink
