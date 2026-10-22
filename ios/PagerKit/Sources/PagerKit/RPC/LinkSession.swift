@@ -45,7 +45,9 @@ public struct IncomingTransfer: Sendable {
 /// side opened (`acceptBytes`, `openIncoming`, `readFile`), incoming ACK to a
 /// sender this side runs (`sendBytes`); anything else is counted in
 /// `stats.unroutedBulk` and dropped. Every outgoing message goes through one
-/// serial writer, so the packets of two messages never interleave on the wire.
+/// serial writer, so the packets of two messages never interleave on the wire;
+/// between messages the writer sends queued control messages (REQ/RES/ERR/EVT/ACK)
+/// before queued DATA (P7.63).
 public actor LinkSession {
     /// Which end of the link this session plays; decides id parity (§3.2).
     public enum Role: Sendable {
@@ -115,7 +117,7 @@ public actor LinkSession {
 
     private let transport: PacketTransport
     private let defaultTimeout: Duration
-    private nonisolated let outgoing: AsyncStream<Outgoing>.Continuation
+    private nonisolated let outgoing: OutgoingQueue<Outgoing>
     private let writerTask: Task<Void, Never>
 
     private var pending: [UInt16: Pending] = [:]
@@ -142,11 +144,11 @@ public actor LinkSession {
         self.events = AsyncStream { continuation = $0 }
         self.eventContinuation = continuation
 
-        let (stream, writer) = AsyncStream<Outgoing>.makeStream()
-        self.outgoing = writer
+        let queue = OutgoingQueue<Outgoing>()
+        self.outgoing = queue
         self.writerTask = Task {
             var segmenter = Segmenter()
-            for await item in stream {
+            while let item = await queue.next() {
                 let packetSize = await transport.packetSize
                 for packet in segmenter.segment(item.bytes, packetSize: packetSize) {
                     do {
@@ -261,9 +263,9 @@ public actor LinkSession {
                 await self?.expire(id)
             }
             pending[id] = Pending(continuation: continuation, timeoutTask: timeoutTask)
-            outgoing.yield(Outgoing(bytes: encoded, onFailure: { [weak self] in
+            outgoing.push(Outgoing(bytes: encoded, onFailure: { [weak self] in
                 Task { await self?.fail(id, with: .disconnected()) }
-            }))
+            }), control: true)
         }
     }
 
@@ -595,7 +597,8 @@ public actor LinkSession {
 
     private func sendMessage(type: MsgType, id: UInt16, payload: [UInt8]) {
         guard let encoded = try? Message(type: type, id: id, payload: payload).encoded() else { return }
-        outgoing.yield(Outgoing(bytes: encoded, onFailure: nil))
+        // P7.63: everything but DATA takes the control lane.
+        outgoing.push(Outgoing(bytes: encoded, onFailure: nil), control: type != .data)
     }
 
     private func allocId() -> UInt16 {
