@@ -1,35 +1,38 @@
 /**
  * @file      kb_lock.h
- * @brief     RAII wrapper around a dedicated keyboard mutex (kb_lock.cpp).
+ * @brief     RAII wrapper around the bus-wide I2C (Wire) mutex (kb_lock.cpp).
  *
- * Serialises every access to `instance.kb`, the TCA8418 keyboard driver:
- * key reads (`getKey`), the begin/end lifecycle, backlight brightness, the
- * read callback, the notify-task registration, and the vendor lightSleep()/
- * sleep() paths that internally call `kb.end()` / `kb.begin()`.
+ * P7.45: this started as a keyboard-only lock (INPUT_STUTTER_PLAN.md IS.1)
+ * and is now the lock for EVERY user of the shared Wire bus: the TCA8418
+ * keyboard (`instance.kb`), the XL9555 expander behind `instance.powerControl()`
+ * and `instance.io`, the BQ25896 charger (`instance.ppm`) / AXP PMU, the
+ * BQ27220 gauge, the RTC, the audio codec's control port, and the IMU.
+ * `core::ScopedKbLock` is kept as an alias so the keyboard call sites did not
+ * have to change. The file keeps its old name for the same reason.
  *
- * Replaces the instance mutex for the keyboard reader (INPUT_STUTTER_PLAN.md
- * IS.1) so key reads no longer wait for the LVGL frame: the LVGL task holds
- * the instance mutex for a whole frame, and any long frame (app build, save,
- * flush) would otherwise stall the drain loop. With a keyboard-only mutex the
- * reader keeps reading and queuing keys during a long frame, and the LVGL
- * keypad read_cb applies them in one burst once the frame ends
- * (continue_reading) — same as the rotary path.
+ * Why every user needs it, writes included: arduino-esp32's HAL lock covers
+ * each Wire transaction, but a read's bytes are then taken from Wire's shared
+ * rxBuffer with no lock held. A transaction from another task landing between
+ * requestFrom() and read() leaves that read short; readBytes() then waits out
+ * its timeout (20 ms, hw_init) and SensorLib's readRegister() returns -1.
+ * SensorLib's setRegisterBit()/clrRegisterBit() store that -1 in a uint8_t
+ * unchecked and write it back, so a colliding XL9555 digitalWrite() drives
+ * every other output on the port high (AMP, LoRa, GPS, NFC rails). Read-
+ * modify-write writes are therefore NOT safe without this lock.
  *
- * The underlying mutex is RECURSIVE: hw_enable_keyboard() holds ScopedKbLock
- * and then calls hw_set_kb_backlight(), which takes it again.
+ * The keyboard reader (kb_reader, priority MAX-2) still keeps reading during a
+ * long LVGL frame: the LVGL task holds the instance mutex for a whole frame,
+ * but takes this lock only around its own short I2C calls.
  *
- * Lock order: a caller may hold `core::ScopedInstanceLock` and then take
- * `ScopedKbLock`; never the reverse. Nothing under `ScopedKbLock` may take
- * the instance lock.
+ * The underlying mutex is RECURSIVE: hw_enable_keyboard() holds the lock and
+ * then calls hw_set_kb_backlight(), which takes it again; hw_low_power_loop()
+ * holds it across the vendor lightSleep()/sleep(), which call powerControl()
+ * and kb.end()/begin().
  *
- * The Wire (I2C) bus is NOT fully safe for other users on its own.
- * arduino-esp32's HAL lock (CONFIG_DISABLE_HAL_LOCKS unset) covers each
- * transaction, but a read's bytes are then taken from Wire's shared rxBuffer
- * with no lock held. A kb_reader poll that lands between another task's
- * requestFrom() and its read() leaves that read short, and readBytes() then
- * waits out its timeout. On the pager this stalled the battery-gauge read
- * for 1 s. So any I2C READ that can run concurrently with the reader must
- * also hold this lock (hw_get_monitor_params does). Writes are safe without it.
+ * Lock order: `core::ScopedInstanceLock` -> `core::ScopedSpiLock` -> this
+ * lock. A caller may hold either of the others and then take this one; never
+ * the reverse. Nothing under this lock may take the instance lock or the SPI
+ * lock, or wait on a task that might (keep the scope to the I2C calls).
  *
  * Declared here without pulling in FreeRTOS so the header is cheap to include
  * from HAL and UI TUs; the implementation lives in kb_lock.cpp.
@@ -38,18 +41,21 @@
 
 namespace core {
 
-// Create the keyboard mutex. Call once from setup() before any task starts.
+// Create the bus mutex. Call once from setup() before any task starts.
 // Idempotent; safe to call again.
 void kb_lock_init();
 
-class ScopedKbLock {
+class ScopedI2cLock {
 public:
-    ScopedKbLock();
-    ~ScopedKbLock();
-    ScopedKbLock(const ScopedKbLock &) = delete;
-    ScopedKbLock &operator=(const ScopedKbLock &) = delete;
-    ScopedKbLock(ScopedKbLock &&) = delete;
-    ScopedKbLock &operator=(ScopedKbLock &&) = delete;
+    ScopedI2cLock();
+    ~ScopedI2cLock();
+    ScopedI2cLock(const ScopedI2cLock &) = delete;
+    ScopedI2cLock &operator=(const ScopedI2cLock &) = delete;
+    ScopedI2cLock(ScopedI2cLock &&) = delete;
+    ScopedI2cLock &operator=(ScopedI2cLock &&) = delete;
 };
+
+// Pre-P7.45 name; the same lock.
+using ScopedKbLock = ScopedI2cLock;
 
 } // namespace core

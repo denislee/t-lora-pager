@@ -42,6 +42,7 @@ static void time_available(struct timeval *t)
     Serial.println("Got time adjustment from NTP!");
     // printLocalTime();
     if (instance.getDeviceProbe() & HW_RTC_ONLINE) {
+        core::ScopedI2cLock i2c;  // P7.45
         instance.rtc.hwClockWrite();
     }
     hw_notify_time_sync_completed();
@@ -233,7 +234,10 @@ void loop()
     uint32_t inactive_time = 0;
     {
         core::ScopedInstanceLock lock;
-        instance.loop();
+        {
+            core::ScopedI2cLock i2c;  // P7.45 (order: instance -> i2c)
+            instance.loop();
+        }
         if (!ui_is_fake_sleep()) {
             inactive_time = lv_display_get_inactive_time(NULL);
         }

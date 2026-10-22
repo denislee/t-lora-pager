@@ -11,6 +11,7 @@
 #include "gps_time_sync.h"
 #include "sensors.h"
 #include "system.h"
+#include "../core/kb_lock.h"
 
 #include <string>
 #include <ctime>
@@ -151,7 +152,10 @@ void hw_pump_time_sync_gps()
             } else {
                 local_tm = utc_tm;
             }
-            instance.rtc.setDateTime(local_tm);
+            {
+                core::ScopedI2cLock i2c;  // P7.45
+                instance.rtc.setDateTime(local_tm);
+            }
         }
 
         s_status = 1;

@@ -22,6 +22,7 @@
 #include "../ui_define.h"
 #include "settings_internal.h"
 #include "../hal/sensors.h"
+#include "../core/kb_lock.h"
 
 #ifdef ARDUINO
 #include <LilyGoLib.h>
@@ -79,9 +80,13 @@ void reinit_cb(lv_event_t *)
 void try_begin_cb(lv_event_t *)
 {
 #ifdef ARDUINO
-    Wire.setClock(1000000UL);
-    bool ok = instance.sensor.begin(Wire);
-    Wire.setClock(400000UL);
+    bool ok;
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        Wire.setClock(1000000UL);
+        ok = instance.sensor.begin(Wire);
+        Wire.setClock(400000UL);
+    }
     char msg[96];
     snprintf(msg, sizeof(msg),
              "sensor.begin(Wire) = %s\nIf false: chip not responding at 0x28",
@@ -102,6 +107,7 @@ void rescan_i2c(char *out, size_t cap)
 #ifdef ARDUINO
     const uint8_t addrs[] = { 0x18, 0x19, 0x28, 0x29 };
     bool first = true;
+    core::ScopedI2cLock i2c;  // P7.45
     for (uint8_t a : addrs) {
         Wire.beginTransmission(a);
         uint8_t err = Wire.endTransmission();
@@ -122,7 +128,11 @@ void serial_dump_cb(lv_event_t *)
 {
 #if defined(ARDUINO) && defined(USING_BHI260_SENSOR)
     if (hw_get_device_online() & HW_BHI260AP_ONLINE) {
-        BoschSensorInfo info = instance.sensor.getSensorInfo();
+        BoschSensorInfo info;
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            info = instance.sensor.getSensorInfo();
+        }
         info.printInfo(Serial);
         Serial.println("--- IMU diag dump ---");
         imu_diag_t d;
@@ -200,7 +210,11 @@ void render_tick(lv_timer_t *)
     // bit rather than the cached diag flag so a failed firmware swap (which
     // can leave the chip in a transient state) doesn't blank these rows.
     if (hw_get_device_online() & HW_BHI260AP_ONLINE) {
-        BoschSensorInfo info = instance.sensor.getSensorInfo();
+        BoschSensorInfo info;
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            info = instance.sensor.getSensorInfo();
+        }
         if (lbl.fw_kernel) {
             snprintf(buf, sizeof(buf), "%u", info.kernel_version);
             lv_label_set_text(lbl.fw_kernel, buf);

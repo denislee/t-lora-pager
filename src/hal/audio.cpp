@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "internal.h"
 #include "system.h"
+#include "../core/kb_lock.h"
 #include "../core/spi_lock.h"
 
 #ifdef ARDUINO
@@ -66,14 +67,21 @@ static void playWAV_sd(const char *filename)
         close_with_lock();
         return;
     }
-    int ret = instance.codec.open(16, 1, HW_REC_SAMPLE_RATE);
+    int ret;
+    {
+        core::ScopedI2cLock i2c;  // P7.45 (codec + PA callback -> XL9555)
+        ret = instance.codec.open(16, 1, HW_REC_SAMPLE_RATE);
+    }
     if (ret < 0) {
         log_e("codec.open failed 0x%X", ret);
         close_with_lock();
         return;
     }
 #else // USING_PCM_AMPLIFIER
-    instance.powerControl(POWER_SPEAK, true);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.powerControl(POWER_SPEAK, true);
+    }
 #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5,0,0)
     instance.player.configureTX(HW_REC_SAMPLE_RATE, 16, (i2s_channel_t)1);
 #else
@@ -83,10 +91,16 @@ static void playWAV_sd(const char *filename)
 
     auto close_output = [] {
 #if defined(USING_AUDIO_CODEC)
-        instance.codec.close();
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            instance.codec.close();
+        }
 #else
         // Back to the user's speaker setting rather than forcing it off.
-        instance.powerControl(POWER_SPEAK, user_setting.speaker_enable);
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            instance.powerControl(POWER_SPEAK, user_setting.speaker_enable);
+        }
 #endif
     };
 
@@ -322,7 +336,10 @@ static void recorderTask(void *args)
     }
 
 #if defined(USING_AUDIO_CODEC)
-    if (codec_online) instance.codec.close();
+    if (codec_online) {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.codec.close();
+    }
 #endif
 
     free(in_buf);
@@ -353,8 +370,12 @@ bool hw_rec_start(const char *sd_path)
 
 #if defined(USING_AUDIO_CODEC)
     if (HW_CODEC_ONLINE & hw_get_device_online()) {
-        int ret = instance.codec.open(16, instance.getCodecInputChannels(),
+        int ret;
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            ret = instance.codec.open(16, instance.getCodecInputChannels(),
                                       HW_REC_SAMPLE_RATE);
+        }
         if (ret < 0) {
             log_e("recorder: codec.open failed 0x%X", ret);
             core::ScopedSpiLock lock;
@@ -384,7 +405,10 @@ bool hw_rec_start(const char *sd_path)
         recorder_running = false;
 #if defined(USING_AUDIO_CODEC)
         if (HW_CODEC_ONLINE & hw_get_device_online()) {
-            instance.codec.close();
+            {
+                core::ScopedI2cLock i2c;  // P7.45
+                instance.codec.close();
+            }
         }
 #endif
         {
@@ -455,7 +479,10 @@ bool hw_get_speaker_enable() { return user_setting.speaker_enable; }
 void hw_set_speaker_enable(bool en) {
     user_setting.speaker_enable = en;
 #ifdef ARDUINO
-    instance.powerControl(POWER_SPEAK, en);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.powerControl(POWER_SPEAK, en);
+    }
     delay(10);
 #endif
 }
@@ -464,7 +491,10 @@ void hw_set_volume(uint8_t volume)
 {
 #if defined(ARDUINO) && defined(USING_AUDIO_CODEC)
     if (HW_CODEC_ONLINE & hw_get_device_online()) {
-        instance.codec.setVolume(volume);
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            instance.codec.setVolume(volume);
+        }
     } else {
         log_d("Audio codec not online!");
     }
@@ -475,6 +505,7 @@ uint8_t hw_get_volume()
 {
 #if defined(ARDUINO) && defined(USING_AUDIO_CODEC)
     if (HW_CODEC_ONLINE & hw_get_device_online()) {
+        core::ScopedI2cLock i2c;  // P7.45
         return instance.codec.getVolume();
     } else {
         return 0;

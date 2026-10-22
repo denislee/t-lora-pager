@@ -5,6 +5,7 @@
 #include "sensors.h"
 #include "system.h"
 #include "internal.h"
+#include "../core/kb_lock.h"
 
 #ifdef ARDUINO
 #include <LilyGoLib.h>
@@ -27,7 +28,11 @@ void hw_imu_ensure_started()
     if (s_imu_start_attempted) return;
     s_imu_start_attempted = true;
     uint32_t t0 = millis();
-    bool ok = instance.initSensor();
+    bool ok;
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        ok = instance.initSensor();
+    }
     log_i("BHI260 lazy init %s in %lu ms", ok ? "ok" : "FAILED", (unsigned long)(millis() - t0));
 #endif
 }
@@ -42,7 +47,10 @@ void hw_imu_ensure_started()
 // of a sync attempt; this just drives the rail and the UART behind it.
 void hw_set_gps_powered(bool on) {
 #ifdef ARDUINO
-    instance.powerControl(POWER_GPS, on);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.powerControl(POWER_GPS, on);
+    }
     delay(10);
     if (!on) {
         Serial1.end();
@@ -70,6 +78,7 @@ void hw_get_imu_params(imu_params_t &params)
     }
 #elif defined(USING_BMA423_SENSOR)
     if (hw_get_device_online() & HW_BMA423_ONLINE) {
+        core::ScopedI2cLock i2c;  // P7.45
         params.orientation = instance.sensor.direction();
     }
 #endif // SENSOR
@@ -133,6 +142,7 @@ bool hw_is_face_down()
 #ifdef ARDUINO
 #if defined(USING_BMA423_SENSOR)
     if (hw_get_device_online() & HW_BMA423_ONLINE) {
+        core::ScopedI2cLock i2c;  // P7.45
         return instance.sensor.direction() == SensorBMA423::DIRECTION_BOTTOM;
     }
 #elif defined(USING_BHI260_SENSOR)
@@ -180,6 +190,7 @@ void hw_register_imu_process()
 #if defined(USING_BHI260_SENSOR)
     s_imu_diag.bhi260_online = (hw_get_device_online() & HW_BHI260AP_ONLINE) != 0;
     if (s_imu_diag.bhi260_online) {
+        core::ScopedI2cLock i2c;  // P7.45 (after hw_imu_ensure_started, which takes its own mutex first)
         // Power: the only consumers of the accel + game-rotation streams are
         // hw_is_face_down() (a slow physical gesture) and the IMU debug page,
         // which reads the cached values at 5 Hz — nothing needs 100 Hz. Run the
@@ -220,6 +231,7 @@ void hw_register_imu_process()
 #elif defined(USING_BMA423_SENSOR)
     s_imu_diag.bma423_online = (hw_get_device_online() & HW_BMA423_ONLINE) != 0;
     if (s_imu_diag.bma423_online) {
+        core::ScopedI2cLock i2c;  // P7.45 (after hw_imu_ensure_started, which takes its own mutex first)
         instance.sensor.configAccelerometer();
         instance.sensor.enableAccelerometer();
     }
@@ -237,6 +249,7 @@ void hw_probe_imu_info()
 {
 #if defined(ARDUINO) && defined(USING_BHI260_SENSOR)
     if (!(hw_get_device_online() & HW_BHI260AP_ONLINE)) return;
+    core::ScopedI2cLock i2c;  // P7.45
     BoschSensorInfo info = instance.sensor.getSensorInfo();
     // Pinned SensorLib version lacks getAvailableSensorCount(), so walk
     // the BHY2 sensor table directly via the C helper to count what the
@@ -263,6 +276,7 @@ void hw_unregister_imu_process()
 #if defined(ARDUINO)
 #if defined(USING_BHI260_SENSOR)
     if (hw_get_device_online() & HW_BHI260AP_ONLINE) {
+        core::ScopedI2cLock i2c;  // P7.45
         // Disable all three virtual sensors that hw_register_imu_process() enables —
         // they must mirror each other exactly.  Previously only GAME_ROTATION_VECTOR
         // was disabled here, leaving ACCEL_PASSTHROUGH and DEVICE_ORIENTATION running.
@@ -272,6 +286,7 @@ void hw_unregister_imu_process()
     }
 #elif defined(USING_BMA423_SENSOR)
     if (hw_get_device_online() & HW_BMA423_ONLINE) {
+        core::ScopedI2cLock i2c;  // P7.45
         instance.sensor.disableAccelerometer();
     }
 #endif // SENSOR

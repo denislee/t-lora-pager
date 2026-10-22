@@ -562,7 +562,10 @@ bool hw_get_haptic_enable() { return user_setting.haptic_enable; }
 void hw_set_haptic_enable(bool en) {
     user_setting.haptic_enable = en;
 #ifdef ARDUINO
-    instance.powerControl(POWER_HAPTIC_DRIVER, en);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.powerControl(POWER_HAPTIC_DRIVER, en);
+    }
     delay(10);
 #endif
 }
@@ -594,7 +597,10 @@ void hw_get_date_time(string &param)
 #ifdef ARDUINO
     struct tm timeinfo;
     if (hw_get_device_online() & HW_RTC_ONLINE) {
-        instance.rtc.getDateTime(&timeinfo);
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            instance.rtc.getDateTime(&timeinfo);
+        }
         char datetime[128] = {0};
         snprintf(datetime, 128, "%04d/%02d/%02d %02d:%02d:%02d", timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
                  timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
@@ -623,7 +629,10 @@ void hw_get_date_time(struct tm &timeinfo)
 {
 #ifdef ARDUINO
     if (hw_get_device_online() & HW_RTC_ONLINE) {
-        instance.rtc.getDateTime(&timeinfo);
+        {
+            core::ScopedI2cLock i2c;  // P7.45
+            instance.rtc.getDateTime(&timeinfo);
+        }
     } else {
         time_t now;
         time(&now);
@@ -659,6 +668,7 @@ void hw_set_date_time(struct tm &timeinfo)
     tv.tv_usec = 0;
     settimeofday(&tv, NULL);
     if (hw_get_device_online() & HW_RTC_ONLINE) {
+        core::ScopedI2cLock i2c;  // P7.45
         instance.rtc.setDateTime(timeinfo);
         instance.rtc.hwClockWrite();
     }
@@ -777,14 +787,17 @@ void hw_power_down_all()
     // Disable BQ25896 continuous ADC measurement during fake sleep — nobody
     // reads the gauge while LVGL is blocked, so the ~0.5–1 mA conversion
     // current is pure waste.  Mirrors vendor lightSleep() (LilyGo_LoRa_Pager.cpp:685).
+    {
+        core::ScopedI2cLock i2c;  // P7.45
 #if defined(USING_PPM_MANAGE)
-    instance.ppm.disableMeasure();
+        instance.ppm.disableMeasure();
 #endif
-    instance.powerControl(POWER_GPS, false);
-    instance.powerControl(POWER_NFC, false);
-    instance.powerControl(POWER_HAPTIC_DRIVER, false);
-    instance.powerControl(POWER_SPEAK, false);
-    instance.powerControl(POWER_KEYBOARD, false);
+        instance.powerControl(POWER_GPS, false);
+        instance.powerControl(POWER_NFC, false);
+        instance.powerControl(POWER_HAPTIC_DRIVER, false);
+        instance.powerControl(POWER_SPEAK, false);
+        instance.powerControl(POWER_KEYBOARD, false);
+    }
     hw_disable_keyboard();
     // SD Card is left on to avoid mount/unmount overhead and potential filesystem issues
 
@@ -834,14 +847,20 @@ void hw_power_up_all()
     // GPS is intentionally not restored here: it has no persisted enable
     // setting and no continuous consumer, so it stays off across fake sleep
     // and is only ever powered transiently by hw_start_time_sync_gps().
-    if (user_setting.nfc_enable) instance.powerControl(POWER_NFC, true);
-    if (user_setting.haptic_enable) instance.powerControl(POWER_HAPTIC_DRIVER, true);
-    instance.powerControl(POWER_KEYBOARD, true);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        if (user_setting.nfc_enable) instance.powerControl(POWER_NFC, true);
+        if (user_setting.haptic_enable) instance.powerControl(POWER_HAPTIC_DRIVER, true);
+        instance.powerControl(POWER_KEYBOARD, true);
+    }
     hw_enable_keyboard();
     // Re-enable BQ25896 continuous ADC measurement so the battery gauge is
     // live again after wake.  Mirrors vendor lightSleep() (LilyGo_LoRa_Pager.cpp:756).
 #if defined(USING_PPM_MANAGE)
-    instance.ppm.enableMeasure();
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.ppm.enableMeasure();
+    }
 #endif
     // Speaker is only powered on when needed by playback routines and if enabled
 
@@ -910,7 +929,10 @@ void hw_sleep()
 void hw_feedback()
 {
 #ifdef ARDUINO
-    instance.vibrator();
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.vibrator();
+    }
 #endif
 }
 

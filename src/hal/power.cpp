@@ -71,6 +71,54 @@ void battery_history_timer_cb(lv_timer_t *timer)
     hw_update_battery_history();
 }
 
+// --- BQ27220 targeted reads (P7.16) -------------------------------------
+//
+// SensorLib's GaugeBQ27220::refresh() reads 54 bytes from 0x02 plus 4 from
+// 0x3A into a cached struct, and every getter reads that struct. The callers
+// here use only Voltage (0x08), BatteryStatus (0x0A) and StateOfCharge (0x2C)
+// (register map: SensorLib REG/BQ27220Constants.h BQ27220_REG_STA_*), so read
+// just those: one 4-byte burst at 0x08 and one 2-byte read at 0x2C. The
+// gauge's `comm` is protected, so this talks to Wire directly, framed the
+// same way as SensorLib's SensorCommI2C::readRegister (register write with a
+// STOP, then requestFrom). Caller must hold core::ScopedI2cLock.
+#if defined(ARDUINO) && defined(USING_BQ_GAUGE)
+static bool gauge_read(uint8_t reg, uint8_t *buf, uint8_t len)
+{
+    Wire.beginTransmission(BQ27220_SLAVE_ADDRESS);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) return false;
+    if (Wire.requestFrom(BQ27220_SLAVE_ADDRESS, len) != len) return false;
+    return Wire.readBytes(buf, len) == len;
+}
+
+static inline uint16_t le16(const uint8_t *b) { return (uint16_t)(b[0] | (b[1] << 8)); }
+
+// SensorLib declares the register constants protected; re-export the two we
+// need rather than restating their values.
+struct GaugeReg : BQ27220Constants {
+    using BQ27220Constants::BQ27220_REG_STA_BAT_VOLTAGE;      // 0x08
+    using BQ27220Constants::BQ27220_REG_STA_STATE_OF_CHARGE;  // 0x2C
+};
+
+// Last good values. A failed read keeps them, as a failed refresh() left
+// SensorLib's struct unchanged.
+static uint16_t s_gauge_voltage = 0;
+static uint16_t s_gauge_status  = 0;
+static uint16_t s_gauge_soc     = 0;
+
+static void gauge_read_targeted()
+{
+    uint8_t b[4];
+    if (gauge_read(GaugeReg::BQ27220_REG_STA_BAT_VOLTAGE, b, 4)) {
+        s_gauge_voltage = le16(b);       // 0x08-0x09 mV
+        s_gauge_status  = le16(b + 2);   // 0x0A-0x0B BatteryStatus bits
+    }
+    if (gauge_read(GaugeReg::BQ27220_REG_STA_STATE_OF_CHARGE, b, 2)) {
+        s_gauge_soc = le16(b);           // 0x2C-0x2D %
+    }
+}
+#endif
+
 // --- Battery voltage ---------------------------------------------------
 
 int16_t hw_get_battery_voltage()
@@ -79,13 +127,18 @@ int16_t hw_get_battery_voltage()
 
 #if  defined(USING_BQ_GAUGE)
     if (HW_GAUGE_ONLINE & hw_get_device_online()) {
-        instance.gauge.refresh();
-        return instance.gauge.getVoltage();
+        core::ScopedI2cLock i2c;
+        uint8_t b[2];
+        if (gauge_read(GaugeReg::BQ27220_REG_STA_BAT_VOLTAGE, b, 2)) {
+            s_gauge_voltage = le16(b);
+        }
+        return s_gauge_voltage;
     } else {
         log_d("Gauge Not online !");
         return 0;
     }
 #elif defined(USING_PMU_MANAGE)
+    core::ScopedI2cLock i2c;  // P7.45
     return instance.pmu.getBattVoltage();
 #else
     return 0;
@@ -101,6 +154,7 @@ int16_t hw_get_battery_voltage()
 bool hw_get_otg_enable()
 {
 #if defined(ARDUINO) && defined(USING_PPM_MANAGE)
+    core::ScopedI2cLock i2c;  // P7.45
     return  instance.ppm.isEnableOTG();
 #else
     return false;
@@ -110,6 +164,7 @@ bool hw_get_otg_enable()
 bool hw_set_otg(bool enable)
 {
 #if defined(ARDUINO) && defined(USING_PPM_MANAGE)
+    core::ScopedI2cLock i2c;  // P7.45
     if (enable) {
         return  instance.ppm.enableOTG();
     } else {
@@ -137,8 +192,10 @@ bool hw_get_charge_enable()
 {
 #ifdef ARDUINO
 #if defined(USING_PPM_MANAGE)
+    core::ScopedI2cLock i2c;  // P7.45
     return  instance.ppm.isEnableCharge();
 #elif defined(USING_PMU_MANAGE)
+    core::ScopedI2cLock i2c;  // P7.45
     return  instance.isEnableCharge();
 #endif
 #else
@@ -149,6 +206,7 @@ bool hw_get_charge_enable()
 void hw_set_charger(bool enable)
 {
 #ifdef ARDUINO
+    core::ScopedI2cLock i2c;  // P7.45
 #if defined(USING_PPM_MANAGE)
     if (enable) {
         instance.ppm.enableCharge();
@@ -168,6 +226,7 @@ void hw_set_charger(bool enable)
 void hw_set_charger_current(uint16_t milliampere)
 {
 #ifdef ARDUINO
+    core::ScopedI2cLock i2c;  // P7.45
 #if defined(USING_PPM_MANAGE)
     instance.ppm.setChargerConstantCurr(milliampere);
 #elif defined(USING_PMU_MANAGE)
@@ -196,7 +255,11 @@ uint8_t hw_get_charger_current_level()
     return user_setting.charger_current / dev_conts_var.charge_steps;
 #else
 #if defined(USING_PMU_MANAGE)
-    uint16_t cur = instance.getChargeCurrent();
+    uint16_t cur;
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        cur = instance.getChargeCurrent();
+    }
 #else
     uint16_t cur = user_setting.charger_current;
 #endif
@@ -211,13 +274,19 @@ uint16_t hw_set_charger_current_level(uint8_t level)
 {
 #if defined(ARDUINO) && defined(USING_PPM_MANAGE)
     log_d("set charge current:%u mA", level * dev_conts_var.charge_steps);
-    instance.ppm.setChargerConstantCurr(level * dev_conts_var.charge_steps);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.ppm.setChargerConstantCurr(level * dev_conts_var.charge_steps);
+    }
     return  level * dev_conts_var.charge_steps;
 #elif defined(USING_PMU_MANAGE) || !defined(ARDUINO)
     if (level > kChargeCurrentLevels - 1) level = kChargeCurrentLevels - 1;
     log_d("set charge current:%u mA", kChargeCurrentTable[level]);
 #if defined(ARDUINO)
-    instance.setChargeCurrent(kChargeCurrentTable[level]);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.setChargeCurrent(kChargeCurrentTable[level]);
+    }
 #endif
     return kChargeCurrentTable[level];
 #endif
@@ -240,8 +309,8 @@ void hw_get_monitor_params(monitor_params_t &params)
 
     // Refresh at most once per second while charging (the status bar animates
     // the bolt / rising percent), but back off to 5 s when discharging: the
-    // full sweep below is ~4 I2C gauge register reads (9 removed by PB.14)
-    // plus 2 PPM status reads, all under the instance mutex, and an idle battery
+    // sweep below is 2 targeted gauge reads (6 bytes, P7.16) plus 2 PPM
+    // status reads, under the bus lock, and an idle battery
     // percent barely moves second-to-second. A freshly-plugged charger is
     // picked up within one 5 s tick.
     uint32_t ttl_ms = s_cached_monitor_params.is_charging ? 1000 : 5000;
@@ -277,10 +346,10 @@ void hw_get_monitor_params(monitor_params_t &params)
 
 #ifdef USING_BQ_GAUGE
     if (hw_get_device_online() & HW_GAUGE_ONLINE) {
-        instance.gauge.refresh();
-        params.battery_percent = instance.gauge.getStateOfCharge();
-        params.battery_voltage = instance.gauge.getVoltage();
-        BatteryStatus batteryStatus = instance.gauge.getBatteryStatus();
+        gauge_read_targeted();  // P7.16: 6 bytes, was refresh()'s 54 + 4
+        params.battery_percent = s_gauge_soc;
+        params.battery_voltage = s_gauge_voltage;
+        BatteryStatus batteryStatus(s_gauge_status);
 
         // Do NOT derive is_charging from the gauge alone — once the cell hits
         // termination current drops to ~0 and isInDischargeMode() reports

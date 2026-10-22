@@ -5,6 +5,7 @@
 #include "peripherals.h"
 #include "system.h"
 #include "internal.h"
+#include "../core/kb_lock.h"
 #include "wireless.h"
 #include <string>
 
@@ -122,7 +123,10 @@ static bool g_discovery_active = false;
 bool hw_start_nfc_discovery()
 {
 #if  defined(USING_ST25R3916) && defined(ARDUINO)
-    instance.powerControl(POWER_NFC, true);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.powerControl(POWER_NFC, true);
+    }
     bool ok = beginNFC(nrf_notify_callback, ndef_event_callback);
     g_discovery_active = ok;
     // Kick the poller out of its idle block so it starts scanning at once,
@@ -138,7 +142,10 @@ void hw_stop_nfc_discovery()
 {
 #if  defined(USING_ST25R3916) && defined(ARDUINO)
     deinitNFC();
-    instance.powerControl(POWER_NFC, false);
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.powerControl(POWER_NFC, false);
+    }
     g_discovery_active = false;
 #endif
 }

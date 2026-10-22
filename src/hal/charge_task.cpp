@@ -21,6 +21,7 @@
 #include <LilyGoLib.h>
 #include <lvgl.h>
 
+#include "../core/kb_lock.h"
 #include "../core/scoped_lock.h"
 #include "../ui_define.h"
 #include "internal.h"
@@ -60,6 +61,7 @@ TaskHandle_t s_task = nullptr;
 
 bool poll_vbus_locked()
 {
+    core::ScopedI2cLock i2c;  // P7.45 (caller holds the instance lock: instance -> i2c)
 #if defined(USING_PPM_MANAGE)
     return instance.ppm.isVbusIn();
 #elif defined(USING_PMU_MANAGE)
