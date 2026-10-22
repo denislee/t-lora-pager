@@ -8,6 +8,7 @@
 #include "input_focus.h"
 #include "input_profile.h"
 #include "notify.h"
+#include "ui_post.h"
 #include "../ui_define.h"
 #include "../hal/hub.h"
 
@@ -624,6 +625,8 @@ void System::loop() {
         _pendingShowMenu = false;
         showMenu();
     }
+    // P7.47: closures posted from other tasks (core/ui_post.h).
+    ui_post_drain();
     // Drain pending notifications on the LVGL thread. `post()` is safe to
     // call from any task; actual banner creation has to happen here so it
     // runs under the instance lock held by the LVGL task.

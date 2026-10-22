@@ -69,5 +69,10 @@ bool weather_cache_load_forecast(const std::string &want_key, ForecastCache &out
 void weather_cache_save_forecast(const std::string &key, const ForecastCache &in);
 
 // Change signal: bumped on every weather_cache_save_forecast() (any key, any
-// task). The Weather app polls it to re-render after a weather.push.
+// task). The Weather app compares it to skip its own saves.
 uint32_t weather_cache_generation();
+
+// P7.47: called (from the saving task) after every generation bump; one
+// hook, nullptr to clear. The Weather app uses it to re-render a
+// weather.push without polling.
+void weather_cache_set_change_hook(void (*hook)());

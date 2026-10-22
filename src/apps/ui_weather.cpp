@@ -30,9 +30,12 @@
  * State reset on onStop (ui_weather_exit):
  *   widgets: hourly_col, daily_col, status_label
  *                                       — nulled (deleted with parent)
- *   timer:   s_gen_timer (100 ms: emulator worker drain + the
- *            weather_cache_generation() poll that re-renders after a
- *            weather.push)                — deleted, nulled
+ *   timer:   s_gen_timer                — emulator only (100 ms worker
+ *                                         drain + cache re-check); deleted,
+ *                                         nulled
+ *   hooks:   weather_cache_set_change_hook(on_cache_changed)
+ *                                       — set on enter, cleared on exit; the
+ *                                          hook only posts to the LVGL thread
  *   job:     s_w_job (hardware: direct HTTPS / phone-step fetcher + drain
  *            ticker, core::OneShotJob)    — teardown(): drain killed, a running
  *                                          worker detached (frees its own result)
@@ -54,6 +57,7 @@
 #include "../hal/weather_payload.h"
 #include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
+#include "../core/ui_post.h"
 #include "app_registry.h"
 #include "weather_test.h"
 #include "settings_internal.h"  // weather_city_match + the weather_* decls
@@ -121,8 +125,8 @@ static lv_obj_t *hourly_col = nullptr;
 static lv_obj_t *daily_col = nullptr;
 static lv_obj_t *status_label = nullptr;
 
-// weather.push notification: polls weather_cache_generation() and re-renders
-// when a save for the current key happened outside this app's own fetch.
+// weather.push notification: the cache change hook posts check_pushed_forecast
+// (P7.47)
 static lv_timer_t *s_gen_timer = nullptr;
 static uint32_t s_seen_gen = 0;
 
@@ -964,15 +968,10 @@ static void do_fetch()
 #endif
 }
 
-// LVGL thread, 100 ms: (emulator) drain the phone-step worker; then, a
-// forecast saved by someone else (weather.push) for the key we display is
-// re-rendered from the cache.
-static void gen_poll_cb(lv_timer_t *t)
+// LVGL thread: a forecast saved by someone else (weather.push, or the
+// emulator's worker) for the key we display is re-rendered from the cache.
+static void check_pushed_forecast()
 {
-    (void)t;
-#ifndef ARDUINO
-    emu_job_drain();
-#endif
     if (!hourly_col || fetch_in_flight()) return;
     const uint32_t gen = weather_cache_generation();
     if (gen == s_seen_gen) return;
@@ -982,6 +981,25 @@ static void gen_poll_cb(lv_timer_t *t)
     render_cache(cache);
     set_status("via phone", UI_COLOR_MUTED);
 }
+
+// Any task (weather.push runs on link_task): hop to the LVGL thread. A post
+// that lands after exit finds hourly_col null and does nothing (P7.47).
+static void on_cache_changed()
+{
+    core::ui_post(check_pushed_forecast);
+}
+
+// LVGL thread, 100 ms, emulator only: drain the phone-step worker, then
+// re-check the cache (the emulator's weather.push also arrives through the
+// hook).
+#ifndef ARDUINO
+static void gen_poll_cb(lv_timer_t *t)
+{
+    (void)t;
+    emu_job_drain();
+    check_pushed_forecast();
+}
+#endif
 
 static void root_click_cb(lv_event_t *e)
 {
@@ -1067,7 +1085,10 @@ static void ui_weather_enter(lv_obj_t *parent)
 
     s_seen_gen = weather_cache_generation();
     do_fetch();
+    weather_cache_set_change_hook(on_cache_changed);
+#ifndef ARDUINO
     s_gen_timer = lv_timer_create(gen_poll_cb, 100, nullptr);
+#endif
 }
 
 static void ui_weather_exit(lv_obj_t *parent)
@@ -1082,6 +1103,7 @@ static void ui_weather_exit(lv_obj_t *parent)
     hourly_col = nullptr;
     daily_col = nullptr;
     status_label = nullptr;
+    weather_cache_set_change_hook(nullptr);
     if (s_gen_timer) { lv_timer_delete(s_gen_timer); s_gen_timer = nullptr; }
 
 #ifdef ARDUINO

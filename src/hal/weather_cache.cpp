@@ -14,6 +14,20 @@
 #endif
 
 static std::atomic<uint32_t> g_generation{0};
+static std::atomic<void (*)()> g_change_hook{nullptr};
+
+// Bump the generation and tell the one registered observer, if any. Runs on
+// the saving task with no store lock held, so the hook may read the cache.
+static void bump_generation()
+{
+    g_generation.fetch_add(1);
+    if (void (*hook)() = g_change_hook.load()) hook();
+}
+
+void weather_cache_set_change_hook(void (*hook)())
+{
+    g_change_hook.store(hook);
+}
 
 uint32_t weather_cache_generation()
 {
@@ -80,7 +94,7 @@ void weather_cache_save_forecast(const std::string &key, const ForecastCache &in
     p.putString("fck", key.c_str());
     p.putBytes("fcd", &in, sizeof(in));
     p.end();
-    g_generation.fetch_add(1);
+    bump_generation();
 }
 
 #else  // !ARDUINO — process-local store (emulator, native tests)
@@ -126,11 +140,15 @@ bool weather_cache_load_forecast(const std::string &want_key, ForecastCache &out
 
 void weather_cache_save_forecast(const std::string &key, const ForecastCache &in)
 {
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_fc_key = key;
-    memcpy(&g_fc, &in, sizeof(g_fc));
-    g_fc_set = true;
-    g_generation.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_fc_key = key;
+        memcpy(&g_fc, &in, sizeof(g_fc));
+        g_fc_set = true;
+    }
+    // Outside g_mu: the hook runs on this task and may call straight back
+    // into the cache (the Weather app's re-render reads it).
+    bump_generation();
 }
 
 #endif
