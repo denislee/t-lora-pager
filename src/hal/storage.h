@@ -7,7 +7,12 @@
 #include "types.h"
 
 void hw_mount_sd();
+// SD total/used/free; cached and re-read only after a filesystem-generation
+// bump or hw_storage_info_invalidate() (P7.28).
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
+// The SD card may have changed underneath (the vendor light-sleep remount):
+// make the next hw_get_storage_info() re-read it.
+void hw_storage_info_invalidate();
 void hw_get_local_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
 
 // Delete `path` from both internal FFat and (when mounted) the SD card.
@@ -74,6 +79,10 @@ bool hw_is_usb_msc_mounted();
 // Used by high-level apps to invalidate their caches.
 bool hw_get_filesystem_dirty();
 void hw_set_filesystem_dirty(bool dirty);
+// P7.27: the flag is kept in RAM; NVS records only "dirty since the last clean
+// persist" (written once, on the first clean -> dirty). Call before sleep or
+// shutdown to write the lazy clean; a no-op unless RAM is clean and NVS dirty.
+void hw_filesystem_dirty_persist();
 // Incremented by every hw_set_filesystem_dirty(true). Lets an observer notice
 // writes without clearing the flag the apps rely on.
 uint32_t hw_get_filesystem_generation();

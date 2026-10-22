@@ -10,10 +10,12 @@
 #include "fs_util.h"
 #include "evict.h"
 #include "../core/spi_lock.h"
+#include "../core/kb_lock.h"
 #include "../core/input_profile.h"
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
 
 #ifdef ARDUINO
 #include <algorithm>
@@ -105,6 +107,31 @@ static bool decode_after_read(std::string &content)
 }
 #endif
 
+#if defined(ARDUINO) && defined(HAS_SD_CARD_SOCKET)
+/* P7.28: SD usage cache. SD.totalBytes() and SD.usedBytes() each run
+ * f_getfree() under the SPI lock; FatFs scans the whole FAT the first time per
+ * mount on FAT12/16 or when FAT32's FSINFO count is invalid (FF_FS_NOFSINFO 0
+ * trusts a valid one), then keeps free_clst in RAM. sys.info (link_task) and
+ * Settings > Info poll this, so the numbers are cached and re-read only when
+ * the filesystem generation moves (any write through storage.cpp or the link
+ * fs handlers) or the card may have changed (hw_mount_sd, the light-sleep
+ * remount: hw_storage_info_invalidate). Writes over USB MSC don't bump the
+ * generation, so the figure can lag those until the next local write. */
+static portMUX_TYPE s_sd_info_mux = portMUX_INITIALIZER_UNLOCKED;
+static std::atomic<uint32_t> s_sd_info_epoch{1};
+static uint32_t s_sd_info_cached_epoch = 0;   // 0 = nothing cached
+static uint32_t s_sd_info_gen = 0;
+static uint64_t s_sd_info_total = 0;
+static uint64_t s_sd_info_used = 0;
+#endif
+
+void hw_storage_info_invalidate()
+{
+#if defined(ARDUINO) && defined(HAS_SD_CARD_SOCKET)
+    s_sd_info_epoch++;
+#endif
+}
+
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free)
 {
     total = 0;
@@ -113,10 +140,30 @@ void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free)
 #if defined(ARDUINO)
 #if defined(HAS_SD_CARD_SOCKET)
     if (HW_SD_ONLINE & hw_get_device_online()) {
-        core::ScopedSpiLock lock;
-        total = SD.totalBytes();
-        used = SD.usedBytes();
-        free = total - used;
+        // Sample both keys before the read, so a write or remount that lands
+        // during it leaves the cache keyed to the older state (re-read next time).
+        const uint32_t epoch = s_sd_info_epoch.load();
+        const uint32_t gen = hw_get_filesystem_generation();
+        bool hit;
+        portENTER_CRITICAL(&s_sd_info_mux);
+        hit = s_sd_info_cached_epoch == epoch && s_sd_info_gen == gen;
+        total = s_sd_info_total;
+        used = s_sd_info_used;
+        portEXIT_CRITICAL(&s_sd_info_mux);
+        if (!hit) {
+            {
+                core::ScopedSpiLock lock;
+                total = SD.totalBytes();
+                used = SD.usedBytes();
+            }
+            portENTER_CRITICAL(&s_sd_info_mux);
+            s_sd_info_total = total;
+            s_sd_info_used = used;
+            s_sd_info_gen = gen;
+            s_sd_info_cached_epoch = total ? epoch : 0;  // f_getfree failed: retry
+            portEXIT_CRITICAL(&s_sd_info_mux);
+        }
+        free = total > used ? total - used : 0;
     }
 #elif defined(USING_FATFS)
     total = FFat.totalBytes();
@@ -140,14 +187,27 @@ void hw_get_local_storage_info(uint64_t &total, uint64_t &used, uint64_t &free)
 #endif
 }
 
+/* P7.26: mount (or re-check) the SD card. The vendor installSD() runs
+ * SD.begin() on the shared SPI bus and reads SD_DET on the XL9555 over I2C,
+ * so it takes both locks in the documented order (kb_lock.h: instance -> SPI
+ * -> I2C; callers hold neither, and the SPI mutex is not recursive). The I2C
+ * lock spans SD.begin() too, because the SD_DET read sits inside the vendor
+ * call; with no card that returns after the one read. installSD() itself now
+ * sets or clears HW_SD_ONLINE ([LOCAL PATCH P7.26]), so callers that re-check
+ * hw_get_device_online() after this see a card inserted after boot. */
 void hw_mount_sd()
 {
 #if defined(ARDUINO) && defined(HAS_SD_CARD_SOCKET)
-    instance.installSD();
+    {
+        core::ScopedSpiLock spi;
+        core::ScopedI2cLock i2c;
+        instance.installSD();
+    }
+    hw_storage_info_invalidate();
 #endif
 }
 
-static bool filesystem_dirty = false;
+static std::atomic<bool> filesystem_dirty{false};  // P7.27: written from several tasks
 
 // Vendor hooks from lib/LilyGoLib/src/USB_MSC.cpp — no header is exposed
 // upstream, so we declare them here rather than reaching into the lib/.
@@ -168,12 +228,19 @@ bool hw_is_usb_msc_writing() { return false; }
 bool hw_is_usb_msc_mounted() { return false; }
 #endif
 
-// Persisted across boots so consumers (e.g. the journal index) can trust a
-// cached snapshot when nothing has been written since the last refresh. The
-// flag lives in NVS namespace "fs"/"dirty" — lazy-loaded on first access and
-// only written when the value actually changes, so per-save callers pay the
-// flash cost at most once per dirty/clean transition.
+// P7.27: the dirty flag lives in RAM (`filesystem_dirty`); NVS "fs"/"dirty"
+// only has to answer "may the on-disk journal index be stale?" on the next
+// boot, which the journal uses to trust the index without a rescan.
+//  - clean -> dirty: written (true) synchronously, before the caller's file
+//    write, but only when NVS still says clean. A crash or power loss after an
+//    edit therefore always boots dirty, as before.
+//  - dirty -> clean (journal reconciled): RAM only. NVS keeps "dirty" until
+//    hw_filesystem_dirty_persist() writes false at sleep or shutdown, and only
+//    if RAM is still clean then. A crash in between costs one extra rescan.
+// So an edit -> journal cycle costs no NVS write once NVS says dirty, instead
+// of two (true, then false), and at most one true plus one false per session.
 static bool dirty_loaded = false;
+static std::atomic<bool> nvs_dirty{false};   // what NVS holds (after the load)
 
 static void load_filesystem_dirty()
 {
@@ -184,9 +251,42 @@ static void load_filesystem_dirty()
         filesystem_dirty = p.getBool("dirty", false);
         p.end();
     }
+    nvs_dirty = filesystem_dirty.load();
     dirty_loaded = true;
 #else
     dirty_loaded = true;
+#endif
+}
+
+#ifdef ARDUINO
+// Serializes the NVS writes below. The flags are seq_cst atomics: a writer
+// stores filesystem_dirty then loads nvs_dirty; the persist stores nvs_dirty
+// then re-loads filesystem_dirty, so at least one of them sees the other and
+// NVS never ends up "clean" behind a write that started before it.
+static std::mutex s_nvs_dirty_mutex;
+
+static void write_nvs_dirty(bool dirty)
+{
+    Preferences p;
+    if (p.begin("fs", false)) {
+        p.putBool("dirty", dirty);
+        p.end();
+    }
+}
+#endif
+
+void hw_filesystem_dirty_persist()
+{
+#ifdef ARDUINO
+    load_filesystem_dirty();
+    std::lock_guard<std::mutex> g(s_nvs_dirty_mutex);
+    if (filesystem_dirty || !nvs_dirty.load()) return;
+    nvs_dirty = false;
+    write_nvs_dirty(false);
+    if (filesystem_dirty) {           // a write raced the clean: put it back
+        write_nvs_dirty(true);
+        nvs_dirty = true;
+    }
 #endif
 }
 
@@ -220,13 +320,16 @@ void hw_set_filesystem_dirty(bool dirty)
         if (void (*hook)() = filesystem_generation_hook.load()) hook();
     }
     load_filesystem_dirty();
-    if (filesystem_dirty == dirty) return;
     filesystem_dirty = dirty;
 #ifdef ARDUINO
-    Preferences p;
-    if (p.begin("fs", false)) {
-        p.putBool("dirty", dirty);
-        p.end();
+    // P7.27: only the first clean -> dirty since NVS last said clean is
+    // written, and before the caller's file write (later callers wait for it).
+    if (dirty && !nvs_dirty.load()) {
+        std::lock_guard<std::mutex> g(s_nvs_dirty_mutex);
+        if (!nvs_dirty.load()) {
+            write_nvs_dirty(true);
+            nvs_dirty = true;
+        }
     }
 #endif
 }

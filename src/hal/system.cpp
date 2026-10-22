@@ -801,6 +801,7 @@ void hw_shutdown()
 {
 #ifdef ARDUINO
     hw_save_flush();  // IS.2: never cut power under a background note save
+    hw_filesystem_dirty_persist();  // P7.27: lazy NVS clean, after the last save
     instance.decrementBrightness(0, 5, false);
 #if defined(USING_PPM_MANAGE)
     instance.ppm.shutdown();
@@ -975,6 +976,7 @@ void hw_low_power_loop()
      * the light-sleep path — a device found asleep should be
      * indistinguishable from one that's been off. */
     hw_save_flush();  // IS.2: finish a background note save (it may still need the key).
+    hw_filesystem_dirty_persist();  // P7.27: lazy NVS clean before power can go
     notes_crypto_lock();
     {
         core::ScopedKbLock kb_lock;  // lightSleep()/sleep() call kb.end()/begin()
@@ -984,6 +986,8 @@ void hw_low_power_loop()
             instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_BOOT_BUTTON));
         }
     }
+    // P7.28: lightSleep() ran SD.end() + installSD(); the card may differ.
+    hw_storage_info_invalidate();
 #endif
 }
 

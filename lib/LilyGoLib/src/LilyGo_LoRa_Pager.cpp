@@ -569,12 +569,19 @@ bool LilyGoLoRaPager::initPMU()
  * @brief   Hang on SD card
  * @retval Returns true if successful, otherwise false
  */
+// [LOCAL PATCH P7.26] installSD() keeps HW_SD_ONLINE in devices_probe current
+// on every outcome, not just in begin(): src/hal/storage.cpp hw_mount_sd (card
+// inserted after boot) and the lightSleep() wake remount both come through
+// here. No locks are taken in here: hw_mount_sd holds the SPI lock and then the
+// I2C lock (SD_DET read on the XL9555) around the call, and lightSleep() runs
+// under the caller's I2C lock.
 bool LilyGoLoRaPager::installSD()
 {
 
 #ifdef EXPANDS_SD_DET
     io.pinMode(EXPANDS_SD_DET, INPUT);
     if (io.digitalRead(EXPANDS_SD_DET)) {
+        devices_probe &= ~HW_SD_ONLINE;   // [LOCAL PATCH P7.26]
         return false;
     }
 #endif /*EXPANDS_SD_DET*/
@@ -583,12 +590,15 @@ bool LilyGoLoRaPager::installSD()
     // Set mount point to /fs
     if (!SD.begin(SD_CS, SPI, 4000000U, "/sd")) {
         log_e("Failed to detect SD Card!!");
+        devices_probe &= ~HW_SD_ONLINE;   // [LOCAL PATCH P7.26]
         return false;
     }
     if (SD.cardType() != CARD_NONE) {
         log_d("SD Card Size: %llu MB\n", SD.cardSize() / (1024 * 1024));
+        devices_probe |= HW_SD_ONLINE;    // [LOCAL PATCH P7.26]
         return true;
     }
+    devices_probe &= ~HW_SD_ONLINE;       // [LOCAL PATCH P7.26]
     return false;
 }
 

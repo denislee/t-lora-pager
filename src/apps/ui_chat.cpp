@@ -125,9 +125,14 @@ static SendCtx *s_ctx = nullptr;
 // up on it. It is a UI-side backstop just past the worker's own budget: it
 // surfaces a visible error and abandons the task so the UI doesn't sit on
 // "thinking..." forever if the worker overruns.
-//  - hub: chat_post's raw WiFiClient bounds itself (5 s connect + 15 s read).
+//  - hub: chat_post's raw WiFiClient bounds itself: 5 s connect, then
+//    HUB_READ_BUDGET_MS for the reply (P7.41). lilyhub's chat client allows
+//    60 s per upstream call (server/internal/chat/chat.go clientTimeout), so
+//    the old 15 s read gave up on slow voice turns the server still finished,
+//    and a retry paid twice. The watchdog sits just above connect + read.
 #ifdef ARDUINO
-static const uint32_t SEND_WATCHDOG_MS = 20000;
+static const uint32_t HUB_READ_BUDGET_MS = 70000;
+static const uint32_t SEND_WATCHDOG_MS = 5000 + HUB_READ_BUDGET_MS + 5000;  // 80 s
 #endif
 //  - phone: the worker runs chat.audio.begin, the voice upload, then chat.ask,
 //    so the budget is their sum (P7.33):
@@ -344,17 +349,23 @@ static bool chat_post(const std::string &url,
     }
     Serial.printf("[chat] sent headers=%d body=%u\n", hlen, (unsigned)body.size());
 
-    // Drain the response. 15s overall budget; per-iteration we sleep
-    // briefly while waiting so the FreeRTOS scheduler can run others.
+    // Drain the response within HUB_READ_BUDGET_MS (P7.41). Read whatever is
+    // buffered in 512 B blocks; sleep 10 ms only while nothing is available,
+    // so a reply streams in at socket speed instead of one byte per call.
     std::string raw;
     raw.reserve(1024);
-    const uint32_t deadline = millis() + 15000;
+    const uint32_t read_start = millis();
     bool eof = false;
-    while (millis() < deadline) {
-        while (client.available()) {
-            int c = client.read();
-            if (c < 0) break;
-            raw.push_back((char)c);
+    uint8_t buf[512];
+    while ((uint32_t)(millis() - read_start) < HUB_READ_BUDGET_MS) {
+        int avail = client.available();
+        if (avail > 0) {
+            int want = avail < (int)sizeof(buf) ? avail : (int)sizeof(buf);
+            int n = client.read(buf, (size_t)want);
+            if (n > 0) {
+                raw.append((const char *)buf, (size_t)n);
+                continue;
+            }
         }
         if (!client.connected() && !client.available()) {
             eof = true;
@@ -362,10 +373,10 @@ static bool chat_post(const std::string &url,
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+    const uint32_t read_ms = millis() - read_start;
     client.stop();
-    Serial.printf("[chat] read %u bytes, eof=%d, elapsed_ok=%d\n",
-                  (unsigned)raw.size(), (int)eof,
-                  (int)(millis() < deadline));
+    Serial.printf("[chat] read %u bytes in %u ms, eof=%d\n",
+                  (unsigned)raw.size(), (unsigned)read_ms, (int)eof);
 
     if (raw.empty()) {
         error = eof ? "server closed without response" : "read timeout";

@@ -16,6 +16,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block() for StringSink
 #include "task_util.h"
 // board_config.h defines USING_BLE_KEYBOARD for every supported board, so the
 // BLE keyboard code below is guarded on ARDUINO alone.
@@ -490,6 +491,70 @@ static bool http_open(HttpClients &c, const char *url, std::string *error)
     }
     return true;
 }
+
+// P7.42: HTTPClient::writeToStream() wants a Stream (not a Print), so this is
+// a write-only Stream that appends the body straight onto the caller's
+// std::string: one copy of the body instead of getString()'s StreamString plus
+// the append. Growth is explicit and checked: src/ builds with -fno-exceptions,
+// so an allocation std::string could not satisfy would abort. A write that
+// can't grow returns 0, which writeToStream reports as HTTPC_ERROR_STREAM_WRITE
+// (the same short-write path a failed StreamString realloc took before).
+class StringSink : public Stream {
+public:
+    explicit StringSink(std::string &s) : s_(s) {}
+    size_t write(uint8_t c) override { return write(&c, 1); }
+    size_t write(const uint8_t *buf, size_t n) override
+    {
+        if (n == 0) return 0;
+        if (s_.capacity() - s_.size() < n && !grow(s_.size() + n)) return 0;
+        s_.append((const char *)buf, n);
+        return n;
+    }
+    // Make room for `need` bytes in total: geometric while streaming, exact
+    // for a known Content-Length. False (nothing reserved) if the heap can't
+    // take it.
+    bool grow(size_t need, bool exact = false)
+    {
+        size_t cap = s_.capacity();
+        size_t want = (!exact && cap * 2 > need) ? cap * 2 : need;   // geometric
+        if (!fits(want)) want = need;                    // exact as a fallback
+        if (!fits(want)) return false;
+        s_.reserve(want);
+        return true;
+    }
+    int available() override { return 0; }
+    int read() override { return -1; }
+    int peek() override { return -1; }
+    void flush() override {}
+private:
+    static bool fits(size_t bytes)
+    {
+        // +64: allocator header and the terminator std::string adds.
+        return heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) > bytes + 64;
+    }
+    std::string &s_;
+};
+
+// Appends the response body to `out`, the way getString() used to fill it:
+// nothing when the server announced Content-Length: 0, otherwise whatever
+// arrived (identity or chunked; writeToStream decodes chunked itself). A read
+// error keeps the partial body and is only logged, exactly as getString()
+// ignored writeToStream's result; callers judge success by the status code.
+static void http_read_body(HTTPClient &http, std::string &out)
+{
+    int size = http.getSize();          // -1: no Content-Length (e.g. chunked)
+    if (size == 0) return;
+    StringSink sink(out);
+    if (size > 0 && !sink.grow(out.size() + (size_t)size, true)) {
+        log_w("[http] no heap for a %d B body", size);
+        return;                         // getString(): reserve failed -> ""
+    }
+    int r = http.writeToStream(&sink);
+    if (r < 0) {
+        log_w("[http] body read error %d (%s), kept %u B", r,
+              HTTPClient::errorToString(r).c_str(), (unsigned)out.size());
+    }
+}
 } // namespace
 #endif
 
@@ -527,8 +592,7 @@ bool hw_http_get_string(const char *url, std::string &out, std::string *error)
 #ifdef ARDUINO
     HttpClients c;
     if (!http_open(c, url, error)) return false;
-    String body = c.http.getString();
-    out.append(body.c_str(), body.length());
+    http_read_body(c.http, out);
     c.http.end();
     return true;
 #else
@@ -586,8 +650,7 @@ bool hw_http_request(const char *url,
     if (status_code) *status_code = code;
 
     // Always capture the body so callers can read error payloads too.
-    String rbody = c.http.getString();
-    out.append(rbody.c_str(), rbody.length());
+    http_read_body(c.http, out);
     c.http.end();
 
     if (code < 200 || code >= 300) {

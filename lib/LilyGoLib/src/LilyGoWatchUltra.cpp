@@ -629,6 +629,9 @@ void LilyGoUltra::checkPowerStatus()
  * @brief   Hang on SD card
  * @retval Returns true if successful, otherwise false
  */
+// [LOCAL PATCH P7.26] Also clear HW_SD_ONLINE on every failure (it was only
+// ever set), so a card pulled during lightSleep() reads offline after the wake
+// remount. No locks in here; see LilyGoLoRaPager::installSD().
 bool LilyGoUltra::installSD()
 {
     log_d("Init SD");
@@ -636,6 +639,7 @@ bool LilyGoUltra::installSD()
 #ifdef EXPANDS_SD_DET
     io.pinMode(EXPANDS_SD_DET, INPUT);
     if (io.digitalRead(EXPANDS_SD_DET) == HIGH) {
+        devices_probe &= ~HW_SD_ONLINE;   // [LOCAL PATCH P7.26]
         return false;
     }
 #endif /*EXPANDS_SD_DET*/
@@ -643,6 +647,7 @@ bool LilyGoUltra::installSD()
     // Set mount point to /fs
     if (!SD.begin(SD_CS, SPI, 4000000U, "/sd")) {
         log_e("Failed to detect SD Card!!");
+        devices_probe &= ~HW_SD_ONLINE;   // [LOCAL PATCH P7.26]
         return false;
     }
     if (SD.cardType() != CARD_NONE) {
@@ -650,6 +655,7 @@ bool LilyGoUltra::installSD()
         devices_probe |= HW_SD_ONLINE;
         return true;
     }
+    devices_probe &= ~HW_SD_ONLINE;       // [LOCAL PATCH P7.26]
     return false;
 }
 
