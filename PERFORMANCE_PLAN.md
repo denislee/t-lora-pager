@@ -1158,12 +1158,12 @@ never overwrite rows.
 8. **P7.14** / **P7.15** clock.
 
 **Phase F: boot** (hardware, vendor patches)
-1. **P7.44** display delays.
-2. P6.2 BHI260 deferred.
-3. P6.1 crystal.
-4. P6.3 PSRAM test.
-5. P6.4 MSC listing.
-6. P6.19 SD clock (needs the CRC read-back test from IS.2).
+1. **P7.44** display delays. ✅ code 2026-10-22 (§16); 20 cold boots owed.
+2. P6.2 BHI260 deferred. ✅ code 2026-10-22 (pager).
+3. P6.1 crystal. ✅ code 2026-10-22.
+4. P6.3 PSRAM test. ✅ code 2026-10-22.
+5. P6.4 MSC listing. ✅ code 2026-10-22.
+6. P6.19 SD clock (needs the CRC read-back test from IS.2). ⏸ parked: hardware CRC read-back test; not a boot cost (§16).
 
 **Phase G: bus and power** (hardware soak)
 1. **P7.45** bus-wide I2C lock.
@@ -1368,3 +1368,20 @@ Scope settled with the user for this run: land every code item, with each hardwa
 | Secrets on passphrase change (bug found in Phase D) | ✅ fixed | `notes_crypto_change_passphrase` never touched `tgbridge/token_enc`, `notesync/token_enc`, `ssh/pw_enc`, so every passphrase change left those tokens undecryptable (`secret_load` → ""). They are now re-encrypted in the staged transaction above (`secrets.cpp` raw slot API), and the pins are re-derived. **Disable now erases the secret slots** (plus pins and masks) before erasing the canary: `secret_store` never allows plaintext secrets, and with no canary they could never be unlocked. Prompt/result text says so. Tokens broken by an earlier change can't be recovered; re-enter them. **Product call made in code, revertible:** erase-on-disable (`notes_crypto.cpp` disable's `secret_slot_erase` loop + two UI strings); the alternative keeps the ciphertext, shown "(locked)" until encryption is re-enabled with the same passphrase. | as above | ☐ disable: notes return to plaintext, Settings shows "(not set)" for tokens |
 
 Not covered by P7.7 (as before): a note written by another task between its staging and the install step is overwritten by the staged copy; a copy that doesn't decrypt under the old passphrase is left as is.
+
+### 2026-10-22: Phase F (boot)
+
+`BOOT_TIME_PLAN.md` (untracked, 2026-10-21) carries the deeper analysis these follow: BT.6 = P7.44, BT.2 = P6.2, BT.4 = P6.1, BT.5 = P6.3, BT.7 = P6.4.
+
+| ID | Status | What changed | Saving | Verified | HW owed |
+|---|---|---|---|---|---|
+| P7.44 | ✅ code | `[LOCAL PATCH P7.44]` `st7796_init_list`: 0x80 cleared on `0xC5` VCOM, `0xE1` gamma, `0xF0 0x69`; SWRESET keeps 120 ms; SLPOUT uses a new 0x40 flag = `delay(20)` in `LilyGoDispArduinoSPI::init` (4× the datasheet's ≥ 5 ms; 120 ms applies only before a later SLPIN; only the pager uses this init path). | 460 ms (calc) | builds | ☐ 20 cold + 20 warm boots: no glitch or stuck-white panel, colours and gamma right |
+| P6.2 | ✅ code, pager only | `factory.ino` sets `NO_HW_SENSOR` on the pager; new `hw_imu_ensure_started()` (own mutex, since callers hold the non-recursive instance lock) runs `instance.initSensor()` on the first `hw_register_imu_process()`. The only consumer is the IMU debug page (plus the sleep/wake re-register). `[LOCAL PATCH P6.2]` `begin()` sets `Wire.setClock(400000)` when the sensor is skipped, since `initSensor()` was what moved the bus off 100 kHz. Vendor `sleep()` touching the unloaded sensor only logs errors (SensorLib null-device checks). Watches unchanged (Ultra inits the BHI early; S3 has a BMA423). | 1–2 s (est) | builds | ☐ IMU page shows BHI online after first open (`BHI260 lazy init ok in N ms`; that open blocks 1–2 s, no loader); ☐ keyboard, battery, RTC at 400 kHz; ☐ deep sleep without the BHI loaded |
+| P6.1 | ✅ code (pager + Ultra, shared) | `[LOCAL PATCH P6.1 / BT.4]` `LilyGoGeneral.cpp`: `calibrate_one` (6 × 5 × 1000 cycles) replaced by a 100-cycle crystal probe retried ≤ 200 ms, the clock switch, one `rtc_clk_cal(RTC_CAL_RTC_MUX, 1024)` and `esp_clk_slowclk_cal_set()`, as IDF does. **Behaviour change:** the slow-clock calibration is now actually applied (the vendor never set it, so deep-sleep timer wakes used a stale value). | ~0.76 s (calc); no-crystal worst case ~0.2 s | builds | ☐ log shows the switch, `rtc_clk_slow_freq_get()==32K_XTAL`, RTC keeps time, PMU long-press sleep/wake on pager and Ultra |
+| P6.3 | ✅ code (pager + Ultra) | `hal/system.cpp`: `extern "C" bool testSPIRAM(void) { return true; }` overrides the framework's weak hook (`esp32-hal-psram.c:42`, called only without `CONFIG_SPIRAM_BOOT_INIT`; the S3's `qio_opi` config sets it, so no effect there). `esp_spiram_test` gone from the ELF. | 0.3–1.0 s (est) | builds, `nm` | ☐ `ESP.getPsramSize()` unchanged, no allocation failures |
+| P6.4 | ✅ code | `[LOCAL PATCH P6.4]` `setupMSC()`: `__listDir(FFat,"/",3)` only at `CORE_DEBUG_LEVEL >= 5` (all envs build at 0). | 0.1–0.5 s, grows with notes (est) | builds | ☐ USB MSC still enumerates |
+| P6.19 | ⏸ parked | No change. **Premise correction:** card init runs at 400 kHz regardless (`sd_diskio.cpp` `AcquireSPI card_locked(card, 400000)`, CRC on via CMD59); the 4 MHz in `installSD()` only applies to the few post-init FAT reads, so it is not a boot cost. The runtime gain (P7.24/P7.34 SD transfers on the shared bus) needs the IS.2 CRC read-back test on hardware, and a mount-time fallback can't prove runtime transfers. | — | — | ☐ IS.2 CRC read-back at 10–20 MHz, then raise |
+
+Builds: `tlora_pager`, `tlora_pager_profile`, `twatchs3`, `twatch_ultra`, `emulator_lora_pager`, `emulator_twatchs3`; native 187/187; sweep exit 0. Pager 2,892,400 B / RAM 94,440 B. Estimated total: 2.6–4.7 s off power-on → first frame (calc + est; the BT.1 profile run is owed).
+
+**Finding outside this plan:** `src/hal/sensors.cpp` never includes `hal/board_config.h`, so `USING_BHI260_SENSOR` is undefined there and all its BHI260 code (sensor setup in `hw_register_imu_process`, data callbacks, live `hw_get_imu_params`, the BHI branch of `hw_is_face_down`) compiles to nothing on the pager (`nm -C sensors.cpp.o` showed no `configure`/`initSensor` refs). The IMU debug page sees the macro, so its Online/firmware rows work. Not fixed here: adding the include turns on a never-run pipeline that needs hardware verification.
