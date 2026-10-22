@@ -29,6 +29,8 @@
  *             after the worker has exited, P7.43)
  *   ui:      ui_hide_back_button()         — releases shared status-bar hook
  *   statics: s_prompt_app                 — cleared if this app owns it
+ *            s_live_                      — cleared if this app owns it; a drain
+ *                                           posted after exit finds it null
  * Unlike most apps, this one holds state as App members (poll_timer_,
  * backend_) rather than file statics. Add new members alongside and make
  * sure onStop() releases them BEFORE chaining core::App::onStop() — the
@@ -38,6 +40,7 @@
 #include "../core/app.h"
 #include "../core/app_manager.h"
 #include "../core/system.h"
+#include "../core/ui_post.h"
 #include "../hal/wireless.h"
 #include "../hal/secrets.h"
 #include "../hal/notes_crypto.h"
@@ -169,6 +172,10 @@ private:
 };
 
 #if defined(ARDUINO) && defined(USING_LIBSSH)
+// P7.43: the session task calls this when output lands in an empty
+// buffer, so the UI drains it now instead of on the next 100 ms tick.
+static void ssh_output_ready();
+
 // libssh-backed implementation. The session is owned by a FreeRTOS task
 // pinned to core 0 (the LVGL/UI runs on core 1 in factory.ino). I/O between
 // the UI thread and the session task goes through two std::string buffers
@@ -487,8 +494,12 @@ private:
     void push_output(const std::string& s) {
         if (s.empty()) return;
         xSemaphoreTake(io_mtx_, portMAX_DELAY);
+        const bool was_empty = out_buf_.empty();
         out_buf_ += s;
         xSemaphoreGive(io_mtx_);
+        // First bytes since the UI last drained: let it show them now rather
+        // than on the next 100 ms tick (P7.43).
+        if (was_empty) ssh_output_ready();
     }
 
     void set_error(const std::string& msg) {
@@ -647,6 +658,8 @@ public:
     void onStart(lv_obj_t* parent) override;
     void onStop()  override;
 
+    static void drain_live();   // P7.43: posted by ssh_output_ready()
+
     // Public: driven by the static credential-prompt callback chain and the
     // edit-button click handler.
     void start_connect_flow();           // smart: saved creds → direct connect
@@ -714,10 +727,21 @@ private:
     int                      history_idx_   = -1;
     std::string              history_draft_;
     static constexpr size_t  kHistoryMax    = 64;
+    static SshApp*           s_live_;   // the started SshApp, LVGL thread only
 
     void history_push(const std::string& line);
     bool history_navigate(int dir);  // -1 older, +1 newer
 };
+
+SshApp* SshApp::s_live_ = nullptr;
+
+#if defined(ARDUINO) && defined(USING_LIBSSH)
+void SshApp::drain_live() {
+    if (s_live_ && s_live_->poll_timer_) poll_tick_cb(s_live_->poll_timer_);
+}
+
+static void ssh_output_ready() { core::ui_post(SshApp::drain_live); }
+#endif
 
 // Credential prompts run as a chain of static callbacks. We accumulate
 // fields into a single static SshConfig and a single SshApp* so each step
@@ -826,9 +850,10 @@ void SshApp::onStart(lv_obj_t* parent) {
     cfg_load(cfg_);
     build_ui();
 
-    // 100 ms tick is fast enough for an interactive terminal feel without
-    // burning CPU. Real backend will push at the same cadence.
+    // 100 ms tick: the loopback stub and state changes; LibSsh output also
+    // posts an immediate drain (P7.43).
     poll_timer_ = lv_timer_create(poll_tick_cb, 100, this);
+    s_live_ = this;
 
     if (!hw_get_wifi_connected()) {
         append_terminal("[!] WiFi not connected. Connect via the home screen "
@@ -851,6 +876,7 @@ void SshApp::onStart(lv_obj_t* parent) {
 }
 
 void SshApp::onStop() {
+    if (s_live_ == this) s_live_ = nullptr;
     if (poll_timer_) { lv_timer_del(poll_timer_); poll_timer_ = nullptr; }
     if (backend_)    { backend_->disconnect(); backend_.reset(); }
     ui_hide_back_button();
