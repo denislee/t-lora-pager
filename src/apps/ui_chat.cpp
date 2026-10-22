@@ -154,26 +154,39 @@ static uint32_t chat_now_ms()
 #endif
 }
 
+// P7.18: the transcript is trimmed only when it passes kLogHigh, and then
+// down to at most kLogLow at a line boundary, so the full label re-set
+// happens once per ~2 KB of new text instead of on every line.
+static constexpr size_t kLogHigh = 8000;
+static constexpr size_t kLogLow  = 6000;
+
+// LV_EVENT_SIZE_CHANGED on s_log_label: the label grew (or shrank after a
+// trim) in the normal layout pass, so stick the view to the newest line
+// without forcing an extra lv_obj_update_layout per append.
+static void log_size_changed_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_log_scroll) lv_obj_scroll_to_y(s_log_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
 static void log_append(const char *prefix, const std::string &text)
 {
     if (!s_log_label) return;
-    if (!s_log_text.empty()) s_log_text.push_back('\n');
-    if (prefix) s_log_text.append(prefix);
-    s_log_text.append(text);
+    std::string add;
+    if (!s_log_text.empty()) add.push_back('\n');
+    if (prefix) add.append(prefix);
+    add.append(text);
+    s_log_text.append(add);
 
     // Bound the transcript so a long chat can't grow this string (and the label
     // it backs) without limit. Drop whole lines from the front once over cap.
-    constexpr size_t kLogMax = 8000;
-    if (s_log_text.size() > kLogMax) {
-        size_t cut = s_log_text.size() - kLogMax;
+    if (s_log_text.size() > kLogHigh) {
+        size_t cut = s_log_text.size() - kLogLow;
         size_t nl = s_log_text.find('\n', cut);
         s_log_text.erase(0, nl == std::string::npos ? cut : nl + 1);
-    }
-
-    lv_label_set_text(s_log_label, s_log_text.c_str());
-    if (s_log_scroll) {
-        lv_obj_update_layout(s_log_scroll);
-        lv_obj_scroll_to_y(s_log_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+        lv_label_set_text(s_log_label, s_log_text.c_str());
+    } else {
+        lv_label_ins_text(s_log_label, LV_LABEL_POS_LAST, add.c_str());
     }
 }
 
@@ -903,6 +916,7 @@ static void enter(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_log_label, UI_COLOR_FG, 0);
     lv_obj_set_style_text_font(s_log_label, get_chat_font(), 0);
     lv_label_set_text(s_log_label, "");
+    lv_obj_add_event_cb(s_log_label, log_size_changed_cb, LV_EVENT_SIZE_CHANGED, nullptr);
 
     // The log is added to the focus group so the encoder/scrollwheel can
     // drive it. LVGL's default behavior on a focused scrollable container

@@ -45,7 +45,9 @@ static void disconnect_btn_cb(lv_event_t *e)
 static void forward_key_cb(int state, char &c)
 {
     if (state == 1) {
-        hw_set_ble_kb_char(&c);
+        // P6.40: hw_set_ble_kb_char takes a C string; &c alone has no NUL.
+        const char s[2] = {c, '\0'};
+        hw_set_ble_kb_char(s);
     }
 }
 

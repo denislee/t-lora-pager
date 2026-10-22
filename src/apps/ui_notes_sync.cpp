@@ -179,27 +179,39 @@ static void bg_log_appendf(const char *fmt, ...)
     bg_log_append(buf);
 }
 
+// P7.18: trim only past kLogHigh, down to at most kLogLow at a line
+// boundary, so the full label re-set happens once per ~2 KB of new text.
+static constexpr size_t kLogHigh = 8000;
+static constexpr size_t kLogLow  = 6000;
+
+// LV_EVENT_SIZE_CHANGED on s_log_label: scroll to the newest line after the
+// normal layout pass instead of forcing lv_obj_update_layout per append.
+static void log_size_changed_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_log_scroll) lv_obj_scroll_to_y(s_log_scroll, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
 static void log_append(const char *line)
 {
-    if (line) s_log_text.append(line);
-    s_log_text.push_back('\n');
+    std::string add = line ? line : "";
+    add.push_back('\n');
+    s_log_text.append(add);
 
     // Bound the transcript so a long sync run can't grow this string (and
     // the label it backs) without limit. Drop whole lines from the front
     // once over cap — mirrors ui_chat.cpp's log_append.
-    constexpr size_t kLogMax = 8000;
-    if (s_log_text.size() > kLogMax) {
-        size_t cut = s_log_text.size() - kLogMax;
+    bool trimmed = false;
+    if (s_log_text.size() > kLogHigh) {
+        size_t cut = s_log_text.size() - kLogLow;
         size_t nl = s_log_text.find('\n', cut);
         s_log_text.erase(0, nl == std::string::npos ? cut : nl + 1);
+        trimmed = true;
     }
 
     if (s_log_label) {
-        lv_label_set_text(s_log_label, s_log_text.c_str());
-        if (s_log_scroll) {
-            lv_obj_update_layout(s_log_scroll);
-            lv_obj_scroll_to_y(s_log_scroll, LV_COORD_MAX, LV_ANIM_OFF);
-        }
+        if (trimmed) lv_label_set_text(s_log_label, s_log_text.c_str());
+        else lv_label_ins_text(s_log_label, LV_LABEL_POS_LAST, add.c_str());
     }
 }
 
@@ -632,6 +644,7 @@ static void enter(lv_obj_t *parent)
     lv_obj_set_style_text_color(s_log_label, UI_COLOR_FG, 0);
     lv_obj_set_style_text_font(s_log_label, &lv_font_montserrat_12, 0);
     lv_label_set_text(s_log_label, "");
+    lv_obj_add_event_cb(s_log_label, log_size_changed_cb, LV_EVENT_SIZE_CHANGED, nullptr);
 }
 
 static void exit_cb(lv_obj_t *) {

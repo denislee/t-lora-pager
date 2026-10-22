@@ -24,6 +24,7 @@
 #include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/event_groups.h>
 #endif
 
 /* When notes_crypto is enabled+unlocked, the text I/O wrappers below
@@ -37,10 +38,17 @@ using hal::NOTES_DIR;
 using hal::NOTES_PREFIX;
 
 #ifdef ARDUINO
-// IS.2 background save. Defined below hw_save_preferred_file.
-static void wait_pending_save();
+// IS.2 background save. Defined below hw_save_preferred_file. P7.19: callers
+// wait only for a save that can affect them; paths are normalize_path()ed.
+static void wait_pending_save();                        // any save (writers, note listings)
+static void wait_pending_save_for(const char *path);    // a save of exactly `path`
+static void wait_pending_save_under(const char *path);  // ... of `path` or anything under it
+static void wait_pending_save_in_dir(const char *dir);  // ... of a direct child of `dir`
 #else
 static inline void wait_pending_save() {}
+static inline void wait_pending_save_for(const char *) {}
+static inline void wait_pending_save_under(const char *) {}
+static inline void wait_pending_save_in_dir(const char *) {}
 #endif
 
 #ifdef ARDUINO
@@ -225,11 +233,11 @@ void hw_set_filesystem_dirty(bool dirty)
 
 bool hw_delete_file(const char *path)
 {
-    wait_pending_save();
     hw_set_filesystem_dirty(true);
 #ifdef ARDUINO
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
 
     bool res_sd = false;
     bool sd_online = (HW_SD_ONLINE & hw_get_device_online());
@@ -283,10 +291,10 @@ bool hw_delete_path(const char *path, bool use_sd)
 {
     hw_set_filesystem_dirty(true);
 #ifdef ARDUINO
-    wait_pending_save();
     if (!path || !path[0]) return false;
     char buf[256];
     normalize_path(path, buf, sizeof(buf));
+    wait_pending_save_under(buf);
     std::string str(buf); // delete_path_recursive uses std::string children list
     if (use_sd) {
         if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
@@ -304,9 +312,9 @@ bool hw_delete_path(const char *path, bool use_sd)
 bool hw_read_file(const char *path, std::string &content)
 {
 #ifdef ARDUINO
-    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
     File f;
     core::MaybeSpiLock lock;
     bool is_sd = (HW_SD_ONLINE & hw_get_device_online());
@@ -349,9 +357,9 @@ bool hw_read_file(const char *path, std::string &content)
 size_t hw_get_file_size(const char *path)
 {
 #ifdef ARDUINO
-    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
     File f;
     core::MaybeSpiLock lock;
     bool is_sd = (HW_SD_ONLINE & hw_get_device_online());
@@ -381,9 +389,9 @@ bool hw_read_internal_bytes_raw(const char *path, std::vector<uint8_t> &buf)
 {
     buf.clear();
 #ifdef ARDUINO
-    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
     return hal::fs_read_all(FFat, str, buf);
 #else
     (void)path;
@@ -395,10 +403,10 @@ bool hw_read_sd_bytes_raw(const char *path, std::vector<uint8_t> &buf)
 {
     buf.clear();
 #ifdef ARDUINO
-    wait_pending_save();
     if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
     core::ScopedSpiLock lock;
     return hal::fs_read_all(SD, str, buf);
 #else
@@ -412,11 +420,11 @@ bool hw_read_sd_stream(const char *path, size_t chunk_bytes,
                        void *user)
 {
 #ifdef ARDUINO
-    wait_pending_save();
     if (!sink || chunk_bytes == 0) return false;
     if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
 
     File f;
     { core::ScopedSpiLock lock; f = SD.open(str, FILE_READ); }
@@ -581,7 +589,11 @@ void hw_list_internal_entries(std::vector<HwDirEntry> &list, const char *filter_
     list.clear();
     if (!dirname || !dirname[0]) dirname = "/";
 #ifdef ARDUINO
-    wait_pending_save();
+    {
+        char dir[256];
+        normalize_path(dirname, dir, sizeof(dir));
+        wait_pending_save_in_dir(dir);
+    }
     list_entries(list, FFat, dirname, filter_ext);
 #else
     bool all = !(filter_ext && filter_ext[0]);
@@ -610,7 +622,11 @@ void hw_list_sd_entries(std::vector<HwDirEntry> &list, const char *filter_ext,
     list.clear();
     if (!dirname || !dirname[0]) dirname = "/";
 #ifdef ARDUINO
-    wait_pending_save();
+    {
+        char dir[256];
+        normalize_path(dirname, dir, sizeof(dir));
+        wait_pending_save_in_dir(dir);
+    }
     if (HW_SD_ONLINE & hw_get_device_online()) {
         core::ScopedSpiLock lock;
         list_entries(list, SD, dirname, filter_ext);
@@ -851,8 +867,66 @@ struct AsyncSave {
     std::string       content;
     hw_save_fail_cb_t on_fail;
 };
-volatile bool s_save_pending = false;
-TaskHandle_t  s_save_task    = nullptr;
+// P7.19: s_save_pending and s_save_path change together under s_save_mux, so a
+// reader never pairs the flag with another save's path. Waiters block on
+// SAVE_IDLE_BIT (set while no save is in flight) instead of polling every 5 ms.
+volatile bool      s_save_pending   = false;
+char               s_save_path[256] = "";   // normalize_path() form
+portMUX_TYPE       s_save_mux       = portMUX_INITIALIZER_UNLOCKED;
+EventGroupHandle_t s_save_eg        = nullptr;   // created by the first async save
+constexpr EventBits_t SAVE_IDLE_BIT = BIT0;
+TaskHandle_t       s_save_task      = nullptr;
+
+void save_set_idle()
+{
+    taskENTER_CRITICAL(&s_save_mux);
+    s_save_pending = false;
+    s_save_path[0] = '\0';
+    taskEXIT_CRITICAL(&s_save_mux);
+    if (s_save_eg) xEventGroupSetBits(s_save_eg, SAVE_IDLE_BIT);
+}
+
+enum class SaveMatch { Any, Path, Under, InDir };
+
+// Length of `p` without trailing slashes ("/" stays 1).
+size_t trimmed_len(const char *p)
+{
+    size_t n = strlen(p);
+    while (n > 1 && p[n - 1] == '/') --n;
+    return n;
+}
+
+bool save_path_matches(const char *pending, const char *p, SaveMatch m)
+{
+    switch (m) {
+    case SaveMatch::Any:
+        return true;
+    case SaveMatch::Path:
+        return strcmp(pending, p) == 0;
+    case SaveMatch::Under: {
+        size_t n = trimmed_len(p);
+        if (n == 1 && p[0] == '/') return true;
+        return strncmp(pending, p, n) == 0 && (pending[n] == '\0' || pending[n] == '/');
+    }
+    case SaveMatch::InDir: {
+        const char *slash = strrchr(pending, '/');
+        if (!slash) return false;
+        size_t parent = slash == pending ? 1 : (size_t)(slash - pending);  // parent of "/x" is "/"
+        return trimmed_len(p) == parent && strncmp(pending, p, parent) == 0;
+    }
+    }
+    return true;
+}
+
+void wait_save(const char *p, SaveMatch m)
+{
+    if (!s_save_eg) return;                                   // no async save has run yet
+    if (xTaskGetCurrentTaskHandle() == s_save_task) return;   // the worker's own nested calls
+    taskENTER_CRITICAL(&s_save_mux);
+    bool hit = s_save_pending && (m == SaveMatch::Any || (p && save_path_matches(s_save_path, p, m)));
+    taskEXIT_CRITICAL(&s_save_mux);
+    if (hit) xEventGroupWaitBits(s_save_eg, SAVE_IDLE_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
+}
 
 void save_task(void *arg)
 {
@@ -863,19 +937,18 @@ void save_task(void *arg)
     if (!ok && job->on_fail) job->on_fail(job->path.c_str(), err);
     delete job;
     s_save_task = nullptr;
-    s_save_pending = false;
+    save_set_idle();
     vTaskDelete(nullptr);
 }
 } // namespace
 
-// Readers poll rather than block on a semaphore: a save is tens to a few
-// hundred ms and this only runs when something touches storage right after
-// leaving the editor. The worker's own nested calls must not wait on itself.
-static void wait_pending_save()
-{
-    if (s_save_pending && xTaskGetCurrentTaskHandle() == s_save_task) return;
-    while (s_save_pending) vTaskDelay(pdMS_TO_TICKS(5));
-}
+// A save is tens of ms to a full PBKDF2 when the prewarm slot was consumed,
+// so only wait for one that can affect the caller (P7.19). The worker's own
+// nested calls never wait on itself.
+static void wait_pending_save() { wait_save(nullptr, SaveMatch::Any); }
+static void wait_pending_save_for(const char *path) { wait_save(path, SaveMatch::Path); }
+static void wait_pending_save_under(const char *path) { wait_save(path, SaveMatch::Under); }
+static void wait_pending_save_in_dir(const char *dir) { wait_save(dir, SaveMatch::InDir); }
 
 bool hw_save_preferred_file_async(const char *path, std::string content,
                                   hw_save_fail_cb_t on_fail)
@@ -883,11 +956,25 @@ bool hw_save_preferred_file_async(const char *path, std::string content,
     wait_pending_save();
     hw_set_filesystem_dirty(true);   // caches see the change before the write lands
     AsyncSave *job = new AsyncSave{path, std::move(content), on_fail};
-    s_save_pending = true;
+    if (!s_save_eg) {
+        s_save_eg = xEventGroupCreate();
+        if (s_save_eg) xEventGroupSetBits(s_save_eg, SAVE_IDLE_BIT);
+    }
+    if (s_save_eg) {
+        char norm[256];
+        normalize_path(path, norm, sizeof(norm));
+        xEventGroupClearBits(s_save_eg, SAVE_IDLE_BIT);
+        taskENTER_CRITICAL(&s_save_mux);
+        s_save_pending = true;
+        memcpy(s_save_path, norm, sizeof(s_save_path));
+        taskEXIT_CRITICAL(&s_save_mux);
+    }
     // 10 KB: AES-CBC + a possible PBKDF2 derive + FFat/SD writes; no TLS.
-    if (xTaskCreatePinnedToCore(save_task, "note_save", 10240, job, 2, &s_save_task, 0) != pdPASS) {
+    // Without the event group nobody could wait for it, so save inline.
+    if (!s_save_eg ||
+        xTaskCreatePinnedToCore(save_task, "note_save", 10240, job, 2, &s_save_task, 0) != pdPASS) {
         s_save_task = nullptr;
-        s_save_pending = false;
+        save_set_idle();
         std::string err;
         bool ok = save_preferred_file_impl(job->path.c_str(), job->content.c_str(), &err, false);
         if (!ok && on_fail) on_fail(job->path.c_str(), err);
@@ -917,9 +1004,9 @@ bool hw_read_preferred_file_snippet(const char *path, std::string &content, size
     content.clear();
     if (truncated) *truncated = false;
 #ifdef ARDUINO
-    wait_pending_save();
     char str[256];
     normalize_path(path, str, sizeof(str));
+    wait_pending_save_for(str);
 
     File f = FFat.open(str, FILE_READ);
     core::MaybeSpiLock lock;

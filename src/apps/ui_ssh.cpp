@@ -25,6 +25,8 @@
  *   timers:  poll_timer_                  — lv_timer_del + nullptr
  *   tasks:   backend_->disconnect()       — kills SSH worker task, frees
  *                                            shared_ptr in unique_ptr reset
+ *            (LibSshBackend wake_fd_ eventfd — closed in the destructor
+ *             after the worker has exited, P7.43)
  *   ui:      ui_hide_back_button()         — releases shared status-bar hook
  *   statics: s_prompt_app                 — cleared if this app owns it
  * Unlike most apps, this one holds state as App members (poll_timer_,
@@ -56,6 +58,9 @@
 #if defined(ARDUINO) && defined(USING_LIBSSH)
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
+#include <sys/select.h>
+#include <unistd.h>
+#include <esp_vfs_eventfd.h>
 #endif
 
 // Tracks whether any SSH backend is currently in the Connected state.
@@ -182,10 +187,13 @@ public:
 
     ~LibSshBackend() override {
         stop_flag_.store(true);
+        wake();
         if (task_) {
             xSemaphoreTake(done_sem_, portMAX_DELAY);
             task_ = nullptr;
         }
+        // Only after the worker is gone: it selects on this fd.
+        if (wake_fd_ >= 0) close(wake_fd_);
         if (io_mtx_)   vSemaphoreDelete(io_mtx_);
         if (done_sem_) vSemaphoreDelete(done_sem_);
     }
@@ -213,6 +221,10 @@ public:
         state_.store(State::Connecting);
 
         ensure_libssh_started();
+        // Created once per backend on this (UI) thread and closed only in the
+        // destructor, so send_bytes()/disconnect() never write to a closed or
+        // reused fd. -1 (eventfd unavailable) keeps a 50 ms select timeout.
+        if (wake_fd_ < 0 && ensure_eventfd_registered()) wake_fd_ = eventfd(0, 0);
 
         BaseType_t ok = xTaskCreatePinnedToCore(
             task_trampoline, "ssh_app", 32 * 1024, this, 5, &task_, 0);
@@ -225,13 +237,17 @@ public:
         }
     }
 
-    void disconnect() override { stop_flag_.store(true); }
+    void disconnect() override {
+        stop_flag_.store(true);
+        wake();
+    }
 
     void send_bytes(const std::string& bytes) override {
         if (state_.load() != State::Connected || bytes.empty()) return;
         xSemaphoreTake(io_mtx_, portMAX_DELAY);
         in_buf_ += bytes;
         xSemaphoreGive(io_mtx_);
+        wake();   // P7.43: the session task sends it now, not on its next poll
     }
 
     std::string read_pending() override {
@@ -342,7 +358,17 @@ private:
         uint32_t last_wm_ms = 0;
 #endif
 
-        char buf[256];
+        // P7.43: drain everything readable into a 4 KB buffer (heap: > 1 KB
+        // goes to PSRAM, P7.48), send queued input, then sleep in select() on
+        // the session socket and wake_fd_ until the server sends or the UI
+        // queues input / disconnects. Replaces 2 x 256 B reads + a 50 ms poll.
+        // Backpressure: stop reading while kOutCap bytes wait for the UI
+        // (poll_tick_cb drains every 100 ms), so one tick never feeds the
+        // terminal more than ~16 KB; TCP flow control slows the server.
+        constexpr size_t kReadBuf = 4096;
+        constexpr size_t kOutCap = 16 * 1024;
+        std::unique_ptr<char[]> buf(new char[kReadBuf]);
+        const int sock = ssh_get_fd(sess);
         while (!stop_flag_.load()) {
 #ifdef INPUT_PROFILE
             uint32_t wm_now = millis();
@@ -353,12 +379,23 @@ private:
             }
 #endif
 
-            int n = ssh_channel_read_nonblocking(ch, buf, sizeof(buf), 0);
-            if (n == SSH_ERROR) break;
-            if (n > 0) push_output(std::string(buf, buf + n));
-
-            n = ssh_channel_read_nonblocking(ch, buf, sizeof(buf), 1);
-            if (n > 0) push_output(std::string(buf, buf + n));
+            const size_t pending = pending_output_size();
+            const size_t room = pending < kOutCap ? kOutCap - pending : 0;
+            std::string out;
+            bool read_err = false;
+            for (int is_stderr = 0; is_stderr < 2 && !read_err; ++is_stderr) {
+                while (out.size() < room) {
+                    int n = ssh_channel_read_nonblocking(ch, buf.get(), kReadBuf, is_stderr);
+                    if (n == SSH_ERROR) {
+                        read_err = is_stderr == 0;   // as before: only stdout errors end it
+                        break;
+                    }
+                    if (n <= 0) break;               // nothing left (0) or SSH_EOF
+                    out.append(buf.get(), n);
+                }
+            }
+            push_output(out);
+            if (read_err) break;
 
             if (ssh_channel_is_eof(ch)) break;
 
@@ -371,7 +408,13 @@ private:
                 if (ssh_channel_write(ch, in.data(), in.size()) == SSH_ERROR) break;
             }
 
-            vTaskDelay(pdMS_TO_TICKS(50));
+            // Something moved: look again before sleeping (more may be ready).
+            if (!out.empty() || !in.empty()) continue;
+            if (room == 0) {
+                vTaskDelay(pdMS_TO_TICKS(20));   // the UI hasn't drained yet
+                continue;
+            }
+            wait_io(sock);
         }
 
         push_output("\nConnection closed.\n");
@@ -381,6 +424,64 @@ private:
         ssh_free(sess);
         s_ssh_session_active = false;
         state_.store(State::Idle);
+    }
+
+    size_t pending_output_size() {
+        size_t n = SIZE_MAX;   // lock busy: treat as full and retry shortly
+        if (xSemaphoreTake(io_mtx_, pdMS_TO_TICKS(20)) == pdTRUE) {
+            n = out_buf_.size();
+            xSemaphoreGive(io_mtx_);
+        }
+        return n;
+    }
+
+    /** Wake the session task out of wait_io (UI thread / destructor). */
+    void wake() {
+        if (wake_fd_ < 0) return;
+        uint64_t one = 1;
+        (void)write(wake_fd_, &one, sizeof(one));
+    }
+
+    /** Sleep until the socket is readable, wake() was called, or the timeout:
+     *  1 s with the wake fd (a safety net; stop and input both wake it),
+     *  50 ms without it (the old cadence, but server data still wakes it). */
+    void wait_io(int sock) {
+        if (sock < 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            return;
+        }
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(sock, &rd);
+        int maxfd = sock;
+        if (wake_fd_ >= 0) {
+            FD_SET(wake_fd_, &rd);
+            if (wake_fd_ > maxfd) maxfd = wake_fd_;
+        }
+        timeval tv;
+        tv.tv_sec = wake_fd_ >= 0 ? 1 : 0;
+        tv.tv_usec = wake_fd_ >= 0 ? 0 : 50 * 1000;
+        int r = select(maxfd + 1, &rd, nullptr, nullptr, &tv);
+        if (r < 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));   // select failed: degrade to the old poll
+            return;
+        }
+        if (r > 0 && wake_fd_ >= 0 && FD_ISSET(wake_fd_, &rd)) {
+            uint64_t v;
+            (void)read(wake_fd_, &v, sizeof(v));   // reset the counter
+        }
+    }
+
+    static bool ensure_eventfd_registered() {
+        static std::atomic<int> st{0};   // 0 = not tried, 1 = ok, -1 = failed
+        int cur = st.load();
+        if (cur != 0) return cur > 0;
+        esp_vfs_eventfd_config_t cfg = ESP_VFS_EVENTD_CONFIG_DEFAULT();
+        esp_err_t err = esp_vfs_eventfd_register(&cfg);
+        // INVALID_STATE: someone else already registered the driver.
+        bool ok = err == ESP_OK || err == ESP_ERR_INVALID_STATE;
+        st.store(ok ? 1 : -1);
+        return ok;
     }
 
     void push_output(const std::string& s) {
@@ -413,6 +514,7 @@ private:
     std::string        out_buf_;
     std::string        err_;
     TaskHandle_t       task_     = nullptr;
+    int                wake_fd_  = -1;   // eventfd; see connect()
 };
 #endif  // ARDUINO && USING_LIBSSH
 

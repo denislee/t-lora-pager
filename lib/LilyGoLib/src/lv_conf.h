@@ -176,7 +176,11 @@
         /*Allow buffering some shadow calculation.
         *LV_DRAW_SW_SHADOW_CACHE_SIZE is the max. shadow size to buffer, where shadow size is `shadow_width + radius`
         *Caching has LV_DRAW_SW_SHADOW_CACHE_SIZE^2 RAM cost*/
-        #define LV_DRAW_SW_SHADOW_CACHE_SIZE 0
+        /* [LOCAL PATCH] P7.22: was 0. create_msgbox draws shadow 18 + frame_radius <= 8,
+         * a 26 px corner (LVGL caches only when corner^2 < size^2): its blurred corner
+         * is reused instead of recomputed on every redraw that touches the modal.
+         * Single entry, keyed (corner, radius); same algorithm, so pixels are identical. */
+        #define LV_DRAW_SW_SHADOW_CACHE_SIZE 28
 
         /* Set number of maximally cached circle data.
         * The circumference of 1/4 circle are saved for anti-aliasing

@@ -19,6 +19,11 @@
 #include <NimBLEHIDDevice.h>
 
 #include <atomic>
+#include <cstring>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 namespace hal {
 namespace ble_hid {
@@ -34,6 +39,16 @@ constexpr uint32_t REPORT_GAP_MS = 7;
  * so a key-up is not lost and left repeating on the host (P7.31). */
 constexpr int NOTIFY_RETRIES = 25;
 constexpr uint32_t NOTIFY_RETRY_MS = 2;
+
+/** P7.21: reports go through a queue to g_tx_task, which owns the notify, the
+ * P7.31 retries and the REPORT_GAP_MS gap, so a caller (the LVGL thread for the
+ * media remote and the keyboard forward) no longer blocks ~14 ms per key. One
+ * consumer keeps the order. 32 reports = 16 presses of backlog. */
+constexpr UBaseType_t TX_QUEUE_LEN = 32;
+/** How long a producer waits for room before dropping a press (backlog only). */
+constexpr TickType_t TX_ENQUEUE_WAIT = pdMS_TO_TICKS(100);
+/** Same as ble_kb_ka, whose release_all() ran this notify path before. */
+constexpr uint32_t TX_TASK_STACK = 3072;
 
 // clang-format off
 const uint8_t REPORT_MAP[] = {
@@ -217,6 +232,17 @@ class InputCallbacks : public NimBLECharacteristicCallbacks {
 
 InputCallbacks g_input_callbacks;
 
+enum TxKind : uint8_t { TX_KEYBOARD, TX_MEDIA };
+
+struct TxItem {
+    uint8_t kind;  // TxKind
+    uint8_t len;
+    uint8_t data[8];
+};
+
+QueueHandle_t g_tx_queue = nullptr;
+TaskHandle_t g_tx_task = nullptr;
+
 /**
  * Notify `chr` to each keyboard peer. NimBLE's handle-less notify() would
  * reach every connected peer, subscribed or not — including a companion-only
@@ -237,13 +263,62 @@ void send_report(NimBLECharacteristic *chr, const uint8_t *data, size_t len) {
     delay(REPORT_GAP_MS);
 }
 
-void send_keyboard(const KeyReport &r) {
-    send_report(g_input_kb, reinterpret_cast<const uint8_t *>(&r), sizeof(r));
+void send_item(const TxItem &it) {
+    send_report(it.kind == TX_MEDIA ? g_input_media : g_input_kb, it.data, it.len);
 }
 
-void send_media(uint16_t bits) {
-    const uint8_t r[2] = {static_cast<uint8_t>(bits & 0xFF), static_cast<uint8_t>(bits >> 8)};
-    send_report(g_input_media, r, sizeof(r));
+/** Sole sender while it exists. Created once in build() and never deleted, so
+ * it is never killed holding a NimBLE lock; idle, it blocks with no wakes.
+ * Reports queued before a disconnect are dropped by send_report's connected()
+ * check. */
+void tx_task(void *) {
+    TxItem it;
+    for (;;) {
+        if (xQueueReceive(g_tx_queue, &it, portMAX_DELAY) == pdTRUE) {
+            send_item(it);
+        }
+    }
+}
+
+TxItem keyboard_item(const KeyReport &r) {
+    TxItem it{};
+    it.kind = TX_KEYBOARD;
+    it.len = sizeof(r);
+    memcpy(it.data, &r, sizeof(r));
+    return it;
+}
+
+TxItem media_item(uint16_t bits) {
+    TxItem it{};
+    it.kind = TX_MEDIA;
+    it.len = 2;
+    it.data[0] = static_cast<uint8_t>(bits & 0xFF);
+    it.data[1] = static_cast<uint8_t>(bits >> 8);
+    return it;
+}
+
+/**
+ * Queue two reports back to back (press + release, or the two empty reports).
+ * Waits for room for both, so a full queue never keeps a press and drops its
+ * release (a key left repeating on the host). Without the task (creation
+ * failed) it sends inline, as before P7.21.
+ */
+void submit_pair(const TxItem &a, const TxItem &b) {
+    if (!g_tx_queue || !g_tx_task) {
+        send_item(a);
+        send_item(b);
+        return;
+    }
+    const TickType_t start = xTaskGetTickCount();
+    while (uxQueueSpacesAvailable(g_tx_queue) < 2) {
+        if (xTaskGetTickCount() - start >= TX_ENQUEUE_WAIT) {
+            log_w("[hid] tx queue full; report pair dropped");
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(REPORT_GAP_MS));
+    }
+    xQueueSend(g_tx_queue, &a, TX_ENQUEUE_WAIT);
+    xQueueSend(g_tx_queue, &b, TX_ENQUEUE_WAIT);
 }
 
 }  // namespace
@@ -264,6 +339,14 @@ void build(NimBLEServer *server) {
     g_hid->setHidInfo(0x00, 0x01);
     g_hid->setReportMap(const_cast<uint8_t *>(REPORT_MAP), sizeof(REPORT_MAP));
     g_hid->setBatteryLevel(100);
+
+    g_tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(TxItem));
+    if (g_tx_queue &&
+        xTaskCreate(tx_task, "ble_hid_tx", TX_TASK_STACK, nullptr, tskIDLE_PRIORITY + 2,
+                    &g_tx_task) != pdPASS) {
+        g_tx_task = nullptr;
+        log_e("[hid] tx task create failed; reports sent inline");
+    }
 }
 
 void on_disconnect(uint16_t conn_handle) { peer_remove(conn_handle); }
@@ -296,8 +379,7 @@ void type(const char *text) {
         KeyReport down{};
         down.modifiers = (m & SHIFT) ? 0x02 : 0x00;  // left shift
         down.keys[0] = m & 0x7F;
-        send_keyboard(down);
-        send_keyboard(KeyReport{});
+        submit_pair(keyboard_item(down), keyboard_item(KeyReport{}));
     }
 }
 
@@ -305,13 +387,11 @@ void media_key(MediaKey key) {
     if (!connected()) {
         return;
     }
-    send_media(static_cast<uint16_t>(key));
-    send_media(0);
+    submit_pair(media_item(static_cast<uint16_t>(key)), media_item(0));
 }
 
 void release_all() {
-    send_keyboard(KeyReport{});
-    send_media(0);
+    submit_pair(keyboard_item(KeyReport{}), media_item(0));
 }
 
 }  // namespace ble_hid

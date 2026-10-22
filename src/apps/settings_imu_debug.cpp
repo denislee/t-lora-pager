@@ -23,6 +23,7 @@
 #include "settings_internal.h"
 #include "../hal/sensors.h"
 #include "../core/kb_lock.h"
+#include <string.h>
 
 #ifdef ARDUINO
 #include <LilyGoLib.h>
@@ -156,6 +157,17 @@ void serial_dump_cb(lv_event_t *)
     ui_msg_pop_up("IMU", "BHI260 not online — nothing to dump.");
 }
 
+// P7.22: render_tick runs at 5 Hz; most rows (firmware ids, counters while
+// idle) never change, so only touch a label whose text actually differs.
+// lv_label_set_text invalidates the label even for identical text.
+bool set_if_changed(lv_obj_t *label, const char *txt)
+{
+    const char *cur = lv_label_get_text(label);
+    if (cur && strcmp(cur, txt) == 0) return false;
+    lv_label_set_text(label, txt);
+    return true;
+}
+
 void render_tick(lv_timer_t *)
 {
     // Only poll the IMU while this page is actually on screen. Without this the
@@ -175,7 +187,7 @@ void render_tick(lv_timer_t *)
         snprintf(buf, sizeof(buf), "BHI260=%s  BMA423=%s",
                  d.bhi260_online ? "yes" : "no",
                  d.bma423_online ? "yes" : "no");
-        lv_label_set_text(lbl.online, buf);
+        set_if_changed(lbl.online, buf);
     }
 
 #ifdef ARDUINO
@@ -186,7 +198,7 @@ void render_tick(lv_timer_t *)
     uint32_t probe = hw_get_device_online();
     if (lbl.probe_hex) {
         snprintf(buf, sizeof(buf), "0x%08X", (unsigned)probe);
-        lv_label_set_text(lbl.probe_hex, buf);
+        set_if_changed(lbl.probe_hex, buf);
     }
     if (lbl.probe_decode) {
         snprintf(buf, sizeof(buf),
@@ -201,7 +213,7 @@ void render_tick(lv_timer_t *)
                  (probe & HW_EXPAND_ONLINE)   ? "EXP "   : "",
                  (probe & HW_CODEC_ONLINE)    ? "AUD "   : "",
                  (probe & HW_GAUGE_ONLINE)    ? "GAU "   : "");
-        lv_label_set_text(lbl.probe_decode, buf);
+        set_if_changed(lbl.probe_decode, buf);
     }
 #endif
 
@@ -217,80 +229,79 @@ void render_tick(lv_timer_t *)
         }
         if (lbl.fw_kernel) {
             snprintf(buf, sizeof(buf), "%u", info.kernel_version);
-            lv_label_set_text(lbl.fw_kernel, buf);
+            set_if_changed(lbl.fw_kernel, buf);
         }
         if (lbl.fw_user) {
             snprintf(buf, sizeof(buf), "%u", info.user_version);
-            lv_label_set_text(lbl.fw_user, buf);
+            set_if_changed(lbl.fw_user, buf);
         }
         if (lbl.fw_rom) {
             snprintf(buf, sizeof(buf), "%u", info.rom_version);
-            lv_label_set_text(lbl.fw_rom, buf);
+            set_if_changed(lbl.fw_rom, buf);
         }
         if (lbl.fw_product) {
             snprintf(buf, sizeof(buf), "0x%02X", info.product_id);
-            lv_label_set_text(lbl.fw_product, buf);
+            set_if_changed(lbl.fw_product, buf);
         }
         if (lbl.fw_boot) {
             snprintf(buf, sizeof(buf), "0x%02X", info.boot_status);
-            lv_label_set_text(lbl.fw_boot, buf);
+            set_if_changed(lbl.fw_boot, buf);
         }
         if (lbl.fw_host) {
             snprintf(buf, sizeof(buf), "0x%02X", info.host_status);
-            lv_label_set_text(lbl.fw_host, buf);
+            set_if_changed(lbl.fw_host, buf);
         }
         if (lbl.fw_feat) {
             snprintf(buf, sizeof(buf), "0x%02X", info.feat_status);
-            lv_label_set_text(lbl.fw_feat, buf);
+            set_if_changed(lbl.fw_feat, buf);
         }
         if (lbl.fw_err) {
             // Pinned SensorLib has no getErrorText(); just show the raw byte.
             // 0x00 = no error. Any non-zero value is bad — printInfo() on
             // serial decodes it.
             snprintf(buf, sizeof(buf), "0x%02X", info.sensor_error);
-            lv_label_set_text(lbl.fw_err, buf);
+            set_if_changed(lbl.fw_err, buf);
         }
     }
 #endif
 
     if (lbl.count) {
         snprintf(buf, sizeof(buf), "%u", (unsigned)d.sensor_count);
-        lv_label_set_text(lbl.count, buf);
+        set_if_changed(lbl.count, buf);
     }
     if (lbl.accel) {
         snprintf(buf, sizeof(buf), "cfg=%d  evt=%u",
                  (int)d.accel_configured, (unsigned)d.accel_events);
-        lv_label_set_text(lbl.accel, buf);
+        set_if_changed(lbl.accel, buf);
     }
     if (lbl.grv) {
         snprintf(buf, sizeof(buf), "cfg=%d  evt=%u",
                  (int)d.grv_configured, (unsigned)d.grv_events);
-        lv_label_set_text(lbl.grv, buf);
+        set_if_changed(lbl.grv, buf);
     }
     if (lbl.dev_orient) {
         snprintf(buf, sizeof(buf), "cfg=%d  evt=%u",
                  (int)d.dev_orient_configured,
                  (unsigned)d.dev_orient_events);
-        lv_label_set_text(lbl.dev_orient, buf);
+        set_if_changed(lbl.dev_orient, buf);
     }
     if (lbl.accel_xyz) {
         snprintf(buf, sizeof(buf), "%+.2f  %+.2f  %+.2f",
                  (double)d.accel_g_x, (double)d.accel_g_y,
                  (double)d.accel_g_z);
-        lv_label_set_text(lbl.accel_xyz, buf);
+        set_if_changed(lbl.accel_xyz, buf);
     }
     if (lbl.roll_pitch) {
         snprintf(buf, sizeof(buf), "r=%+.0f  p=%+.0f  y=%+.0f",
                  (double)p.roll, (double)p.pitch, (double)p.heading);
-        lv_label_set_text(lbl.roll_pitch, buf);
+        set_if_changed(lbl.roll_pitch, buf);
     }
     if (lbl.do_byte) {
         snprintf(buf, sizeof(buf), "%u  (orient=%u)",
                  (unsigned)d.dev_orient_value, (unsigned)p.orientation);
-        lv_label_set_text(lbl.do_byte, buf);
+        set_if_changed(lbl.do_byte, buf);
     }
-    if (lbl.face_down) {
-        lv_label_set_text(lbl.face_down, fd ? "YES" : "no");
+    if (lbl.face_down && set_if_changed(lbl.face_down, fd ? "YES" : "no")) {
         lv_obj_set_style_text_color(lbl.face_down,
                                     fd ? UI_COLOR_ACCENT : UI_COLOR_FG, 0);
     }
@@ -370,6 +381,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lbl.roll_pitch = add_row(sub_page, "roll/pitch/yaw", "...");
     lbl.do_byte    = add_row(sub_page, "DO byte", "...");
     lbl.face_down  = add_row(sub_page, "Face down?", "no");
+    lv_obj_set_style_text_color(lbl.face_down, UI_COLOR_FG, 0);  // render_tick recolours only on change (P7.22)
 
     add_section("Actions");
     settings_action_row(sub_page, "Re-init IMU", "Run", reinit_cb, 70);

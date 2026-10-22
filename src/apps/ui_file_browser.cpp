@@ -8,13 +8,19 @@
  *            src_btn_int, src_btn_sd,
  *            filter_btn_txt / _non_txt / _all   — destroyed via lv_obj_del
  *                                                  then nulled
- * No timers, tasks, or hardware sessions are held here. If you add any,
- * list them above AND kill them in the exit path — a leaked pointer to
- * a destroyed widget crashes on next entry.
+ *   job:     s_list_job (directory listing worker, P7.19)
+ *                                              — teardown(): drain stopped,
+ *                                                a running worker detached
+ *   timers:  s_loading_timer (150 ms loader delay) — lv_timer_delete + null
+ *   modal:   s_loading (ui_loading_t)            — ui_loading_close
+ * No hardware sessions are held here. If you add cached state, list it
+ * above AND kill it in the exit path — a leaked pointer to a destroyed
+ * widget crashes on next entry.
  */
 #include "../ui_define.h"
 #include "app_registry.h"
 #include "../core/app_manager.h"
+#include "../core/one_shot_job.h"
 #include "../hal/system.h"
 #include "../hal/storage.h"
 #include "../hal/notes_crypto.h"
@@ -126,18 +132,84 @@ static void apply_filter()
               });
 }
 
-// Scan the current dir from disk into raw_cache, then rebuild the display list.
-// Call on source/dir change and after mutations (delete); filter toggles use
-// apply_filter() to avoid a redundant re-scan of the same directory.
-static void load_entries()
+// P7.19: directory listings run on a worker (SD walks hold the SPI lock at
+// 4 MHz, and the HAL may wait for a background note save), not inside the
+// LVGL click callback. The requested (source, dir) is only committed to
+// current_source/current_dir when its listing lands, so rows of the list on
+// screen keep resolving against the dir they came from.
+struct ListResult {
+    StorageSource src;
+    std::string dir;
+    std::vector<HwDirEntry> entries;
+};
+
+static void list_done(ListResult &r);
+static core::OneShotJob<ListResult> s_list_job(list_done);
+static StorageSource want_source = SOURCE_INTERNAL;
+static std::string want_dir = "/";
+
+// The loader only appears when a listing is still running after this long,
+// so a fast FFat listing doesn't flash a modal.
+static const uint32_t kLoaderDelayMs = 150;
+static ui_loading_t s_loading = {};
+static bool s_loading_open = false;
+static lv_timer_t *s_loading_timer = NULL;
+
+static void list_into(StorageSource src, const std::string &dir,
+                      std::vector<HwDirEntry> &out)
 {
-    raw_cache.clear();
-    if (current_source == SOURCE_INTERNAL) {
-        hw_list_internal_entries(raw_cache, nullptr, current_dir.c_str());
+    if (src == SOURCE_INTERNAL) {
+        hw_list_internal_entries(out, nullptr, dir.c_str());
     } else {
-        hw_list_sd_entries(raw_cache, nullptr, current_dir.c_str());
+        hw_list_sd_entries(out, nullptr, dir.c_str());
     }
-    apply_filter();
+}
+
+static void loader_hide()
+{
+    if (s_loading_timer) {
+        lv_timer_delete(s_loading_timer);
+        s_loading_timer = NULL;
+    }
+    if (s_loading_open) {
+        ui_loading_close(&s_loading);
+        s_loading_open = false;
+    }
+}
+
+static void loader_timer_cb(lv_timer_t *t)
+{
+    lv_timer_delete(t);
+    s_loading_timer = NULL;
+    if (!menu || s_loading_open || !s_list_job.busy()) return;
+    ui_loading_open(&s_loading, "Files", "Reading folder...");
+    s_loading_open = true;
+}
+
+// Scan (src, dir) into raw_cache, then rebuild the display list. Call on
+// source/dir change and after mutations (delete); filter toggles use
+// apply_filter() to avoid a redundant re-scan of the same directory. A call
+// while a listing runs re-targets it: list_done re-kicks for the newest target.
+static void kick_load(StorageSource src, const std::string &dir)
+{
+    want_source = src;
+    want_dir = dir;
+    using Job = core::OneShotJob<ListResult>;
+    // 4 KB: one directory walk into a vector, no TLS (same as notes_scan).
+    Job::Start st = s_list_job.start([src, dir]() {
+        ListResult *r = new ListResult{src, dir, {}};
+        list_into(src, dir, r->entries);
+        return r;
+    }, 4096, "files_list", 1);
+    if (st == Job::Start::Failed) {
+        ListResult r{src, dir, {}};   // no task: list inline, as before P7.19
+        list_into(src, dir, r.entries);
+        list_done(r);
+        return;
+    }
+    if (s_list_job.busy() && !s_loading_open && !s_loading_timer) {
+        s_loading_timer = lv_timer_create(loader_timer_cb, kLoaderDelayMs, NULL);
+    }
 }
 
 static std::string format_size(uint32_t bytes)
@@ -213,16 +285,12 @@ static void folder_click_cb(lv_event_t *e)
 {
     const HwDirEntry *ent = row_entry((lv_obj_t *)lv_event_get_target(e));
     if (!ent) return;
-    current_dir = join_path(current_dir, ent->path);
-    load_entries();
-    refresh_ui();
+    kick_load(current_source, join_path(current_dir, ent->path));
 }
 
 static void parent_click_cb(lv_event_t *e)
 {
-    current_dir = parent_of(current_dir);
-    load_entries();
-    refresh_ui();
+    kick_load(current_source, parent_of(current_dir));
 }
 
 static void style_toggle_btn(lv_obj_t *btn, bool active)
@@ -313,10 +381,25 @@ static void source_click_cb(lv_event_t *e)
 {
     StorageSource s = (StorageSource)(uintptr_t)lv_event_get_user_data(e);
     if (current_source != s) {
-        current_source = s;
-        current_dir = "/";
-        load_entries();
+        kick_load(s, "/");   // list_done commits the source and refreshes
+        return;
     }
+    refresh_ui();
+}
+
+// LVGL thread (OneShotJob drain, or inline on the emulator / task failure).
+static void list_done(ListResult &r)
+{
+    if (!menu) return;
+    if (r.src != want_source || r.dir != want_dir) {
+        kick_load(want_source, want_dir);   // a newer target was picked meanwhile
+        return;
+    }
+    loader_hide();
+    current_source = r.src;
+    current_dir = r.dir;
+    raw_cache = std::move(r.entries);
+    apply_filter();
     refresh_ui();
 }
 
@@ -393,8 +476,7 @@ static void delete_confirm_cb(bool confirmed, void *ud)
 
     if (confirmed && ctx) {
         if (hw_delete_path(ctx->path.c_str(), ctx->use_sd)) {
-            load_entries();
-            refresh_ui();
+            kick_load(current_source, current_dir);
         } else {
             ui_msg_pop_up("Error", ctx->is_dir ? "Failed to delete folder."
                                                : "Failed to delete file.");
@@ -502,8 +584,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
     lv_obj_set_style_pad_all(file_list, 2, 0);
     lv_obj_add_event_cb(file_list, file_list_key_cb, LV_EVENT_KEY, NULL);
 
-    load_entries();
-    refresh_ui();
+    kick_load(current_source, current_dir);   // inline on the emulator
 
     lv_menu_set_page(menu, main_page);
 
@@ -516,6 +597,10 @@ void ui_file_browser_enter(lv_obj_t *parent)
 
 void ui_file_browser_exit(lv_obj_t *parent)
 {
+    // Safe while a listing runs: teardown() detaches the worker, which then
+    // frees its own result; it never touches LVGL.
+    loader_hide();
+    s_list_job.teardown();
     ui_hide_back_button();
     disable_keyboard();
     if (menu) {

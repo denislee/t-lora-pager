@@ -43,13 +43,14 @@ bool connected();
 /** Connection handle of the first keyboard peer, or 0xFFFF when none. */
 uint16_t peer_conn_handle();
 
-/** Type `text` (ASCII; unmappable bytes are skipped). No-op when not connected. */
+/** Type `text` (ASCII; unmappable bytes are skipped). No-op when not connected.
+ *  Queued to the HID sender task (P7.21): returns before the reports go out. */
 void type(const char *text);
 
-/** Press and release one media key. No-op when not connected. */
+/** Press and release one media key. No-op when not connected. Queued (P7.21). */
 void media_key(MediaKey key);
 
-/** Send empty keyboard and media reports (also the iOS keepalive). */
+/** Send empty keyboard and media reports (also the iOS keepalive). Queued (P7.21). */
 void release_all();
 
 }  // namespace ble_hid
