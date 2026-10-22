@@ -183,6 +183,14 @@ void save_user_setting_nvs()
     prefs.putBytes(NVS_NAME, buf, sizeof(buf));
 }
 
+// P6.3 / BT.5: skip the boot-time 8 MB PSRAM write/read-back walk. Overrides
+// the weak testSPIRAM() in arduino-esp32 2.0.17 cores/esp32/esp32-hal-psram.c,
+// which psramInit() calls (only when CONFIG_SPIRAM_BOOT_INIT is unset: the
+// qio_qspi sdkconfig used by the pager and Ultra; the S3's qio_opi build
+// sets BOOT_INIT and never reaches this). Cost: no boot-time PSRAM defect
+// detection; allocation failures still surface through the existing asserts.
+extern "C" bool testSPIRAM(void) { return true; }
+
 #endif
 
 device_const_var_t dev_conts_var = {

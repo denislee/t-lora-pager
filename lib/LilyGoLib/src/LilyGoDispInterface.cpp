@@ -691,6 +691,8 @@ bool LilyGoDispArduinoSPI::init(int sck,
         writeParams(t[i].cmd, (uint8_t *)t[i].data, t[i].len & 0x1F);
         if (t[i].len & 0x80) {
             delay(120);
+        } else if (t[i].len & 0x40) {
+            delay(20);   // [LOCAL PATCH P7.44] short settle (ST7796 SLPOUT)
         }
     }
 

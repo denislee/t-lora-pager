@@ -18,6 +18,13 @@ void hw_set_gps_powered(bool on);
 // hw_register_imu_process() is idempotent — double-calls are safe.
 // hw_unregister_imu_process() is idempotent — calling when nothing is
 // registered is a no-op. Both update the shared s_imu_registered flag.
+// P6.2 / BT.2: the BHI260AP firmware (123.7 KB over I2C) is no longer uploaded
+// at boot on the pager (factory.ino passes NO_HW_SENSOR). hw_imu_ensure_started()
+// runs instance.initSensor() once, on first IMU use; hw_register_imu_process()
+// calls it, so every consumer goes through it. Safe against concurrent first
+// use (own mutex). Callers already hold the instance lock (LVGL task), as the
+// IMU paths always did. No-op on the watches and the emulator.
+void hw_imu_ensure_started();
 void hw_register_imu_process();
 void hw_unregister_imu_process();
 

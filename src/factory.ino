@@ -103,6 +103,13 @@ void setup()
     disable_flags |= NO_HW_GPS;
     if (!settings.nfc_enable) disable_flags |= NO_HW_NFC;
     if (!settings.haptic_enable) disable_flags |= NO_HW_DRV;
+#if defined(ARDUINO_T_LORA_PAGER)
+    // P6.2 / BT.2: don't upload the 123.7 KB BHI260 firmware at boot (1-2 s).
+    // Its only consumer is the IMU debug page; hal/sensors.cpp
+    // hw_imu_ensure_started() loads it on first use. Pager only: the Ultra's
+    // begin() needs the BHI GPIO expander early and the S3 has a BMA423.
+    disable_flags |= NO_HW_SENSOR;
+#endif
 
     instance.begin(disable_flags);
 

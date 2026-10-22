@@ -10,6 +10,28 @@
 #include <LilyGoLib.h>
 #endif
 
+#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)  // not USING_BHI260_SENSOR: board_config.h is not in this TU
+#include <mutex>
+// P6.2 / BT.2: lazy BHI260 bring-up. The mutex is a leaf lock (initSensor()
+// takes no other project lock), so it cannot deadlock with the instance lock
+// the LVGL-task callers already hold. One attempt per boot, like the vendor
+// begin() did; the IMU debug page's "Try sensor.begin" re-probes by hand.
+static std::mutex s_imu_start_mtx;
+static bool s_imu_start_attempted = false;
+#endif
+
+void hw_imu_ensure_started()
+{
+#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)  // not USING_BHI260_SENSOR: board_config.h is not in this TU
+    std::lock_guard<std::mutex> guard(s_imu_start_mtx);
+    if (s_imu_start_attempted) return;
+    s_imu_start_attempted = true;
+    uint32_t t0 = millis();
+    bool ok = instance.initSensor();
+    log_i("BHI260 lazy init %s in %lu ms", ok ? "ok" : "FAILED", (unsigned long)(millis() - t0));
+#endif
+}
+
 // --- GPS ---------------------------------------------------------------
 // Only the power-rail toggle survives. The NMEA decode + PPS interrupt path
 // was removed because no app consumes GPS data. There is no persisted
@@ -153,6 +175,7 @@ bool hw_imu_is_registered() { return s_imu_registered; }
 void hw_register_imu_process()
 {
     if (s_imu_registered) return; // guard: already registered
+    hw_imu_ensure_started(); // P6.2: first IMU use uploads the BHI260 firmware
 #if defined(ARDUINO)
 #if defined(USING_BHI260_SENSOR)
     s_imu_diag.bhi260_online = (hw_get_device_online() & HW_BHI260AP_ONLINE) != 0;

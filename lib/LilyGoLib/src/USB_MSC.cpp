@@ -215,7 +215,14 @@ void setupMSC(lock_callback_t lock_cb, lock_callback_t ulock_cb, bool use_sd)
             }
         }
     }
+    // [LOCAL PATCH P6.4] The recursive FFat tree dump (stat + Serial.printf
+    // per entry, O(n^2) in the note count) is a debug aid that ran on every
+    // boot. Keep it only for verbose debug builds.
+#if CORE_DEBUG_LEVEL >= 5
     __listDir(FFat, "/", 3);
+#else
+    (void)__listDir;
+#endif
 
 #elif defined(USING_SPIFFS)
     if (!SPIFFS.begin()) {

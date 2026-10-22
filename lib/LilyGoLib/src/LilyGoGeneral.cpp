@@ -8,40 +8,43 @@
  */
 #include <Arduino.h>
 #include "soc/rtc.h"
+#include "esp_private/esp_clk.h"
 
-#define CALIBRATE_ONE(cali_clk) calibrate_one(cali_clk, #cali_clk)
-
-static uint32_t calibrate_one(rtc_cal_sel_t cal_clk, const char *name)
-{
-    const uint32_t cal_count = 1000;
-    uint32_t cali_val;
-    for (int i = 0; i < 5; ++i) {
-        cali_val = rtc_clk_cal(cal_clk, cal_count);
-    }
-    return cali_val;
-}
-
+// [LOCAL PATCH P6.1 / BT.4] One short start-up probe plus one calibration,
+// instead of 6 x 5 x rtc_clk_cal(1000) (~0.80 s of busy-wait of which only one
+// value was ever used). Mirrors ESP-IDF's own select_rtc_slow_clk(): switch the
+// slow clock, calibrate RTC_MUX once (1024 cycles, ~31 ms) and publish the
+// period with esp_clk_slowclk_cal_set() so RTC-timer timekeeping and deep-sleep
+// timer wake-ups use the 32 kHz period (the vendor code never set it). The
+// 100-cycle probe takes ~3 ms when the crystal runs and ~10 ms to time out when
+// it does not; it is retried for up to 200 ms, which keeps the vendor's ~160 ms
+// crystal start-up tolerance.
 void esp_enable_slow_crystal()
 {
     rtc_clk_32k_enable(true);
 
-    CALIBRATE_ONE(RTC_CAL_RTC_MUX);
-    uint32_t cal_32k = CALIBRATE_ONE(RTC_CAL_32K_XTAL);
+    uint32_t cal_32k = 0;
+    const uint32_t t0 = millis();
+    do {
+        cal_32k = rtc_clk_cal(RTC_CAL_32K_XTAL, 100);
+    } while (cal_32k == 0 && (millis() - t0) < 200);
 
     if (cal_32k == 0) {
-        log_d("32K XTAL OSC has not started up\n");
-    } else {
-        rtc_clk_slow_freq_set(RTC_SLOW_FREQ_32K_XTAL);
-        log_d("Switching RTC Source to 32.768Khz succeeded, using 32K XTAL\n");
-        CALIBRATE_ONE(RTC_CAL_RTC_MUX);
-        CALIBRATE_ONE(RTC_CAL_32K_XTAL);
+        log_w("32K XTAL OSC has not started up, staying on the internal RC\n");
+        return;
     }
-    CALIBRATE_ONE(RTC_CAL_RTC_MUX);
-    CALIBRATE_ONE(RTC_CAL_32K_XTAL);
+
+    rtc_clk_slow_freq_set(RTC_SLOW_FREQ_32K_XTAL);
+    uint32_t cal_slow = rtc_clk_cal(RTC_CAL_RTC_MUX, 1024);
+    if (cal_slow != 0) {
+        esp_clk_slowclk_cal_set(cal_slow);
+    }
+
     if (rtc_clk_slow_freq_get() != RTC_SLOW_FREQ_32K_XTAL) {
         log_w("Failed to switch 32K XTAL RTC source to 32.768Khz !!! \n");
         return;
     }
+    log_d("Switching RTC Source to 32.768Khz succeeded, using 32K XTAL\n");
 }
 
 void setGroupBitsFromISR(EventGroupHandle_t xEventGroup,
