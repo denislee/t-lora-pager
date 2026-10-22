@@ -978,6 +978,13 @@ void hw_low_power_loop()
     hw_save_flush();  // IS.2: finish a background note save (it may still need the key).
     hw_filesystem_dirty_persist();  // P7.27: lazy NVS clean before power can go
     notes_crypto_lock();
+#ifdef HAS_SD_CARD_SOCKET
+    /* P7.34: unmount and remount the card here, not inside lightSleep()/sleep()
+     * under the I2C lock below (their SD calls take the SPI lock: I2C -> SPI
+     * inverted the kb_lock.h order, and the remount's SD.begin ran unlocked). */
+    instance.sleepSkipsSD = true;
+    hw_sd_unmount_for_sleep();
+#endif
     {
         core::ScopedKbLock kb_lock;  // lightSleep()/sleep() call kb.end()/begin()
         if (user_setting.sleep_mode == 1) {
@@ -986,8 +993,9 @@ void hw_low_power_loop()
             instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_BOOT_BUTTON));
         }
     }
-    // P7.28: lightSleep() ran SD.end() + installSD(); the card may differ.
-    hw_storage_info_invalidate();
+#ifdef HAS_SD_CARD_SOCKET
+    hw_mount_sd();  // also invalidates the P7.28 storage-info cache
+#endif
 #endif
 }
 

@@ -573,8 +573,8 @@ bool LilyGoLoRaPager::initPMU()
 // on every outcome, not just in begin(): src/hal/storage.cpp hw_mount_sd (card
 // inserted after boot) and the lightSleep() wake remount both come through
 // here. No locks are taken in here: hw_mount_sd holds the SPI lock and then the
-// I2C lock (SD_DET read on the XL9555) around the call, and lightSleep() runs
-// under the caller's I2C lock.
+// I2C lock (SD_DET read on the XL9555) around the call, and with sleepSkipsSD
+// set the light-sleep remount is hw_mount_sd too ([LOCAL PATCH P7.34]).
 bool LilyGoLoRaPager::installSD()
 {
 
@@ -741,7 +741,7 @@ void LilyGoLoRaPager::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_NFC, false);
     powerControl(POWER_KEYBOARD, false);
 
-    uninstallSD();
+    if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
     powerControl(POWER_SD_CARD, false);
 
 
@@ -794,7 +794,7 @@ void LilyGoLoRaPager::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_NFC, true);
     powerControl(POWER_KEYBOARD, true);
     powerControl(POWER_SD_CARD, true);
-    installSD();
+    if (!sleepSkipsSD) installSD();   // [LOCAL PATCH P7.34]
 
     ppm.enableMeasure();
 
@@ -904,7 +904,7 @@ void LilyGoLoRaPager::sleep(WakeupSource_t wakeup_src, bool off_rtc_backup_domai
         delay(1000);
     }
     if (io.digitalRead(EXPANDS_SD_DET)) {
-        uninstallSD();
+        if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
     } else {
         powerControl(POWER_SD_CARD, false);
     }

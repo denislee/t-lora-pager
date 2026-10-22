@@ -13,6 +13,12 @@ void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
 // The SD card may have changed underneath (the vendor light-sleep remount):
 // make the next hw_get_storage_info() re-read it.
 void hw_storage_info_invalidate();
+// P7.34: unmount the SD card before light/deep sleep. Takes the SPI lock,
+// runs the unmount hook (closes kept-open link files) and SD.end(). Call
+// with no instance/SPI/I2C lock held; remount with hw_mount_sd().
+void hw_sd_unmount_for_sleep();
+// P7.34: called with the SPI lock held right before SD.end(); one hook.
+void hw_set_sd_unmount_hook(void (*hook)());
 void hw_get_local_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
 
 // Delete `path` from both internal FFat and (when mounted) the SD card.

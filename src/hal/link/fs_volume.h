@@ -83,16 +83,19 @@ bool vol_free_bytes(Vol v, uint64_t &out);
  * FAT/directory sync per chunk). Each call takes the volume lock (SD: the SPI
  * bus) for that chunk only; nothing is held between calls.
  *
- * Which volumes really stay open is the implementation's call: on hardware the
- * internal FFat does; the SD card reopens per call, because the vendor
- * lightSleep() unmounts and remounts it and a FILE* that outlived the mount
- * could alias a file opened after the remount. A closed file (close(), or
- * one closed by its owner before a delete/rename of its path) reopens itself on
+ * Both volumes stay open. The SD card is unmounted only by
+ * hw_sd_unmount_for_sleep() (storage.h), which first closes every open SD
+ * VolFile under the SPI lock, so no FILE* outlives its mount. A closed file
+ * (close(), one closed by the SD unmount, or one closed by its owner before a
+ * delete/rename of its path) reopens itself on
  * the next read_at/write_at, by path, with the same checks vol_read_at /
  * vol_write_at make. The destructor closes.
  */
 class VolFile {
 public:
+    struct Impl; /* P7.34: public so fs_volume.cpp's anonymous-namespace SD
+                    unmount hook can name it. */
+
     VolFile();
     ~VolFile();
     VolFile(const VolFile &) = delete;
@@ -110,7 +113,6 @@ public:
     void close();
 
 private:
-    struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 

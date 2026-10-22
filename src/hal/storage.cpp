@@ -207,6 +207,29 @@ void hw_mount_sd()
 #endif
 }
 
+static std::atomic<void (*)()> s_sd_unmount_hook{nullptr};
+
+void hw_set_sd_unmount_hook(void (*hook)())
+{
+    s_sd_unmount_hook.store(hook);
+}
+
+/* P7.34: the sleep paths' half of the vendor's SD unmount/remount, done here
+ * so the SPI lock is taken first (kb_lock.h order) instead of inside
+ * lightSleep() under the caller's I2C lock (sleepSkipsSD). The hook closes
+ * every kept-open SD file while the card is still mounted. */
+void hw_sd_unmount_for_sleep()
+{
+#if defined(ARDUINO) && defined(HAS_SD_CARD_SOCKET)
+    {
+        core::ScopedSpiLock spi;
+        if (void (*hook)() = s_sd_unmount_hook.load()) hook();
+        SD.end();
+    }
+    hw_storage_info_invalidate();
+#endif
+}
+
 static std::atomic<bool> filesystem_dirty{false};  // P7.27: written from several tasks
 
 // Vendor hooks from lib/LilyGoLib/src/USB_MSC.cpp — no header is exposed

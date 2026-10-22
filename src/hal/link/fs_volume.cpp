@@ -287,11 +287,13 @@ namespace {
  * close() syncs the rest. Was: a sync per 4092 B chunk. */
 constexpr uint32_t SYNC_EVERY = 64 * 1024;
 
-/* FFat stays mounted for the whole run. The SD card does not: the vendor
- * lightSleep() calls SD.end() and SD.begin() again, and nothing tells us, so a
- * kept FILE* could outlive its mount and its fd be reused by a file opened
- * after the remount. SD therefore reopens per chunk, as before P7.34. */
-bool keep_open(Vol v) { return v == Vol::Int; }
+/* Both volumes keep the file open. FFat stays mounted for the whole run; the
+ * SD card is unmounted only by hw_sd_unmount_for_sleep(), which holds the SPI
+ * lock (the SD VolLock) and runs sd_unmount_hook() first, closing every open
+ * SD VolFile while the card is still mounted; the next chunk reopens it (and
+ * fails cleanly while the card is down). */
+std::vector<VolFile::Impl *> &sd_open_files();
+void register_sd_hook_once();
 }  // namespace
 
 struct VolFile::Impl {
@@ -303,20 +305,42 @@ struct VolFile::Impl {
     uint32_t unsynced = 0; /* write: bytes since the last sync */
 
     /* Caller holds the VolLock. */
-    void close_locked() {
-        if (!open) return;
-        f.close(); /* syncs a write */
-        open = false;
-        unsynced = 0;
-    }
+    void mark_open_locked();
+    void close_locked();
 };
+
+namespace {
+/* Open SD VolFiles. Touched only with the SPI lock held (the SD VolLock,
+ * or hw_sd_unmount_for_sleep), so it needs no lock of its own. */
+std::vector<VolFile::Impl *> &sd_open_files() { static std::vector<VolFile::Impl *> v; return v; }
+void sd_unmount_hook() { std::vector<VolFile::Impl *> open; open.swap(sd_open_files()); for (VolFile::Impl *m : open) m->close_locked(); }
+void register_sd_hook_once() { static bool done = false; if (done) return; done = true; hw_set_sd_unmount_hook(sd_unmount_hook); }
+}  // namespace
+
+void VolFile::Impl::mark_open_locked() {
+    open = true;
+    if (v != Vol::Sd) return;
+    register_sd_hook_once();
+    sd_open_files().push_back(this);
+}
+
+void VolFile::Impl::close_locked() {
+    if (!open) return;
+    f.close(); /* syncs a write */
+    open = false;
+    unsynced = 0;
+    if (v == Vol::Sd) {
+        std::vector<VolFile::Impl *> &open_files = sd_open_files();
+        const auto it = std::find(open_files.begin(), open_files.end(), this);
+        if (it != open_files.end()) open_files.erase(it);
+    }
+}
 
 VolFile::VolFile() : impl_(new Impl) {}
 
 VolFile::~VolFile() { close(); }
 
 void VolFile::close() {
-    if (!impl_->open) return;
     VolLock lock(impl_->v);
     impl_->close_locked();
 }
@@ -334,12 +358,8 @@ bool VolFile::open_read(Vol v, const std::string &path) {
         f.close();
         return false;
     }
-    if (!keep_open(v)) {
-        f.close();
-        return true;
-    }
     impl_->f = f;
-    impl_->open = true;
+    impl_->mark_open_locked();
     impl_->pos = 0;
     return true;
 }
@@ -354,12 +374,8 @@ bool VolFile::open_write(Vol v, const std::string &path) {
     VolLock lock(v);
     File f = fs_for(v).open(path.c_str(), FILE_WRITE); /* create + truncate */
     if (!f) return false;
-    if (!keep_open(v)) {
-        f.close();
-        return true;
-    }
     impl_->f = f;
-    impl_->open = true;
+    impl_->mark_open_locked();
     impl_->pos = 0;
     impl_->unsynced = 0;
     return true;
@@ -373,7 +389,7 @@ bool VolFile::read_at(uint32_t offset, uint8_t *buf, size_t n) {
     if (!m.open) {
         m.f = fs_for(m.v).open(m.path.c_str(), FILE_READ);
         if (!m.f) return false;
-        m.open = true;
+        m.mark_open_locked();
         m.pos = 0;
         if (m.f.isDirectory()) {
             m.close_locked();
@@ -394,7 +410,7 @@ bool VolFile::read_at(uint32_t offset, uint8_t *buf, size_t n) {
     }
     m.pos += static_cast<uint32_t>(got);
     ok = ok && got == n;
-    if (!ok || !keep_open(m.v)) m.close_locked(); /* unknown position after a failure */
+    if (!ok) m.close_locked(); /* unknown position after a failure */
     return ok;
 }
 
@@ -407,7 +423,7 @@ bool VolFile::write_at(uint32_t offset, const uint8_t *buf, size_t n) {
     if (!m.open) {
         m.f = fs_for(m.v).open(m.path.c_str(), FILE_APPEND);
         if (!m.f) return false;
-        m.open = true;
+        m.mark_open_locked();
         m.unsynced = 0;
         m.pos = static_cast<uint32_t>(m.f.size());
     }
@@ -420,7 +436,7 @@ bool VolFile::write_at(uint32_t offset, const uint8_t *buf, size_t n) {
     m.pos += static_cast<uint32_t>(wrote);
     m.unsynced += static_cast<uint32_t>(wrote);
     const bool ok = wrote == n;
-    if (!ok || !keep_open(m.v)) {
+    if (!ok) {
         m.close_locked();
     } else if (m.unsynced >= SYNC_EVERY) {
         m.f.flush(); /* fflush + fsync */

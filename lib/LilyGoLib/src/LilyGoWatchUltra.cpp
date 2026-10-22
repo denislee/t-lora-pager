@@ -767,7 +767,7 @@ void LilyGoUltra::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_GPS, false);
     powerControl(POWER_SPEAK, false);
     powerControl(POWER_NFC, false);
-    uninstallSD();
+    if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
     powerControl(POWER_SD_CARD, false);
 
     sleepDisplay();
@@ -818,7 +818,7 @@ void LilyGoUltra::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_GPS, true);
     powerControl(POWER_NFC, true);
     powerControl(POWER_SD_CARD, true);
-    installSD();
+    if (!sleepSkipsSD) installSD();   // [LOCAL PATCH P7.34]
 
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ |
@@ -882,7 +882,7 @@ void LilyGoUltra::sleep(WakeupSource_t wakeup_src, bool off_rtc_backup_domain, u
 
     LilyGoDispQSPI::end();
 
-    uninstallSD();
+    if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
 
 #if  defined(USING_BHI_EXPANDS)
 
