@@ -8,6 +8,7 @@
 #include "storage.h"
 #include "../hal_interface.h"
 #include "../core/spi_lock.h"
+#include "pbkdf2_sha256.h"
 
 #include <cstring>
 #include <cstdio>
@@ -21,8 +22,6 @@
 #include <SD.h>
 #include <esp_random.h>
 #include <mbedtls/aes.h>
-#include <mbedtls/md.h>
-#include <mbedtls/pkcs5.h>
 #include <mbedtls/platform_util.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -251,39 +250,72 @@ static void erase_canary()
 /* ---- Crypto primitives ---- */
 
 #ifdef ARDUINO
+/* PBKDF2 output block T2 (bytes 32..63; the IV is its first 16) computed on a
+ * short-lived helper task on the other core while the caller computes T1.
+ * The job lives on the caller's stack; the helper touches it only until it
+ * gives `done`, and pbkdf2_sha256_block wipes its own locals before that, so
+ * the helper's freed stack holds no intermediates. */
+struct Pbkdf2T2Job {
+    const hal::Pbkdf2Sha256Ctx *ctx;
+    const uint8_t *salt;
+    uint8_t out[32];
+    StaticSemaphore_t done_buf;
+    SemaphoreHandle_t done;
+};
+
+static void pbkdf2_t2_task(void *arg)
+{
+    Pbkdf2T2Job *job = (Pbkdf2T2Job *)arg;
+    hal::pbkdf2_sha256_block(job->ctx, job->salt, NC_SALT_LEN, NC_ITERATIONS, 2,
+                             job->out);
+    xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
+
+/* PBKDF2-HMAC-SHA256(pw, salt, NC_ITERATIONS, 48) -> key = T1, iv = T2[0..16),
+ * bit-identical to the mbedtls_pkcs5_pbkdf2_hmac call it replaced (P7.2) and
+ * to `openssl enc -pbkdf2`; pinned by test/test_pbkdf2. Software SHA-256 with
+ * precomputed HMAC midstates (2 compressions per iteration) instead of the
+ * S3's per-block DMA SHA path, with T1 and T2 on both cores. If the helper
+ * task can't be created (low heap) T2 is computed inline: same output, only
+ * slower. */
 static bool derive_key_iv(const char *pw, const uint8_t salt[NC_SALT_LEN],
                           uint8_t key_out[NC_KEY_LEN], uint8_t iv_out[NC_IV_LEN])
 {
-    uint8_t kb[NC_KEY_LEN + NC_IV_LEN];
+    static_assert(NC_KEY_LEN == 32 && NC_IV_LEN <= 32,
+                  "derive_key_iv maps key to T1 and iv to the head of T2");
 
-    /* Classic PKCS5 API (mbedTLS 2.x, ships with ESP-IDF 4.4). The newer
-     * `_ext` variant exists in mbedTLS 3.x but this codebase targets the
-     * older core. */
-    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (!info) return false;
+    hal::Pbkdf2Sha256Ctx ctx;
+    uint8_t t1[32];
+    Pbkdf2T2Job job;
+    hal::pbkdf2_sha256_init(&ctx, (const uint8_t *)pw, strlen(pw));
+    job.ctx  = &ctx;
+    job.salt = salt;
+    job.done = xSemaphoreCreateBinaryStatic(&job.done_buf);
 
-    mbedtls_md_context_t md;
-    mbedtls_md_init(&md);
-    if (mbedtls_md_setup(&md, info, 1 /* use HMAC */) != 0) {
-        mbedtls_md_free(&md);
-        return false;
+    bool helper = false;
+#if !CONFIG_FREERTOS_UNICORE
+    if (job.done) {
+        const BaseType_t other_core = xPortGetCoreID() == 0 ? 1 : 0;
+        helper = xTaskCreatePinnedToCore(pbkdf2_t2_task, "pbkdf2_t2", 4096, &job,
+                                         uxTaskPriorityGet(nullptr), nullptr,
+                                         other_core) == pdPASS;
     }
+#endif
 
-    int r = mbedtls_pkcs5_pbkdf2_hmac(
-        &md,
-        (const unsigned char *)pw, strlen(pw),
-        salt, NC_SALT_LEN,
-        NC_ITERATIONS,
-        sizeof(kb), kb);
-    mbedtls_md_free(&md);
-
-    if (r != 0) {
-        zeroize(kb, sizeof(kb));
-        return false;
+    hal::pbkdf2_sha256_block(&ctx, salt, NC_SALT_LEN, NC_ITERATIONS, 1, t1);
+    if (helper) {
+        xSemaphoreTake(job.done, portMAX_DELAY);
+    } else {
+        hal::pbkdf2_sha256_block(&ctx, salt, NC_SALT_LEN, NC_ITERATIONS, 2, job.out);
     }
-    memcpy(key_out, kb, NC_KEY_LEN);
-    memcpy(iv_out,  kb + NC_KEY_LEN, NC_IV_LEN);
-    zeroize(kb, sizeof(kb));
+    if (job.done) vSemaphoreDelete(job.done);
+
+    memcpy(key_out, t1, NC_KEY_LEN);
+    memcpy(iv_out,  job.out, NC_IV_LEN);
+    zeroize(&ctx, sizeof(ctx));
+    zeroize(t1, sizeof(t1));
+    zeroize(job.out, sizeof(job.out));
     return true;
 }
 #endif

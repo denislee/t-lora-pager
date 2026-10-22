@@ -41,7 +41,9 @@ bool notes_crypto_decrypt_buffer(const uint8_t *ct, size_t ct_len,
                                  std::string &out);
 
 /* Kick off derivation of one (salt, key, iv) triple so the next encrypt skips
- * PBKDF2. PBKDF2-HMAC-SHA256 x10000 is ~2 s on the S3 (IS.10); priming it at a
+ * PBKDF2. PBKDF2-HMAC-SHA256 x10000 measured ~2 s on the S3 via mbedTLS (IS.10);
+ * P7.2's software/dual-core derive is expected to be several times faster (an
+ * estimate: device time not yet measured), but still worth hiding. Priming it at a
  * latency-insensitive moment such as opening the editor means the save that
  * fires when the user *exits* only pays for the AES-CBC pass, not the key
  * derivation. The derivation runs on a short-lived background task, so this
