@@ -29,6 +29,11 @@ constexpr uint8_t MEDIA_KEYS_ID = 0x02;
 
 /** Gap between consecutive reports; iOS drops keys sent back to back. */
 constexpr uint32_t REPORT_GAP_MS = 7;
+/** notify() fails while NimBLE is out of mbufs (a PagerLink bulk send can hold
+ * most of them). Retry a report this many times, NOTIFY_RETRY_MS apart (~50 ms),
+ * so a key-up is not lost and left repeating on the host (P7.31). */
+constexpr int NOTIFY_RETRIES = 25;
+constexpr uint32_t NOTIFY_RETRY_MS = 2;
 
 // clang-format off
 const uint8_t REPORT_MAP[] = {
@@ -224,7 +229,9 @@ void send_report(NimBLECharacteristic *chr, const uint8_t *data, size_t len) {
     for (auto &p : g_kb_peers) {
         const uint16_t h = p.load();
         if (h != NO_HANDLE) {
-            chr->notify(data, len, h);
+            for (int i = 0; i < NOTIFY_RETRIES && !chr->notify(data, len, h); ++i) {
+                delay(NOTIFY_RETRY_MS);
+            }
         }
     }
     delay(REPORT_GAP_MS);
