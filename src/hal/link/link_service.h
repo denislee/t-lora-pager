@@ -38,6 +38,10 @@ struct TransportOps {
      * checks it before segmenting a message so a message is queued whole or not
      * at all (P7.32). */
     std::function<bool(size_t packets)> tx_room;
+    /** Optional: called when a bulk transfer starts and on every DATA/ACK in
+     * either direction, with the service lock held — so it must only flag (BLE
+     * holds its transfer connection parameters on it, P7.33). Empty = ignored. */
+    std::function<void()> bulk_activity;
     /** Human-readable peer name, e.g. "tcp:127.0.0.1:54321". */
     std::string peer_name;
 };
@@ -59,6 +63,13 @@ std::string service_peer_name();
 void service_get_stats(HwLinkStats &out);
 /** Negotiated packet size P (0 when no transport is connected). */
 size_t service_packet_size();
+/** The transport renegotiated its packet size (BLE MTU exchange after the
+ * subscribe, P7.33): later messages segment at `packet_size`. Ignored when
+ * disconnected or `packet_size` < 2. Not for handlers: the transport task only. */
+void service_set_packet_size(size_t packet_size);
+/** A bulk transfer is starting (TransportOps::bulk_activity). Takes the
+ * service lock; handlers may call it. */
+void service_bulk_activity();
 /** Credit grant and ack_every for a new bulk receiver, sized to the connected
  * transport's receive queue (rx_credits_for / rx_ack_every_for). Takes the
  * service lock. */

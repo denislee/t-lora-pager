@@ -345,6 +345,7 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
         .end_object();
 
     boost();
+    service_bulk_activity();
     LINK_LOG("fs.read start id=%u path=%s size=%u offset=%u", static_cast<unsigned>(xfer),
              path.c_str(), static_cast<unsigned>(st.size), static_cast<unsigned>(offset));
     /* The first DATA must follow the RES, hence defer(). */
@@ -424,6 +425,7 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
 
     result.begin_object().key("xfer").uint_val(id).key("offset").uint_val(0).end_object();
     boost();
+    service_bulk_activity();
     LINK_LOG("fs.write begin id=%u path=%s size=%u overwrite=%d", static_cast<unsigned>(id),
              path.c_str(), static_cast<unsigned>(size), overwrite ? 1 : 0);
     return true;

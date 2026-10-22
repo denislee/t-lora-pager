@@ -67,6 +67,27 @@ uint16_t rx_credits_for(size_t queue_packets, size_t packet_size);
  */
 unsigned rx_ack_every_for(uint16_t credits);
 
+/**
+ * Link packet size P for a negotiated ATT_MTU: the MTU clamped to
+ * 23 (the BLE minimum) .. `max_mtu` (what the transport asked for), minus the
+ * 3-byte ATT notify/write header (P7.33).
+ */
+size_t packet_size_for_mtu(uint16_t mtu, uint16_t max_mtu);
+
+/** How long a transport keeps its bulk-transfer connection parameters after the
+ * last bulk message before it restores the idle ones (P7.33). */
+constexpr uint32_t BULK_IDLE_MS = 2000;
+
+/** Connection-parameter band a transport runs a link in (P7.33). */
+enum class ConnBand : uint8_t { Idle, Transfer };
+
+/**
+ * Next band: Transfer while bulk traffic was seen since the last check
+ * (`activity`); back to Idle once `now_ms - last_activity_ms >= BULK_IDLE_MS`
+ * (wrap-safe); otherwise unchanged.
+ */
+ConnBand next_conn_band(ConnBand cur, bool activity, uint32_t now_ms, uint32_t last_activity_ms);
+
 /** Message type field. */
 enum class MsgType : uint8_t { Req = 0, Res = 1, Err = 2, Evt = 3, Data = 4, Ack = 5 };
 

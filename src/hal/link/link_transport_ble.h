@@ -25,6 +25,9 @@ void set_enabled(bool on);
 /** A peer disconnected (NimBLE host task). */
 void on_disconnect(uint16_t conn_handle);
 
+/** A peer's ATT_MTU changed (NimBLE host task; queued for the link task). */
+void on_mtu_change(uint16_t conn_handle, uint16_t mtu);
+
 }  // namespace ble
 }  // namespace pagerlink
 

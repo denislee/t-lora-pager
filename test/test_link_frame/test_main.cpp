@@ -313,6 +313,40 @@ static void test_rx_window(void)
     TEST_ASSERT_EQUAL_UINT(1, rx_ack_every_for(1));
 }
 
+static void test_packet_size_for_mtu(void)
+{
+    /* MTU clamped to 23..max_mtu, then minus the 3-byte ATT header. */
+    TEST_ASSERT_EQUAL_UINT(244, (unsigned)packet_size_for_mtu(247, 247));
+    TEST_ASSERT_EQUAL_UINT(244, (unsigned)packet_size_for_mtu(517, 247)); /* clamped to max */
+    TEST_ASSERT_EQUAL_UINT(20, (unsigned)packet_size_for_mtu(23, 247));   /* BLE minimum */
+    TEST_ASSERT_EQUAL_UINT(20, (unsigned)packet_size_for_mtu(0, 247));    /* raised to 23 */
+    TEST_ASSERT_EQUAL_UINT(182, (unsigned)packet_size_for_mtu(185, 247));
+    TEST_ASSERT_EQUAL_UINT(47, (unsigned)packet_size_for_mtu(100, 50)); /* lowered to max */
+}
+
+static void test_next_conn_band(void)
+{
+    /* Any activity keeps the link in the transfer band. */
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Idle, true, 0, 0) ==
+                     pagerlink::ConnBand::Transfer);
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Transfer, true, 5000, 1000) ==
+                     pagerlink::ConnBand::Transfer);
+
+    /* Transfer survives until BULK_IDLE_MS without activity, then falls back. */
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Transfer, false, 1000 + 1999, 1000) ==
+                     pagerlink::ConnBand::Transfer);
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Transfer, false, 3000, 1000) ==
+                     pagerlink::ConnBand::Idle);
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Idle, false, 100000, 0) ==
+                     pagerlink::ConnBand::Idle);
+
+    /* The elapsed-time subtraction must wrap safely. */
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Transfer, false, 0x00000400, 0xFFFFFC00) ==
+                     pagerlink::ConnBand::Idle); /* 2048 ms */
+    TEST_ASSERT_TRUE(next_conn_band(pagerlink::ConnBand::Transfer, false, 0x00000100, 0xFFFFFC00) ==
+                     pagerlink::ConnBand::Transfer); /* 1280 ms */
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
     UNITY_BEGIN();
@@ -328,5 +362,7 @@ int main(int /*argc*/, char ** /*argv*/)
     RUN_TEST(test_segmenter_send_rejects_bad_args);
     RUN_TEST(test_segmenter_send_sink_abort);
     RUN_TEST(test_rx_window);
+    RUN_TEST(test_packet_size_for_mtu);
+    RUN_TEST(test_next_conn_band);
     return UNITY_END();
 }

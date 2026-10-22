@@ -73,6 +73,8 @@ struct State {
     std::function<bool(const uint8_t *pkt, size_t len)> send_packet;
     /** The transport's room check (TransportOps::tx_room); may be empty. */
     std::function<bool(size_t packets)> tx_room;
+    /** TransportOps::bulk_activity; may be empty. */
+    std::function<void()> bulk_activity;
 
     /* Counters for the current connection. */
     uint32_t rx_packets = 0;
@@ -134,6 +136,14 @@ struct State {
 State &state() {
     static State s;
     return s;
+}
+
+/** Tell the transport bulk bytes are moving (P7.33). Caller holds g_mutex. */
+void note_bulk_activity() {
+    State &s = state();
+    if (s.bulk_activity) {
+        s.bulk_activity();
+    }
 }
 
 /**
@@ -344,6 +354,7 @@ void service_on_connect(const TransportOps &ops) {
 
     s.send_packet = ops.send_packet;
     s.tx_room = ops.tx_room;
+    s.bulk_activity = ops.bulk_activity;
     s.packet_size = ops.packet_size;
     s.rx_queue_packets = ops.rx_queue_packets;
     s.peer_name = ops.peer_name;
@@ -385,6 +396,7 @@ void service_on_connect(const TransportOps &ops) {
     /* Bulk passthrough: the fs.* transfers claim their ids first; everything
      * else may be an outbound transfer the pager started. */
     s.rpc->on_bulk([](MsgType type, uint16_t xfer, const uint8_t *payload, size_t len) {
+        note_bulk_activity();
         if (!fs_on_bulk(type, xfer, payload, len) &&
             !inbound_on_bulk(type, xfer, payload, len)) {
             outbound_on_bulk(type, xfer, payload, len);
@@ -451,6 +463,7 @@ void service_on_disconnect() {
     }
     s.send_packet = nullptr;
     s.tx_room = nullptr;
+    s.bulk_activity = nullptr;
 
     LINK_LOG("disconnected: %s", s.peer_name.c_str());
 }
@@ -567,6 +580,22 @@ size_t service_packet_size() {
     return state().packet_size;
 }
 
+void service_set_packet_size(size_t packet_size) {
+    LinkLock lock(__func__);
+    State &s = state();
+    if (!s.connected || packet_size < 2 || packet_size == s.packet_size) {
+        return;
+    }
+    LINK_LOG("packet size %u -> %u", static_cast<unsigned>(s.packet_size),
+             static_cast<unsigned>(packet_size));
+    s.packet_size = packet_size;
+}
+
+void service_bulk_activity() {
+    LinkLock lock(__func__);
+    note_bulk_activity();
+}
+
 void service_rx_window(uint16_t &credits, unsigned &ack_every) {
     LinkLock lock(__func__);
     State &s = state();
@@ -623,6 +652,7 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
         },
         0));
     s.outbound.push_back(std::move(o));
+    note_bulk_activity();
 
     LINK_LOG("send start id=%u size=%u", static_cast<unsigned>(xfer),
              static_cast<unsigned>(len));
@@ -687,6 +717,7 @@ bool service_accept_expect(uint16_t xfer, uint32_t size, uint32_t crc32, uint32_
     }
     in.buf.clear();
     in.buf.reserve(size);
+    note_bulk_activity();
     uint16_t credits = 0;
     unsigned ack_every = 0;
     service_rx_window(credits, ack_every);

@@ -12,6 +12,8 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 
+#include <atomic>
+
 #include "ble_hid.h"
 #include "link/link_transport_ble.h"
 #include "link/link_uuids.h"
@@ -22,6 +24,13 @@ namespace {
 
 NimBLEServer *g_server = nullptr;
 bool g_enabled = false;
+/** Connection holding the transfer band (P7.33), or NO_CONN. Written by the
+ * PagerLink link task, read by the HID keepalive task. */
+constexpr uint16_t NO_CONN = 0xFFFF;
+std::atomic<uint16_t> g_transfer_conn{NO_CONN};
+/** Supervision timeout shared by both bands (10 ms units): 6.72 s. Keeping it
+ * equal means PagerLink's notify stall budget (2 x timeout) stays valid. */
+constexpr uint16_t CONN_TIMEOUT = 0x2A0;
 
 /** Appearance: generic keyboard (Bluetooth Assigned Numbers 0x03C1). */
 constexpr uint16_t APPEARANCE_KEYBOARD = 0x03C1;
@@ -45,6 +54,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         if (g_enabled) {
             NimBLEDevice::startAdvertising();
         }
+    }
+
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo &info) override {
+        log_i("[ble] mtu handle=%u mtu=%u", info.getConnHandle(), mtu);
+        pagerlink::ble::on_mtu_change(info.getConnHandle(), mtu);
     }
 
     void onAuthenticationComplete(NimBLEConnInfo &info) override {
@@ -195,9 +209,41 @@ void apply_idle_conn_params(uint16_t conn_handle) {
     // 0x18 = 30 ms, 0x28 = 50 ms, latency 10 (answer every 11th event, ~10×
     // fewer idle radio wakes), timeout 0x2A0 = 6.72 s. Check: 50 ms × 11 =
     // 550 ms ≤ 2 s; 6.72 s ≥ 3 × 550 ms.
-    if (g_server) {
-        g_server->updateConnParams(conn_handle, 0x18, 0x28, 10, 0x2A0);
+    if (g_server && g_transfer_conn.load() != conn_handle) {
+        g_server->updateConnParams(conn_handle, 0x18, 0x28, 10, CONN_TIMEOUT);
     }
+}
+
+void apply_transfer_conn_params(uint16_t conn_handle) {
+    // IOS_COMPANION_PLAN.md §5.1 item 7: 12 = 15 ms, 24 = 30 ms, latency 0, so
+    // the phone's writes go out on every event instead of waiting up to 10
+    // skipped ones. Still inside Apple's guidelines: min >= 15 ms, max >= min +
+    // 15 ms, timeout 6.72 s >= 3 x 30 ms.
+    if (!g_server) {
+        return;
+    }
+    g_transfer_conn.store(conn_handle);
+    g_server->updateConnParams(conn_handle, 12, 24, 0, CONN_TIMEOUT);
+}
+
+void end_transfer_conn_params(uint16_t conn_handle, bool restore) {
+    uint16_t expected = conn_handle;
+    if (!g_transfer_conn.compare_exchange_strong(expected, NO_CONN)) {
+        return;
+    }
+    if (restore) {
+        apply_idle_conn_params(conn_handle);
+    }
+}
+
+void request_fast_link(uint16_t conn_handle) {
+    if (!g_server) {
+        return;
+    }
+    // 251 = the largest LL payload (BT 4.2 DLE): one 244 B PagerLink packet + the
+    // 4 B L2CAP and 3 B ATT headers fits a single radio packet.
+    g_server->setDataLen(conn_handle, 251);
+    g_server->updatePhy(conn_handle, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK, 0);
 }
 
 }  // namespace ble

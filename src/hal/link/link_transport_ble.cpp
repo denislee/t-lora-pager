@@ -7,7 +7,10 @@
  * The PagerLink service lives on the server hal/ble_stack.cpp owns, next to
  * HID. A connection becomes the companion when its peer subscribes to `tx`;
  * one companion at a time (a second subscriber is ignored until the first
- * leaves). Packet size P = ATT_MTU − 3 at subscribe time.
+ * leaves). Packet size P = ATT_MTU − 3 at subscribe time, updated when the
+ * MTU exchange completes later (P7.33). While bulk bytes move the link task
+ * holds the transfer connection parameters (15–30 ms, latency 0) and restores
+ * the idle band BULK_IDLE_MS after the last DATA/ACK.
  *
  * Threading (IOS_COMPANION_PLAN.md §5.2): NimBLE host-task callbacks only copy
  * the event into a queue and return. The `link` task drains it and is the
@@ -46,6 +49,7 @@
 #include <cstring>
 #include <string>
 
+#include "hal/ble_hid.h"
 #include "hal/ble_stack.h"
 #include "hal/link/link_frame.h"
 #include "hal/link/link_service.h"
@@ -89,13 +93,13 @@ constexpr int HID_MBUF_RESERVE = 4;
 constexpr uint32_t NOTIFY_STALL_MIN_MS = 2000;
 constexpr uint32_t NOTIFY_STALL_MAX_MS = 12000;
 
-enum class Kind : uint8_t { Subscribe, Unsubscribe, Disconnect, Packet, Drop };
+enum class Kind : uint8_t { Subscribe, Unsubscribe, Disconnect, Packet, Drop, Mtu };
 
 struct Event {
     Kind kind;
     uint16_t conn;
     uint16_t len;
-    uint8_t data[MAX_PACKET];  // packet bytes, or the peer address for Subscribe
+    uint8_t data[MAX_PACKET];  // packet bytes, the peer address for Subscribe, or the MTU (u16) for Mtu
 };
 
 /** One outbound packet. `epoch` ties it to a companion session so a resubscribe on
@@ -128,6 +132,12 @@ std::atomic<uint32_t> g_epoch{0};
 /** Stall budget for the current companion (companion_up). */
 std::atomic<uint32_t> g_stall_ms{NOTIFY_STALL_MIN_MS};
 std::atomic<uint32_t> g_tx_dropped{0};
+/** Set by the service's bulk_activity hook (any task, service lock held);
+ * consumed by the link task, which owns the connection-parameter band (P7.33). */
+std::atomic<bool> g_bulk_seen{false};
+std::atomic<uint32_t> g_bulk_ms{0};
+/** Band the companion runs in; link task only. */
+ConnBand g_band = ConnBand::Idle;
 /** Queue depth in use; 0 until create_queue() picks a path. */
 UBaseType_t g_queue_depth = 0;
 
@@ -263,14 +273,17 @@ void tx_task(void *) {
     }
 }
 
+/**
+ * Runs on the link task. The GAP requests here and in update_conn_band() are
+ * issued from this task rather than from the NimBLE host callbacks: those only
+ * queue an event (§5.2), and the link task calls NimBLE outside g_mutex, so no
+ * GAP call waits on the host lock while holding the service lock.
+ */
 void companion_up(uint16_t conn, const std::string &addr) {
-    uint16_t mtu = g_server->getPeerMTU(conn);
-    if (mtu < 23) {
-        mtu = 23;
-    }
-    if (mtu > hal::ble::ATT_MTU) {
-        mtu = hal::ble::ATT_MTU;
-    }
+    /* Before the MTU exchange (a CCCD restore can beat it) this is 23; the
+     * Kind::Mtu event raises P later (P7.33). */
+    const uint16_t mtu = g_server->getPeerMTU(conn);
+    const size_t packet = packet_size_for_mtu(mtu, hal::ble::ATT_MTU);
     const uint32_t epoch = g_epoch.fetch_add(1) + 1;
     /* Supervision timeout is in 10 ms units. */
     uint32_t stall = 2u * 10u * g_server->getPeerInfoByHandle(conn).getConnTimeout();
@@ -283,23 +296,70 @@ void companion_up(uint16_t conn, const std::string &addr) {
         return send_packet(epoch, conn, pkt, len);
     };
     ops.tx_room = [](size_t packets) { return tx_room(packets); };
-    ops.packet_size = static_cast<size_t>(mtu) - 3;
+    ops.bulk_activity = [] {
+        g_bulk_ms.store(millis());
+        g_bulk_seen.store(true);
+    };
+    ops.packet_size = packet;
     ops.rx_queue_packets =
         g_queue_depth > 2 * RX_SLACK ? g_queue_depth - RX_SLACK : g_queue_depth / 2;
     ops.peer_name = "ble:" + addr;
     g_companion.store(conn);
-    LINK_LOG("[link] companion %s up, mtu=%u rxq=%u txq=%u stall=%ums", ops.peer_name.c_str(),
+    g_band = ConnBand::Idle;
+    g_bulk_seen.store(false);
+    /* DLE 251 + 2M PHY (requests; the peer may refuse, P7.33). */
+    hal::ble::request_fast_link(conn);
+    /* A keyboard connection already gets the idle band from the HID keepalive
+     * task; give a companion-only peer the same one (P7.35). */
+    const bool keyboard = hal::ble_hid::connected() && hal::ble_hid::peer_conn_handle() == conn;
+    if (!keyboard) {
+        hal::ble::apply_idle_conn_params(conn);
+    }
+    LINK_LOG("[link] companion %s up, mtu=%u rxq=%u txq=%u stall=%ums%s", ops.peer_name.c_str(),
              static_cast<unsigned>(mtu), static_cast<unsigned>(ops.rx_queue_packets),
-             static_cast<unsigned>(g_txq_depth), static_cast<unsigned>(stall));
+             static_cast<unsigned>(g_txq_depth), static_cast<unsigned>(stall),
+             keyboard ? "" : " (idle params)");
     service_on_connect(ops);
 }
 
-void companion_down(const char *why) {
-    if (g_companion.load() == NO_HANDLE) {
+/**
+ * Hold the transfer band while bulk bytes move and drop back to idle
+ * BULK_IDLE_MS after the last DATA/ACK (P7.33). Link task only; it wakes at
+ * least every TICK_MS while a companion is up, so idle returns 2–3 s after
+ * the last bulk message.
+ */
+void update_conn_band() {
+    const uint16_t conn = g_companion.load();
+    if (conn == NO_HANDLE) {
+        return;
+    }
+    const bool activity = g_bulk_seen.exchange(false);
+    const ConnBand next = next_conn_band(g_band, activity, millis(), g_bulk_ms.load());
+    if (next == g_band) {
+        return;
+    }
+    g_band = next;
+    if (next == ConnBand::Transfer) {
+        LINK_LOG("[link] transfer conn params (15-30 ms, latency 0)");
+        hal::ble::apply_transfer_conn_params(conn);
+    } else {
+        LINK_LOG("[link] idle conn params");
+        hal::ble::end_transfer_conn_params(conn, true);
+    }
+}
+
+/** `peer_gone`: the connection itself dropped, so don't restore its idle band. */
+void companion_down(const char *why, bool peer_gone = false) {
+    const uint16_t conn = g_companion.load();
+    if (conn == NO_HANDLE) {
         return;
     }
     LINK_LOG("[link] companion down (%s)", why);
     g_companion.store(NO_HANDLE);
+    if (g_band == ConnBand::Transfer) {
+        g_band = ConnBand::Idle;
+        hal::ble::end_transfer_conn_params(conn, !peer_gone);
+    }
     service_on_disconnect();
 }
 
@@ -326,7 +386,7 @@ void handle(const Event &ev) {
         break;
     case Kind::Disconnect:
         if (ev.conn == companion) {
-            companion_down("disconnected");
+            companion_down("disconnected", true);
         }
         break;
     case Kind::Drop:
@@ -335,6 +395,15 @@ void handle(const Event &ev) {
     case Kind::Packet:
         if (ev.conn == companion) {
             service_on_packet(ev.data, ev.len);
+        }
+        break;
+    case Kind::Mtu:
+        // An MTU exchange after the subscribe (P7.33); before it, companion_up
+        // reads the current MTU itself.
+        if (ev.conn == companion && ev.len == sizeof(uint16_t)) {
+            uint16_t mtu = 0;
+            std::memcpy(&mtu, ev.data, sizeof(mtu));
+            service_set_packet_size(packet_size_for_mtu(mtu, hal::ble::ATT_MTU));
         }
         break;
     }
@@ -354,6 +423,7 @@ void link_task(void *) {
             last_tick = millis();
             service_tick();
         }
+        update_conn_band();
         const uint32_t dropped = g_dropped.exchange(0);
         if (dropped) {
             LINK_LOG("[link] dropped %u events (queue full or oversize), %u total",
@@ -457,6 +527,10 @@ void set_enabled(bool on) {
 }
 
 void on_disconnect(uint16_t conn_handle) { post(Kind::Disconnect, conn_handle, nullptr, 0); }
+
+void on_mtu_change(uint16_t conn_handle, uint16_t mtu) {
+    post(Kind::Mtu, conn_handle, reinterpret_cast<const uint8_t *>(&mtu), sizeof(mtu));
+}
 
 }  // namespace ble
 }  // namespace pagerlink

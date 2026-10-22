@@ -126,12 +126,24 @@ static SendCtx *s_ctx = nullptr;
 // surfaces a visible error and abandons the task so the UI doesn't sit on
 // "thinking..." forever if the worker overruns.
 //  - hub: chat_post's raw WiFiClient bounds itself (5 s connect + 15 s read).
-//  - phone: chat.ask waits CHAT_ASK_TIMEOUT_MS (60 s) after the voice upload,
-//    so the budget covers that plus the upload of a capped memo.
 #ifdef ARDUINO
 static const uint32_t SEND_WATCHDOG_MS = 20000;
 #endif
-static const uint32_t PHONE_WATCHDOG_MS = 75000;
+//  - phone: the worker runs chat.audio.begin, the voice upload, then chat.ask,
+//    so the budget is their sum (P7.33):
+//      begin  10 s  hw_link_call's default timeout (hal/link.h)
+//      upload 24 s  CHAT_AUDIO_MAX_BYTES (480044 B) at a conservative 20 KB/s,
+//                   the slow end of an upload at the idle connection
+//                   parameters (iOS may refuse the transfer band)
+//      ask    60 s  CHAT_ASK_TIMEOUT_MS
+//      slack   5 s
+//    = 99 s (was a flat 75 s, which begin + a slow upload + ask could exceed).
+static const uint32_t PHONE_BEGIN_TIMEOUT_MS = 10000;
+static const uint32_t PHONE_UPLOAD_MIN_BYTES_PER_S = 20000;
+static const uint32_t PHONE_UPLOAD_BUDGET_MS =
+    static_cast<uint32_t>((CHAT_AUDIO_MAX_BYTES * 1000u) / PHONE_UPLOAD_MIN_BYTES_PER_S);
+static const uint32_t PHONE_WATCHDOG_MS =
+    PHONE_BEGIN_TIMEOUT_MS + PHONE_UPLOAD_BUDGET_MS + CHAT_ASK_TIMEOUT_MS + 5000;
 
 static uint32_t chat_now_ms()
 {

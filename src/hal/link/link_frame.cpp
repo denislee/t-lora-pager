@@ -263,4 +263,25 @@ unsigned rx_ack_every_for(uint16_t credits) {
     return 1;
 }
 
+size_t packet_size_for_mtu(uint16_t mtu, uint16_t max_mtu) {
+    if (mtu > max_mtu) {
+        mtu = max_mtu;
+    }
+    if (mtu < 23) {
+        mtu = 23;
+    }
+    return static_cast<size_t>(mtu) - 3;
+}
+
+ConnBand next_conn_band(ConnBand cur, bool activity, uint32_t now_ms, uint32_t last_activity_ms) {
+    if (activity) {
+        return ConnBand::Transfer;
+    }
+    if (cur == ConnBand::Transfer &&
+        static_cast<uint32_t>(now_ms - last_activity_ms) >= BULK_IDLE_MS) {
+        return ConnBand::Idle;
+    }
+    return cur;
+}
+
 }  // namespace pagerlink

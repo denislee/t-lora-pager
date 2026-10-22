@@ -56,9 +56,32 @@ uint8_t connected_count();
 
 /**
  * Apply the iOS-compliant idle connection parameters to `conn_handle`
- * (30–50 ms, latency 10, 6.72 s timeout; see ble_stack.cpp).
+ * (30–50 ms, latency 10, 6.72 s timeout; see ble_stack.cpp). A no-op while
+ * `conn_handle` holds the transfer band, so the HID keepalive can't slow a
+ * bulk transfer down.
  */
 void apply_idle_conn_params(uint16_t conn_handle);
+
+/**
+ * Request the bulk-transfer band on `conn_handle` (15–30 ms, latency 0, the
+ * idle band's 6.72 s timeout; IOS_COMPANION_PLAN.md §5.1 item 7) and hold it
+ * until end_transfer_conn_params(). One connection at a time. Not from a
+ * NimBLE host callback (PagerLink calls it from its link task, P7.33).
+ */
+void apply_transfer_conn_params(uint16_t conn_handle);
+
+/**
+ * Release the transfer band on `conn_handle`; `restore` re-applies the idle
+ * band (false when the peer is already gone). No-op if it isn't held there.
+ */
+void end_transfer_conn_params(uint16_t conn_handle, bool restore);
+
+/**
+ * Ask for the fastest link the controller and peer allow on `conn_handle`:
+ * LL data length 251 (DLE) and the 2M PHY. Both are requests; the peer may
+ * refuse either.
+ */
+void request_fast_link(uint16_t conn_handle);
 
 }  // namespace ble
 }  // namespace hal
