@@ -71,6 +71,8 @@ struct State {
 
     /** The transport's packet writer, valid while connected. */
     std::function<bool(const uint8_t *pkt, size_t len)> send_packet;
+    /** The transport's room check (TransportOps::tx_room); may be empty. */
+    std::function<bool(size_t packets)> tx_room;
 
     /* Counters for the current connection. */
     uint32_t rx_packets = 0;
@@ -341,6 +343,7 @@ void service_on_connect(const TransportOps &ops) {
     }
 
     s.send_packet = ops.send_packet;
+    s.tx_room = ops.tx_room;
     s.packet_size = ops.packet_size;
     s.rx_queue_packets = ops.rx_queue_packets;
     s.peer_name = ops.peer_name;
@@ -353,6 +356,11 @@ void service_on_connect(const TransportOps &ops) {
         [](const std::string &message) -> bool {
             State &st = state();
             if (!st.send_packet) {
+                return false;
+            }
+            /* Queue the message whole or not at all (P7.32). */
+            if (st.tx_room &&
+                !st.tx_room(packets_per_message(message.size(), st.packet_size))) {
                 return false;
             }
             return st.segmenter.send(
@@ -442,6 +450,7 @@ void service_on_disconnect() {
         s.rpc.reset();
     }
     s.send_packet = nullptr;
+    s.tx_room = nullptr;
 
     LINK_LOG("disconnected: %s", s.peer_name.c_str());
 }

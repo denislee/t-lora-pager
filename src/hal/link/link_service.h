@@ -33,6 +33,11 @@ struct TransportOps {
      * (it back-pressures, e.g. TCP). Bulk receivers size their credit grant to
      * it (rx_credits_for, P7.30). */
     size_t rx_queue_packets = 0;
+    /** Optional: true when the transport can take `packets` more packets right
+     * now without dropping. Empty = always (e.g. TCP blocks instead). The service
+     * checks it before segmenting a message so a message is queued whole or not
+     * at all (P7.32). */
+    std::function<bool(size_t packets)> tx_room;
     /** Human-readable peer name, e.g. "tcp:127.0.0.1:54321". */
     std::string peer_name;
 };

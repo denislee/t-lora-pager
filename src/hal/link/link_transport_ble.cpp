@@ -15,7 +15,9 @@
  * disconnect). It blocks indefinitely while no companion is connected, and
  * pumps service_tick() at 1 Hz while one is. The queue holds a whole credit
  * window (P7.30); a packet that still finds it full is dropped rather than
- * blocking the host task.
+ * blocking the host task. Outbound packets go the other way through a second
+ * queue: the service enqueues them without waiting, and the `link_tx` task
+ * notifies them outside the service mutex (P7.32).
  *
  * Security: `rx` requires an encrypted link (bonded Just Works today).
  * PROTOCOL.md §1 also asks for authentication, which needs passkey pairing
@@ -29,6 +31,11 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#if defined(CONFIG_NIMBLE_CPP_IDF)
+#include "os/os_mbuf.h"
+#else
+#include "nimble/porting/nimble/include/os/os_mbuf.h"
+#endif
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -65,9 +72,22 @@ constexpr UBaseType_t QUEUE_DEPTH =
 constexpr UBaseType_t QUEUE_DEPTH_INTERNAL = 16;
 constexpr uint32_t TICK_MS = 1000;
 constexpr uint32_t TASK_STACK = 8192;
-/** notify() fails while the controller is out of mbufs; retry this long. */
-constexpr int NOTIFY_RETRIES = 100;
+/** Outbound packets queued for the tx task: a whole credit window of max-size
+ * messages plus slack for RPC traffic (~84 KB of PSRAM, P7.32). */
+constexpr UBaseType_t TX_QUEUE_DEPTH =
+    INITIAL_CREDITS * packets_per_message(MAX_MESSAGE, MAX_PACKET) + 2 * RX_SLACK;
+constexpr UBaseType_t TX_QUEUE_DEPTH_INTERNAL =
+    2 * packets_per_message(MAX_MESSAGE, MAX_PACKET) + 8;
+constexpr uint32_t TX_TASK_STACK = 4096;
+/** notify() fails while the host is out of mbufs; the tx task polls this often. */
 constexpr uint32_t NOTIFY_RETRY_MS = 2;
+/** msys blocks link_tx leaves free for HID key reports and incoming traffic: a
+ * bulk window never takes the pool's last blocks (P7.31). */
+constexpr int HID_MBUF_RESERVE = 4;
+/** Give up on a packet after this long without radio space: twice the supervision
+ * timeout, clamped (the link is dead by then and the disconnect is on its way). */
+constexpr uint32_t NOTIFY_STALL_MIN_MS = 2000;
+constexpr uint32_t NOTIFY_STALL_MAX_MS = 12000;
 
 enum class Kind : uint8_t { Subscribe, Unsubscribe, Disconnect, Packet, Drop };
 
@@ -78,11 +98,24 @@ struct Event {
     uint8_t data[MAX_PACKET];  // packet bytes, or the peer address for Subscribe
 };
 
+/** One outbound packet. `epoch` ties it to a companion session so a resubscribe on
+ * the same handle never receives the previous session's packets. */
+struct TxPacket {
+    uint32_t epoch;
+    uint16_t conn;
+    uint16_t len;
+    uint8_t data[MAX_PACKET];
+};
+
 NimBLEServer *g_server = nullptr;
 NimBLECharacteristic *g_tx = nullptr;
 QueueHandle_t g_queue = nullptr;
 SemaphoreHandle_t g_post_lock = nullptr;
 TaskHandle_t g_task = nullptr;
+QueueHandle_t g_txq = nullptr;
+SemaphoreHandle_t g_tx_lock = nullptr;
+TaskHandle_t g_tx_task = nullptr;
+UBaseType_t g_txq_depth = 0;
 
 std::atomic<bool> g_bt_on{false};
 std::atomic<bool> g_user_off{false};
@@ -90,6 +123,11 @@ std::atomic<bool> g_user_off{false};
 std::atomic<uint16_t> g_companion{NO_HANDLE};
 std::atomic<uint32_t> g_dropped{0};
 std::atomic<uint32_t> g_dropped_total{0};
+/** Bumped by companion_up; packets of an older session are discarded. */
+std::atomic<uint32_t> g_epoch{0};
+/** Stall budget for the current companion (companion_up). */
+std::atomic<uint32_t> g_stall_ms{NOTIFY_STALL_MIN_MS};
+std::atomic<uint32_t> g_tx_dropped{0};
 /** Queue depth in use; 0 until create_queue() picks a path. */
 UBaseType_t g_queue_depth = 0;
 
@@ -152,18 +190,77 @@ class TxCallbacks : public NimBLECharacteristicCallbacks {
 RxCallbacks g_rx_callbacks;
 TxCallbacks g_tx_callbacks;
 
-bool send_packet(uint16_t conn, const uint8_t *pkt, size_t len) {
-    for (int i = 0; i < NOTIFY_RETRIES; ++i) {
-        if (g_companion.load() != conn) {
-            return false;  // the phone left mid-send
-        }
-        if (g_tx->notify(pkt, len, conn)) {
-            return true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(NOTIFY_RETRY_MS));
+/**
+ * Queue one packet for the tx task. Called by the service with its mutex held,
+ * so it never waits: a full queue fails the send (the service checks tx_room()
+ * first, so that only happens past a credit window, P7.32).
+ */
+bool send_packet(uint32_t epoch, uint16_t conn, const uint8_t *pkt, size_t len) {
+    if (!g_txq || len > MAX_PACKET || g_epoch.load() != epoch) {
+        return false;
     }
-    LINK_LOG("[link] notify failed; giving up on packet");
-    return false;
+    static TxPacket staging;  // ~250 B, off the caller's stack
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    staging.epoch = epoch;
+    staging.conn = conn;
+    staging.len = static_cast<uint16_t>(len);
+    std::memcpy(staging.data, pkt, len);
+    const bool ok = xQueueSend(g_txq, &staging, 0) == pdTRUE;
+    xSemaphoreGive(g_tx_lock);
+    if (!ok) {
+        g_tx_dropped.fetch_add(1);
+    }
+    return ok;
+}
+
+bool tx_room(size_t packets) {
+    return g_txq && uxQueueSpacesAvailable(g_txq) >= packets;
+}
+
+/** Discard every queued packet (after a stall: the link is not draining). */
+void tx_flush() {
+    static TxPacket junk;
+    uint32_t n = 0;
+    while (xQueueReceive(g_txq, &junk, 0) == pdTRUE) {
+        ++n;
+    }
+    g_tx_dropped.fetch_add(n);
+}
+
+/**
+ * Drains g_txq with notify(), outside the service mutex. notify() fails while
+ * the host is out of mbufs; NimBLE has no "space freed" event (its NOTIFY_TX
+ * event fires synchronously inside notify with the same code), so poll every
+ * NOTIFY_RETRY_MS up to the stall budget. It also waits while fewer than
+ * HID_MBUF_RESERVE msys blocks are free, so HID key reports always find one
+ * (P7.31).
+ */
+void tx_task(void *) {
+    static TxPacket p;
+    for (;;) {
+        if (xQueueReceive(g_txq, &p, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        const uint32_t t0 = millis();
+        for (;;) {
+            if (g_epoch.load() != p.epoch || g_companion.load() != p.conn) {
+                break;  // the session ended; drop its leftovers
+            }
+            /* Leave HID_MBUF_RESERVE blocks for key reports (P7.31). */
+            if (os_msys_num_free() >= HID_MBUF_RESERVE &&
+                g_tx->notify(p.data, p.len, p.conn)) {
+                break;
+            }
+            if (millis() - t0 >= g_stall_ms.load()) {
+                LINK_LOG("[link] notify stalled %u ms; dropping the tx queue",
+                         static_cast<unsigned>(g_stall_ms.load()));
+                g_tx_dropped.fetch_add(1);
+                tx_flush();
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(NOTIFY_RETRY_MS));
+        }
+    }
 }
 
 void companion_up(uint16_t conn, const std::string &addr) {
@@ -174,15 +271,26 @@ void companion_up(uint16_t conn, const std::string &addr) {
     if (mtu > hal::ble::ATT_MTU) {
         mtu = hal::ble::ATT_MTU;
     }
+    const uint32_t epoch = g_epoch.fetch_add(1) + 1;
+    /* Supervision timeout is in 10 ms units. */
+    uint32_t stall = 2u * 10u * g_server->getPeerInfoByHandle(conn).getConnTimeout();
+    if (stall < NOTIFY_STALL_MIN_MS) stall = NOTIFY_STALL_MIN_MS;
+    if (stall > NOTIFY_STALL_MAX_MS) stall = NOTIFY_STALL_MAX_MS;
+    g_stall_ms.store(stall);
+
     TransportOps ops;
-    ops.send_packet = [conn](const uint8_t *pkt, size_t len) { return send_packet(conn, pkt, len); };
+    ops.send_packet = [epoch, conn](const uint8_t *pkt, size_t len) {
+        return send_packet(epoch, conn, pkt, len);
+    };
+    ops.tx_room = [](size_t packets) { return tx_room(packets); };
     ops.packet_size = static_cast<size_t>(mtu) - 3;
     ops.rx_queue_packets =
         g_queue_depth > 2 * RX_SLACK ? g_queue_depth - RX_SLACK : g_queue_depth / 2;
     ops.peer_name = "ble:" + addr;
     g_companion.store(conn);
-    LINK_LOG("[link] companion %s up, mtu=%u rxq=%u", ops.peer_name.c_str(),
-             static_cast<unsigned>(mtu), static_cast<unsigned>(ops.rx_queue_packets));
+    LINK_LOG("[link] companion %s up, mtu=%u rxq=%u txq=%u stall=%ums", ops.peer_name.c_str(),
+             static_cast<unsigned>(mtu), static_cast<unsigned>(ops.rx_queue_packets),
+             static_cast<unsigned>(g_txq_depth), static_cast<unsigned>(stall));
     service_on_connect(ops);
 }
 
@@ -252,6 +360,11 @@ void link_task(void *) {
                      static_cast<unsigned>(dropped),
                      static_cast<unsigned>(g_dropped_total.load()));
         }
+        const uint32_t tx_dropped = g_tx_dropped.exchange(0);
+        if (tx_dropped) {
+            LINK_LOG("[link] dropped %u tx packets (queue full or stalled)",
+                     static_cast<unsigned>(tx_dropped));
+        }
     }
 }
 
@@ -265,6 +378,19 @@ QueueHandle_t create_queue() {
     }
     g_queue_depth = QUEUE_DEPTH_INTERNAL;
     return xQueueCreate(QUEUE_DEPTH_INTERNAL, sizeof(Event));
+}
+
+/** Tx queue storage in PSRAM when available, like the rx queue. */
+QueueHandle_t create_tx_queue() {
+    static StaticQueue_t qs;
+    void *storage = heap_caps_malloc(TX_QUEUE_DEPTH * sizeof(TxPacket), MALLOC_CAP_SPIRAM);
+    if (storage) {
+        g_txq_depth = TX_QUEUE_DEPTH;
+        return xQueueCreateStatic(TX_QUEUE_DEPTH, sizeof(TxPacket),
+                                   static_cast<uint8_t *>(storage), &qs);
+    }
+    g_txq_depth = TX_QUEUE_DEPTH_INTERNAL;
+    return xQueueCreate(TX_QUEUE_DEPTH_INTERNAL, sizeof(TxPacket));
 }
 
 const char *board_tag() {
@@ -300,8 +426,10 @@ void build(NimBLEServer *server) {
     info->setValue(std::string(json));
 
     g_post_lock = xSemaphoreCreateMutex();
+    g_tx_lock = xSemaphoreCreateMutex();
     g_queue = create_queue();
-    if (!g_queue || !g_post_lock) {
+    g_txq = create_tx_queue();
+    if (!g_queue || !g_post_lock || !g_txq || !g_tx_lock) {
         log_e("[link] event queue alloc failed; PagerLink over BLE disabled");
         return;
     }
@@ -310,6 +438,14 @@ void build(NimBLEServer *server) {
                                 0) != pdPASS) {
         log_e("[link] task create failed; PagerLink over BLE disabled");
         g_task = nullptr;
+    }
+    // Same priority and core as link_task; it only sleeps or notifies (P7.32).
+    if (g_task && xTaskCreatePinnedToCore(tx_task, "link_tx", TX_TASK_STACK, nullptr,
+                                          tskIDLE_PRIORITY + 1, &g_tx_task, 0) != pdPASS) {
+        log_e("[link] tx task create failed; PagerLink over BLE disabled");
+        vTaskDelete(g_task);
+        g_task = nullptr;
+        g_tx_task = nullptr;
     }
 }
 
