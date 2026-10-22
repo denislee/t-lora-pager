@@ -1147,7 +1147,7 @@ never overwrite rows.
 2. **P7.4** unlock on a worker, plus fixed-salt prewarm (P6.22a/b). ✅ code 2026-10-22 (§16).
 3. **P7.5**, **P7.6**, **P7.7**. ✅ code 2026-10-22 (§16); P7.7 also fixes secrets lost on passphrase change; security review owed.
 
-**Phase E: render** (only what the Phase A numbers flag)
+**Phase E: render** (only what the Phase A numbers flag) ⏸ parked 2026-10-22 until the hardware profile session (§16).
 1. P6.9.
 2. P6.10.
 3. **P7.10** editor invalidation.
@@ -1232,7 +1232,7 @@ Scratch artifacts from this audit (not in the repo, may be cleaned by the OS):
 
 ## 16. Progress log
 
-_Append-only. Working tree on top of `c9c1a96`, uncommitted. Hardware checks marked ☐ are still owed._
+_Append-only. Hardware checks marked ☐ are still owed. Since 2026-10-22 each item is committed locally (not pushed); the last section, "where the plan stands", lists what is left._
 
 ### 2026-10-19: Phase B and Phase A instrumentation
 
@@ -1426,3 +1426,25 @@ Phase H flash total so far: pager 2,897,968 → **2,690,752 B** (−207,216 B; 6
 | P7.43 | ✅ code (rest) | `ui_ssh.cpp`: drain stdout/stderr through a 4 KB heap buffer until empty, send queued input, then `select()` on the session socket + an eventfd that `send_bytes()`/`disconnect()` write (1 s idle; 50 ms without eventfd); stops reading while 16 KB waits for the UI (TCP back-pressure). **Corrections:** LibSSH-ESP32 is **4.2.0** (libssh 0.10.6; `platformio.ini` pins `#4.2.0`; CLAUDE.md fixed); a task notify alone can't cut echo latency because `ssh_channel_poll_timeout` blocks in lwIP, hence the eventfd. Echo is still bounded by the UI's 100 ms `poll_tick_cb`. | builds | ☐ echo latency; `cat` of a large file (throughput, UI responsive); idle wakes; reconnect |
 
 Pager after batch 1: 2,696,480 B (+5,232) / RAM 95,352 B (+1,168: shadow cache + `s_save_path`); +3 KB heap at BLE init for `ble_hid_tx`.
+| P7.26 | ✅ code | `hw_mount_sd` takes `ScopedSpiLock` then `ScopedI2cLock` around `instance.installSD()`, then invalidates the storage-info cache. `[LOCAL PATCH P7.26]` pager + Ultra `installSD()` set `HW_SD_ONLINE` on success and clear it on every failure path (also fixes the bit after the `lightSleep` remount). Vendor `installSD` takes no locks itself. Trade-off: the I2C lock spans `SD.begin()` (SD_DET is read inside the vendor call); the TCA8418 FIFO holds 10 key events meanwhile. **Correction:** Ultra already set the bit; only the pager didn't, so a card inserted after boot was never usable through the 4 callers. | builds | ☐ insert SD after boot → prune/copy uses it; pull it during light sleep → offline on wake; no display glitch during mount |
+| P7.27 | ✅ code | `fs/dirty` is a RAM `std::atomic<bool>`; NVS means only "index may be stale at next boot". Clean→dirty is written to NVS synchronously before the caller's write, only if NVS says clean (a crash after an edit still boots dirty). Dirty→clean is RAM only; `hw_filesystem_dirty_persist()` writes false at `hw_low_power_loop` and `hw_shutdown` after `hw_save_flush`, re-checking for a racing write. Edit → journal cycle: 0 NVS writes once NVS is dirty (was 2). | builds | ☐ no NVS write on repeat edit→journal cycles; edit then pull power → next boot rescans; sleep after reconcile → next boot trusts the index |
+| P7.28 | ✅ code | SD total/used cached, keyed on the filesystem generation + an invalidation epoch bumped by `hw_mount_sd` and the post-`lightSleep` path; failed reads not cached; `free` clamped. **Correction:** `totalBytes()` and `usedBytes()` each call `f_getfree` (twice per call); with `FF_FS_NOFSINFO 0` a full scan happens at most once per mount, so the cache mostly removes SPI round-trips from `link_task`. | builds; emulator smoke 45/45 incl. `sys.info` (emulator returns zeros) | ☐ `sys.info` on a FAT16/bad-FSINFO card: first call slow, later instant, updates after a write |
+| P7.41 | ✅ code | `ui_chat.cpp` hub path: `HUB_READ_BUDGET_MS` 70 s, `SEND_WATCHDOG_MS` 80 s (was 20 s); 512 B `client.read(buf, n)` blocks while `available()`, 10 ms sleep only when idle; wrap-safe deadline. | builds | ☐ 15–60 s hub voice turn completes; watchdog at ~80 s |
+| P7.42 | ✅ code | New `StringSink : Stream` (`HTTPClient::writeToStream` takes a `Stream`, not a `Print`): exact reserve for a known length, doubling otherwise, each grow checked against the largest free block (`-fno-exceptions`: a failed `std::string` alloc aborts). `http_read_body` replaces `getString()` + copy in `hw_http_get_string`/`hw_http_request`. Chunked decoding confirmed in 2.0.17. `getString()` never mapped `writeToStream` errors, so callers still judge by status; a read error keeps the partial body with `log_w`. | builds | ☐ chunked response parses; heap peak ~1× body |
+
+**Found, not fixed (pre-existing):** `hw_low_power_loop` holds the I2C lock across `instance.lightSleep()`, whose `uninstallSD()` calls `lockSPI()` (I2C → SPI, against the documented order), and the remount's `SD.begin` runs without the SPI lock.
+
+Final check at `519c1af`: `tlora_pager`, `twatchs3`, `twatch_ultra`, `emulator_lora_pager` build; native 198/198. Pager **2,697,200 B (64.3 %)** / RAM 95,384 B (was 2,869,904 B / 94,192 B at the start of this run's P7.32 row; 2,864,352 B at `c9c1a96`).
+
+### 2026-10-22: where the plan stands
+
+Every engineering item that can be done without a device has landed in code (commits `f6a1981` … `519c1af`, one per item or phase, not pushed). What is left:
+
+1. **The hardware session.** One `tlora_pager_profile` flash fills the §15 boot/frame/heap/stack rows (Phase A) and runs every ☐ in §16. No device was attached during this run.
+2. **Phase E (render)**: P6.9, P6.10, P7.10, P7.12, P4.20, P7.13, P6.12, P7.14, P7.15. Parked by the plan's own rule until the Phase A numbers say which matter.
+3. **Product calls**: P6.17 (scroll animation), P7.12 (snippet length), P7.57 (commit-coalescing flag), P6.42/P3.27 (OTA slot), P6.43 (LibSSH), P7.60 `forecast_hours=24` (moves the hourly slots; decide with P6.35). P7.7 made one in code, revertible: **disabling encryption now erases the saved tokens** (§16 Phase D).
+4. **Security review** of P7.2 (custom PBKDF2) and P7.7 (staged passphrase change); pointers in §16.
+5. **Parked engineering:** P6.19 (SD clock: needs the IS.2 CRC read-back on hardware).
+6. **Left open inside landed items:** P7.47 Weather push poll (needs an LVGL work queue); P7.25 clearing snippets on lock (needs an LVGL-thread lock listener); P7.63 control-message priority lane; P7.34 SD keep-open (needs a mount counter around `lightSleep`) and `finish_inbound` using `XferReceiver::crc()`; P7.43 echo still bounded by the 100 ms UI poll; P7.51 a 1.5.3 bitmap for exact Ultra parity.
+7. **Not committed:** P7.61 (`TDTelegram.swift` + `TDTelegramConcurrencyTests.swift`), because that file carries separate local edits.
+8. **New findings outside this plan:** `hal/sensors.cpp` doesn't include `board_config.h`, so its BHI260 pipeline compiles to nothing on the pager (Phase F); the `hw_low_power_loop` I2C → SPI inversion above.
