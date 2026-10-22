@@ -56,6 +56,18 @@ struct Transfer {
     bool overwrite;
     uint32_t last_ms;  /* now_ms() at the start or the last bulk message */
     uint32_t rto_ms;   /* now_ms() at the start, the last ACK, or the last retransmit (reads) */
+    /* The file the chunks go through (path for reads, part for writes), kept
+     * open for the whole transfer (P7.34). Shared with the tx/rx callbacks, so
+     * it survives g_xfers reallocating. */
+    std::shared_ptr<VolFile> file;
+    /* Set when a delete/rename/overwrite touched this transfer's file: the
+     * next chunk fails the transfer instead of reopening another file. */
+    bool file_stale = false;
+    /* Reads: running CRC of the bytes sent in order from offset 0, checked
+     * against `crc` (maybe from the CRC cache) when the last byte goes out. */
+    bool crc_check = false;
+    uint32_t crc_next = 0;
+    uint32_t crc_run = 0;
     std::unique_ptr<XferSender> tx;   /* reads */
     std::unique_ptr<XferReceiver> rx; /* writes */
 };
@@ -90,10 +102,11 @@ Transfer *find(uint16_t id) {
     return nullptr;
 }
 
-/** Erase a transfer without touching its files. */
+/** Erase a transfer (closing its file) without removing anything. */
 void erase(uint16_t id) {
     for (size_t i = 0; i < g_xfers.size(); ++i) {
         if (g_xfers[i].id == id) {
+            if (g_xfers[i].file) g_xfers[i].file->close();
             g_xfers.erase(g_xfers.begin() + static_cast<std::ptrdiff_t>(i));
             return;
         }
@@ -104,10 +117,54 @@ void erase(uint16_t id) {
 void drop(uint16_t id) {
     Transfer *t = find(id);
     if (!t) return;
+    if (t->file) t->file->close(); /* never remove a file we hold open */
     if (t->upload && !t->part.empty()) {
         vol_remove(t->vol, t->part);
     }
     erase(id);
+}
+
+/** True when `p` is `target` or lies under it. */
+bool same_or_under(const std::string &p, const std::string &target) {
+    if (p == target) return true;
+    if (target == "/") return true;
+    return p.size() > target.size() && p.compare(0, target.size(), target) == 0 &&
+           p[target.size()] == '/';
+}
+
+/**
+ * Before a delete/rename/overwrite of `target` on `v`: close every transfer
+ * file at or under it and mark it stale, so no handle outlives its directory
+ * entry and the transfer fails on its next chunk instead of reading or
+ * writing whatever lands on that path next.
+ */
+void close_files_under(Vol v, const std::string &target) {
+    for (Transfer &t : g_xfers) {
+        if (t.vol != v || !t.file) continue;
+        const std::string &own = t.upload ? t.part : t.path;
+        if (same_or_under(own, target)) {
+            t.file->close();
+            t.file_stale = true;
+        }
+    }
+}
+
+/** Reads: fold the bytes just read into the transfer's running CRC; when the
+ * whole file has gone out in order, a mismatch means the announced CRC (from
+ * the cache) was stale — forget it so the next fs.read recomputes. */
+void note_read(uint16_t id, uint32_t off, const uint8_t *buf, size_t n) {
+    Transfer *t = find(id);
+    if (!t || !t->crc_check || off != t->crc_next || !t->tx) return;
+    t->crc_run = crc32_update(t->crc_run, buf, n);
+    t->crc_next += static_cast<uint32_t>(n);
+    if (t->crc_next == t->tx->size()) {
+        t->crc_check = false;
+        if (t->crc_run != t->crc) {
+            LINK_LOG("fs.read id=%u path=%s announced crc was stale", static_cast<unsigned>(id),
+                     t->path.c_str());
+            vol_crc_forget(t->vol, t->path);
+        }
+    }
 }
 
 /** True when `st` is a file whose first bytes are already Salted__ ciphertext. */
@@ -171,21 +228,6 @@ bool get_xfer_id(const JsonObject &p, const char *key, uint16_t &out) {
     int64_t v = 0;
     if (!p.get_int(key, v) || v < 1 || v > 65535) return false;
     out = static_cast<uint16_t>(v);
-    return true;
-}
-
-/** CRC-32/ISO-HDLC over `size` bytes of a file, read in MAX_DATA_CHUNK chunks. */
-bool file_crc(Vol v, const std::string &path, uint32_t size, uint32_t &out) {
-    std::vector<uint8_t> buf(MAX_DATA_CHUNK);
-    uint32_t crc = 0;
-    uint32_t off = 0;
-    while (off < size) {
-        const size_t n = std::min<size_t>(MAX_DATA_CHUNK, size - off);
-        if (!vol_read_at(v, path, off, buf.data(), n)) return false;
-        crc = crc32_update(crc, buf.data(), n);
-        off += static_cast<uint32_t>(n);
-    }
-    out = crc;
     return true;
 }
 
@@ -314,9 +356,15 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
     }
     if (offset > st.size) return fail(err, HalError::InvalidArgument, "bad offset");
 
+    /* PROTOCOL.md §6.1: the RES carries the whole-file crc32, so it must be
+     * known before the first DATA; the cache makes a repeat read free. */
     uint32_t crc = 0;
-    if (!file_crc(v, path, st.size, crc)) return fail(err, HalError::InternalError, "io error");
+    if (!vol_file_crc(v, path, st.size, st.mtime, crc)) {
+        return fail(err, HalError::InternalError, "io error");
+    }
     const bool prot = is_protected(v, path, st);
+    std::shared_ptr<VolFile> file = std::make_shared<VolFile>();
+    if (!file->open_read(v, path)) return fail(err, HalError::InternalError, "io error");
 
     Transfer t;
     t.id = xfer;
@@ -326,10 +374,16 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
     t.crc = crc;
     t.last_ms = now_ms();
     t.rto_ms = t.last_ms;
+    t.file = file;
+    t.crc_check = (offset == 0);
     t.tx.reset(new XferSender(
         st.size, MAX_DATA_CHUNK,
-        [v, path](uint32_t off, uint8_t *buf, size_t n) {
-            return vol_read_at(v, path, off, buf, n);
+        [file, xfer](uint32_t off, uint8_t *buf, size_t n) {
+            const Transfer *cur = find(xfer);
+            if (!cur || cur->file_stale) return false;
+            if (!file->read_at(off, buf, n)) return false;
+            note_read(xfer, off, buf, n);
+            return true;
         },
         [xfer](const std::string &payload) {
             return g_rpc && g_rpc->send_bulk(MsgType::Data, xfer, payload);
@@ -393,8 +447,10 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
     }
 
     const std::string part = path + ".part";
+    close_files_under(v, part);
     vol_remove(v, part); /* drop any stale staging file */
-    if (!vol_write_at(v, part, 0, nullptr, 0)) {
+    std::shared_ptr<VolFile> file = std::make_shared<VolFile>();
+    if (!file->open_write(v, part)) {
         return fail(err, HalError::InternalError, "io error");
     }
 
@@ -409,13 +465,16 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
     t.overwrite = overwrite;
     t.last_ms = now_ms();
     t.rto_ms = t.last_ms;
+    t.file = file;
     uint16_t credits = 0;
     unsigned ack_every = 0;
     service_rx_window(credits, ack_every);
     t.rx.reset(new XferReceiver(
         size,
-        [v, part](uint32_t off, const uint8_t *bytes, size_t n) {
-            return vol_write_at(v, part, off, bytes, n);
+        [file, id](uint32_t off, const uint8_t *bytes, size_t n) {
+            const Transfer *cur = find(id);
+            if (!cur || cur->file_stale) return false;
+            return file->write_at(off, bytes, n);
         },
         [id](const std::string &payload) {
             return g_rpc && g_rpc->send_bulk(MsgType::Ack, id, payload);
@@ -454,8 +513,14 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
         return fail(err, HalError::InvalidArgument, "incomplete");
     }
 
-    uint32_t crc = 0;
-    if (!file_crc(v, part, size, crc)) {
+    /* Close (sync size + FAT) before checking and renaming. The CRC is the
+     * receiver's running CRC of exactly the bytes handed to write_at, so the
+     * .part is not read back; a stat confirms the size landed. */
+    if (t->file) t->file->close();
+    const bool stale = t->file_stale;
+    const uint32_t crc = t->rx->crc();
+    VolEntry pst;
+    if (stale || !vol_stat(v, part, pst) || pst.dir || pst.size != size) {
         drop(id);
         return fail(err, HalError::InternalError, "io error");
     }
@@ -466,6 +531,7 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
         return fail(err, HalError::InvalidArgument, "crc mismatch");
     }
 
+    close_files_under(v, path); /* a read of the file we replace */
     VolEntry st;
     if (vol_stat(v, path, st)) {
         if (!overwrite) {
@@ -508,6 +574,7 @@ bool handle_delete(const JsonObject &params, JsonWriter &result, RpcError &err) 
 
     VolEntry st;
     if (!vol_stat(v, path, st)) return fail(err, HalError::InvalidArgument, "not found");
+    close_files_under(v, path);
     if (!vol_remove(v, path)) return fail(err, HalError::InternalError, "io error");
     hw_set_filesystem_dirty(true);
     result.begin_object().end_object();
@@ -556,6 +623,8 @@ bool handle_rename(const JsonObject &params, JsonWriter &result, RpcError &err) 
     if (!vol_stat(v, parent_of(to), tst) || !tst.dir) {
         return fail(err, HalError::InvalidArgument, "not a directory");
     }
+    close_files_under(v, from);
+    close_files_under(v, to);
     if (!vol_rename(v, from, to)) return fail(err, HalError::InternalError, "io error");
     hw_set_filesystem_dirty(true);
     result.begin_object().end_object();

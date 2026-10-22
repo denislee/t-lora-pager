@@ -236,6 +236,174 @@ static void test_crc32_check_value(void) {
     TEST_ASSERT_EQUAL_UINT32(one, part);
 }
 
+/* Bitwise CRC-32/ISO-HDLC in the esp_rom_crc32_le convention: the caller's
+ * seed is complemented on the way in and out, so a nonzero seed composes the
+ * same way crc32_update() does. */
+static uint32_t crc32_ref(uint32_t crc, const uint8_t *p, size_t n) {
+    crc = ~crc;
+    for (size_t i = 0; i < n; ++i) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
+        }
+    }
+    return ~crc;
+}
+
+static void test_crc32_rom_reference(void) {
+    /* Empty input: the seed passes through untouched. */
+    TEST_ASSERT_EQUAL_UINT32(crc32_ref(0, nullptr, 0), crc32_update(0, nullptr, 0));
+    TEST_ASSERT_EQUAL_UINT32(0u, crc32_update(0, nullptr, 0));
+    TEST_ASSERT_EQUAL_UINT32(crc32_ref(0x12345678u, nullptr, 0),
+                             crc32_update(0x12345678u, nullptr, 0));
+    TEST_ASSERT_EQUAL_UINT32(0x12345678u, crc32_update(0x12345678u, nullptr, 0));
+
+    /* Single bytes. */
+    const uint8_t singles[] = {0x00, 0xFF, 0x80};
+    for (size_t i = 0; i < sizeof(singles); ++i) {
+        const uint8_t *b = &singles[i];
+        TEST_ASSERT_EQUAL_UINT32(crc32_ref(0, b, 1), crc32_update(0, b, 1));
+        TEST_ASSERT_EQUAL_UINT32(crc32_ref(0x12345678u, b, 1),
+                                 crc32_update(0x12345678u, b, 1));
+    }
+
+    /* Both published check values. */
+    const char *digits = "123456789";
+    const uint32_t digits_crc =
+        crc32_update(0, reinterpret_cast<const uint8_t *>(digits), 9);
+    TEST_ASSERT_EQUAL_UINT32(
+        crc32_ref(0, reinterpret_cast<const uint8_t *>(digits), 9), digits_crc);
+    TEST_ASSERT_EQUAL_UINT32(0xCBF43926u, digits_crc);
+
+    const char *fox = "The quick brown fox jumps over the lazy dog";
+    const size_t fox_len = std::strlen(fox);
+    const uint32_t fox_crc =
+        crc32_update(0, reinterpret_cast<const uint8_t *>(fox), fox_len);
+    TEST_ASSERT_EQUAL_UINT32(
+        crc32_ref(0, reinterpret_cast<const uint8_t *>(fox), fox_len), fox_crc);
+    TEST_ASSERT_EQUAL_UINT32(0x414FA339u, fox_crc);
+
+    /* A longer patterned buffer. */
+    std::vector<uint8_t> pattern(4096);
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        pattern[i] = static_cast<uint8_t>((i * 31 + 7) & 0xFFu);
+    }
+    TEST_ASSERT_EQUAL_UINT32(crc32_ref(0, pattern.data(), pattern.size()),
+                             crc32_update(0, pattern.data(), pattern.size()));
+
+    /* Every byte value once. */
+    std::vector<uint8_t> ramp(256);
+    for (size_t i = 0; i < ramp.size(); ++i) {
+        ramp[i] = static_cast<uint8_t>(i);
+    }
+    const uint32_t ramp_crc = crc32_update(0, ramp.data(), ramp.size());
+    TEST_ASSERT_EQUAL_UINT32(crc32_ref(0, ramp.data(), ramp.size()), ramp_crc);
+    TEST_ASSERT_EQUAL_UINT32(0x29058C73u, ramp_crc);
+
+    /* A nonzero seed continues a checksum exactly like the reference. */
+    const char *abc = "abc";
+    const char *def = "def";
+    const uint32_t seed =
+        crc32_update(0, reinterpret_cast<const uint8_t *>(abc), 3);
+    TEST_ASSERT_EQUAL_UINT32(
+        crc32_ref(0, reinterpret_cast<const uint8_t *>(abc), 3), seed);
+
+    const uint32_t tail =
+        crc32_update(seed, reinterpret_cast<const uint8_t *>(def), 3);
+    TEST_ASSERT_EQUAL_UINT32(
+        crc32_ref(seed, reinterpret_cast<const uint8_t *>(def), 3), tail);
+
+    const char *abcdef = "abcdef";
+    TEST_ASSERT_EQUAL_UINT32(
+        crc32_update(0, reinterpret_cast<const uint8_t *>(abcdef), 6), tail);
+    TEST_ASSERT_EQUAL_UINT32(0x4B8E39EFu, tail);
+}
+
+static void test_crc32_incremental_every_split(void) {
+    std::vector<uint8_t> buf(1000);
+    for (size_t i = 0; i < buf.size(); ++i) {
+        buf[i] = static_cast<uint8_t>((i * 131 + 17) & 0xFFu);
+    }
+    const uint32_t one = crc32_update(0, buf.data(), buf.size());
+
+    /* Every two-way split, including the empty halves at both ends. */
+    for (size_t k = 0; k <= buf.size(); ++k) {
+        const uint32_t split = crc32_update(
+            crc32_update(0, buf.data(), k), buf.data() + k, buf.size() - k);
+        TEST_ASSERT_EQUAL_UINT32(one, split);
+    }
+
+    /* A three-or-more-way feed with uneven chunk sizes. */
+    const size_t sizes[3] = {1, 7, 13};
+    uint32_t fed = 0;
+    size_t off = 0;
+    size_t turn = 0;
+    while (off < buf.size()) {
+        size_t n = sizes[turn % 3];
+        if (n > MAX_DATA_CHUNK) {
+            n = MAX_DATA_CHUNK;
+        }
+        if (n > buf.size() - off) {
+            n = buf.size() - off;
+        }
+        fed = crc32_update(fed, buf.data() + off, n);
+        off += n;
+        ++turn;
+    }
+    TEST_ASSERT_EQUAL_UINT32(one, fed);
+}
+
+static void test_receiver_crc_matches_payload(void) {
+    /* Lossless 100000 B loopback: the receiver's running CRC is the source's. */
+    const uint32_t size = 100000;
+    std::vector<uint8_t> src = make_source(size);
+    std::vector<uint8_t> dst(size, 0);
+
+    Loop loop;
+    XferSender tx(
+        size, 4092,
+        [&](uint32_t off, uint8_t *buf, size_t n) {
+            std::memcpy(buf, src.data() + off, n);
+            return true;
+        },
+        [&](const std::string &p) { return loop.send_data(p); });
+    XferReceiver rx(
+        size,
+        [&](uint32_t off, const uint8_t *b, size_t n) {
+            std::memcpy(dst.data() + off, b, n);
+            return true;
+        },
+        [&](const std::string &p) { return loop.send_ack(p); });
+
+    for (int i = 0; i < 1000000 && (tx.state() != XferState::Done || rx.state() != XferState::Done);
+         ++i) {
+        tx.pump();
+        loop.deliver_all_data(rx);
+        loop.deliver_all_acks(tx);
+    }
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                            static_cast<uint8_t>(rx.state()));
+    TEST_ASSERT_EQUAL_UINT32(crc32_update(0, src.data(), src.size()), rx.crc());
+
+    /* Lossy 102400 B: one mid-stream DATA dropped forces a gap and a rewind, so
+     * retransmitted bytes are written again — they must not be counted twice. */
+    LossyRig rig(102400);
+    rig.loop.drop_data = 5;
+    rig.run();
+    rig.check();
+    TEST_ASSERT_TRUE(rig.loop.data_sends > 26u);
+    TEST_ASSERT_EQUAL_UINT32(
+        crc32_update(0, rig.src.data(), rig.src.size()), rig.rx.crc());
+
+    /* A zero-length transfer writes nothing, so its CRC is 0. */
+    XferReceiver empty(0, [](uint32_t, const uint8_t *, size_t) { return true; },
+                       [](const std::string &) { return true; });
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                            static_cast<uint8_t>(empty.state()));
+    TEST_ASSERT_EQUAL_UINT32(0u, empty.crc());
+}
+
 static void test_round_trip_lossless(void) {
     const uint32_t size = 100000;
     std::vector<uint8_t> src = make_source(size);
@@ -772,6 +940,9 @@ static void test_retransmit_contract(void) {
 int main(int /*argc*/, char ** /*argv*/) {
     UNITY_BEGIN();
     RUN_TEST(test_crc32_check_value);
+    RUN_TEST(test_crc32_rom_reference);
+    RUN_TEST(test_crc32_incremental_every_split);
+    RUN_TEST(test_receiver_crc_matches_payload);
     RUN_TEST(test_round_trip_lossless);
     RUN_TEST(test_sender_respects_credits);
     RUN_TEST(test_ack_replaces_window);

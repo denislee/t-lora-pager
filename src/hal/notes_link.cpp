@@ -78,7 +78,8 @@ static bool parse_string_array(const std::string &raw, std::vector<std::string> 
 }
 
 // Append every *.txt entry (not a directory, name ending in ".txt", and not in
-// `skip`) under /notes on volume `v` to `out`, CRC-32 over its raw bytes. When
+// `skip`) under /notes on volume `v` to `out`, CRC-32 over its raw bytes (from
+// the vol_file_crc() cache when the note is unchanged). When
 // the listing itself fails: `required` turns that into a hard error, otherwise
 // an SD without a /notes folder is simply empty.
 static bool scan(pagerlink::Vol v, const char *volname, const std::set<std::string> *skip,
@@ -109,18 +110,12 @@ static bool scan(pagerlink::Vol v, const char *volname, const std::set<std::stri
             return false;
         }
 
+        // Shared with fs.read: an unchanged note is not re-read on every sync,
+        // and the phone's fs.read of it then answers from the same cache.
         uint32_t crc = 0;
-        std::vector<uint8_t> buf(4096);  // heap: the worker stack is 8 KB on hardware
-        uint32_t off = 0;
-        while (off < st.size) {
-            size_t n = st.size - off;
-            if (n > buf.size()) n = buf.size();
-            if (!pagerlink::vol_read_at(v, path, off, buf.data(), n)) {
-                err = "cannot read " + name;
-                return false;
-            }
-            crc = pagerlink::crc32_update(crc, buf.data(), n);
-            off += static_cast<uint32_t>(n);
+        if (!pagerlink::vol_file_crc(v, path, st.size, st.mtime, crc)) {
+            err = "cannot read " + name;
+            return false;
         }
 
         NoteEntry ne;

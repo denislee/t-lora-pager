@@ -20,29 +20,59 @@
 
 #include "hal/link/link_frame.h"
 
+#ifdef ARDUINO
+#include <esp_rom_crc.h>
+#endif
+
 namespace pagerlink {
 
-uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t n) {
-    /* Reflected CRC-32/ISO-HDLC table, built once on the first call. */
-    static uint32_t table[256];
-    static bool table_ready = false;
-    if (!table_ready) {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k) {
-                c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            }
-            table[i] = c;
-        }
-        table_ready = true;
-    }
+#ifdef ARDUINO
 
+/* ROM CRC-32 (esp_rom_crc.h): reflected poly 0xEDB88320 with a '~' on the way
+ * in and on the way out, i.e. exactly crc32_update()'s contract: seed 0 gives
+ * CRC-32/ISO-HDLC, and feeding a previous result back in continues it. */
+uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t n) {
+    if (n == 0) return crc;
+    return esp_rom_crc32_le(crc, data, static_cast<uint32_t>(n));
+}
+
+#else
+
+namespace {
+
+/* Reflected CRC-32/ISO-HDLC table, built at compile time into rodata: no
+ * lazy init, so no first-call race between link_task and a worker. */
+struct Crc32Table {
+    uint32_t v[256];
+};
+
+constexpr Crc32Table make_crc32_table() {
+    Crc32Table t{};
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; ++k) {
+            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        }
+        t.v[i] = c;
+    }
+    return t;
+}
+
+constexpr Crc32Table CRC32_TABLE = make_crc32_table();
+static_assert(CRC32_TABLE.v[1] == 0x77073096u, "CRC-32 table");
+static_assert(CRC32_TABLE.v[255] == 0x2D02EF8Du, "CRC-32 table");
+
+}  // namespace
+
+uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t n) {
     crc = ~crc;
     for (size_t i = 0; i < n; ++i) {
-        crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+        crc = CRC32_TABLE.v[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
     }
     return ~crc;
 }
+
+#endif
 
 // ---------------------------------------------------------------------------
 // XferSender
@@ -157,6 +187,7 @@ XferReceiver::XferReceiver(uint32_t size, WriteFn write, AckFn ack, uint16_t win
       next_(start),
       last_ack_(start),
       gap_acked_(false),
+      crc_(0),
       state_(start >= size ? XferState::Done : XferState::Active) {}
 
 bool XferReceiver::send_ack() {
@@ -219,6 +250,7 @@ XferState XferReceiver::on_data(const uint8_t *payload, size_t len) {
         state_ = XferState::Failed;
         return state_;
     }
+    crc_ = crc32_update(crc_, bytes, n);
     next_ += static_cast<uint32_t>(n);
     ++since_ack_;
 

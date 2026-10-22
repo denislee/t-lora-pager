@@ -129,6 +129,12 @@ public:
     XferState state() const { return state_; }
     uint32_t received() const { return next_; }
     uint32_t size() const { return size_; }
+    /**
+     * CRC-32/ISO-HDLC of the bytes accepted so far (from `start`), in order:
+     * exactly the bytes handed to WriteFn. With start 0 and state Done it is
+     * the whole transfer's CRC, so the owner need not re-read what it wrote.
+     */
+    uint32_t crc() const { return crc_; }
 
 private:
     bool send_ack();
@@ -142,6 +148,7 @@ private:
     uint32_t next_;
     uint32_t last_ack_; /* offset of the last ACK sent (the sender's acked) */
     bool gap_acked_;    /* a re-ACK has gone out for the current gap */
+    uint32_t crc_;      /* running CRC of the accepted bytes */
     XferState state_;
 };
 
