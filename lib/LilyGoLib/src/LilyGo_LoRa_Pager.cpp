@@ -292,7 +292,9 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
 
     devices_probe |= HW_PSRAM_ONLINE;
 
-    Wire.begin(SDA, SCL);
+    // [LOCAL PATCH BT.8] Start at 400 kHz (default 100 kHz): every device on the
+    // pager bus is Fast-mode, and the gauge/PMU/XL9555 setup below runs on it.
+    Wire.begin(SDA, SCL, 400000UL);
 
     if (!(disable_hw_init & NO_SCAN_I2C_DEV)) {
         SensorWireHelper::dumpDevices(Wire, Serial);
@@ -386,6 +388,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         // [LOCAL PATCH P6.2] initSensor() is the only place that moves the bus
         // off Wire.begin()'s 100 kHz (it ends at 400 kHz). Keep that clock when
         // the sensor is deferred (src/hal/sensors.cpp hw_imu_ensure_started()).
+        // Since BT.8 Wire.begin() already runs at 400 kHz; kept as a guard.
         Wire.setClock(400000UL);
     }
 
