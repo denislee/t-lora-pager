@@ -41,6 +41,8 @@ void frame(uint64_t us);
 void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us);
 // Boot marker (OPTIMIZATION_PHASE6.md G.1): records esp_timer time under a static name; the whole list is printed once, at the first report after the first display flush.
 void boot_mark(const char *name);
+// Pre-app time (BOOT_TIME_PLAN BT.1): call first thing in setup(). Records esp_clk_rtc_time() (time since the RTC timer reset, i.e. power-on / chip reset; not reset by esp_restart) next to esp_timer time and the reset reason; printed with the boot table.
+void boot_pre_app();
 // Named span, logged when >= 5 ms.
 void span(const char *name, uint64_t us);
 // Dump the default group's members (why = short label).

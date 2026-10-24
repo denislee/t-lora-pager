@@ -14,6 +14,7 @@
 #include "../core/kb_lock.h"
 
 #include "../core/system_hooks.h"
+#include "../core/input_profile.h"
 
 #include <cstring>
 #include <lvgl.h>
@@ -440,6 +441,7 @@ void hw_init()
 
 #ifdef ARDUINO
     hw_set_disp_backlight(user_setting.brightness_level);
+    INPUT_PROF(core::prof::boot_mark("backlight on"));
 
     hw_set_kb_backlight(user_setting.keyboard_bl_level);
 

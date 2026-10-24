@@ -298,7 +298,9 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         SensorWireHelper::dumpDevices(Wire, Serial);
     }
 
-    if (!gauge.begin(Wire, SDA, SCL)) {
+    bool gauge_ok = gauge.begin(Wire, SDA, SCL);
+    BOOT_MARK("gauge begin");
+    if (!gauge_ok) {
         log_e("Failed to find GAUGE.");
     } else {
         log_d("Initializing GAUGE succeeded");
@@ -307,6 +309,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         uint16_t newFullChargeCapacity = 1500;
         gauge.setNewCapacity(newDesignCapacity, newFullChargeCapacity);
     }
+    BOOT_MARK("gauge cfg");
 
     res = initPMU();
     if (!res) {
@@ -315,6 +318,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         log_d("Initializing PMU succeeded");
         devices_probe |= HW_PMU_ONLINE;
     }
+    BOOT_MARK("pmu");
 
 #ifdef USING_XL9555_EXPANDS
     if (io.begin(Wire, 0x20)) {
@@ -363,7 +367,7 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     }
 #endif /*USING_XL9555_EXPANDS*/
 
-    BOOT_MARK("i2c pmu/xl9555");
+    BOOT_MARK("xl9555");
     //BHI260AP Address: 0x28
     if (!(disable_hw_init & NO_HW_SENSOR)) {
         if (initSensor()) {

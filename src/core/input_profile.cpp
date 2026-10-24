@@ -21,6 +21,8 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <esp_timer.h>
+#include <esp_private/esp_clk.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <LilyGoLib.h>      // KB_PRESSED / KB_RELEASED
@@ -122,6 +124,9 @@ uint64_t s_boot_us[kBootMax];
 uint32_t s_boot_n = 0;
 bool s_boot_flushed = false;   // first display flush seen
 bool s_boot_printed = false;
+uint64_t s_pre_rtc_us = 0;      // esp_clk_rtc_time() at boot_pre_app()
+uint64_t s_pre_timer_us = 0;    // esp_timer time at the same call
+int s_pre_reason = -1;          // esp_reset_reason(), -1 = not recorded
 
 void refr_event_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
@@ -211,6 +216,14 @@ void boot_mark(const char *name) {
         s_boot_us[s_boot_n] = now_us();
         s_boot_n++;
     }
+}
+
+void boot_pre_app() {
+#ifdef ARDUINO
+    s_pre_rtc_us = esp_clk_rtc_time();
+    s_pre_timer_us = now_us();
+    s_pre_reason = (int)esp_reset_reason();
+#endif
 }
 
 // One display flush (vendor disp_flush hook): pixels, byte-swap and SPI push
@@ -426,6 +439,14 @@ void report_tick() {
     }
     if (s_boot_flushed && !s_boot_printed) {
         s_boot_printed = true;
+        if (s_pre_reason >= 0) {
+            // Pre-app = ROM + 2nd-stage bootloader + early IDF init, before esp_timer
+            // started. Add it to every esp_timer mark below for power-on time.
+            // Only meaningful after a power-on / chip reset (the RTC timer survives esp_restart).
+            PROF_LOG("boot: reset reason %d, rtc %u ms at setup, pre-app %u ms", s_pre_reason,
+                     (unsigned)(s_pre_rtc_us / 1000),
+                     (unsigned)((s_pre_rtc_us > s_pre_timer_us ? s_pre_rtc_us - s_pre_timer_us : 0) / 1000));
+        }
         // Times are esp_timer microseconds (esp_timer starts early in IDF startup, so
         // ROM/bootloader time before it is not included).
         uint64_t prev = 0;

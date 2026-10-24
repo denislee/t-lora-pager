@@ -75,6 +75,11 @@ void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
 
 void setup()
 {
+#ifdef INPUT_PROFILE
+    // BT.1: read the RTC timer before anything else (and before the vendor
+    // begin() switches the slow clock to the 32 kHz crystal).
+    core::prof::boot_pre_app();
+#endif
     hw_set_cpu_freq(240);
 
     Serial.begin(115200);
