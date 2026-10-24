@@ -78,13 +78,14 @@ nRF24 nrf24 = new Module(44/*CS*/, 9/*IRQ*/, 43/*CE*/);
 #endif
 
 // [LOCAL PATCH P7.44] Init-table delays. 0x80 = delay(120) after the entry,
-// 0x40 = delay(20) (handled in LilyGoDispArduinoSPI::init). SWRESET keeps its
-// 120 ms. SLPOUT drops to 20 ms: the ST7796S rule is >= 5 ms before the next
-// command (the 120 ms rule only gates a later SLPIN), so 20 ms is a 4x margin.
-// VCOM (0xC5), negative gamma (0xE1) and the 0xF0 0x69 command-set lock are
-// plain register writes and no longer sleep (vendor had 0x81 / 0x8F / 0x81).
+// 0x40 = delay(20) (handled in LilyGoDispArduinoSPI::init). 0x20 = SWRESET settle:
+// 10 ms after a power-on or deep-sleep wake, else 120 ms (BT.6b, see
+// LilyGoDispArduinoSPI::init). SLPOUT drops to 20 ms: the ST7796S rule is >= 5 ms
+// before the next command (the 120 ms rule only gates a later SLPIN), so 20 ms is
+// a 4x margin. VCOM (0xC5), negative gamma (0xE1) and the 0xF0 0x69 command-set
+// lock are plain register writes and no longer sleep (vendor had 0x81 / 0x8F / 0x81).
 static const CommandTable_t st7796_init_list[19] = {
-    {0x01, {0x00}, 0x80},
+    {0x01, {0x00}, 0x20},
     {0x11, {0x00}, 0x40},
     {0xF0, {0xC3}, 0x01},
     {0xF0, {0xC3}, 0x01},

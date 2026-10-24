@@ -8,6 +8,7 @@
  */
 #include "LilyGoDispInterface.h"
 #include <Arduino.h>
+#include <esp_system.h>
 #include <vector>
 #include <bsp_lcd/esp_lcd_st7796.h>
 
@@ -693,6 +694,16 @@ bool LilyGoDispArduinoSPI::init(int sck,
             delay(120);
         } else if (t[i].len & 0x40) {
             delay(20);   // [LOCAL PATCH P7.44] short settle (ST7796 SLPOUT)
+        } else if (t[i].len & 0x20) {
+            // [LOCAL PATCH BT.6b] SWRESET settle. The ST7796S takes the next
+            // command 5 ms after a reset in Sleep-In, but needs 120 ms before
+            // SLPOUT after a reset in Sleep-Out. The pager has no panel reset
+            // line (DISP_RST is -1), so only a power-on (the panel powered up
+            // with us) or a deep-sleep wake (sleep() sent SLPIN, then waited
+            // 3 s) guarantees Sleep-In. 10 ms is a 2x margin; any other reset
+            // (esp_restart, panic, watchdog, brownout) keeps 120 ms.
+            esp_reset_reason_t why = esp_reset_reason();
+            delay((why == ESP_RST_POWERON || why == ESP_RST_DEEPSLEEP) ? 10 : 120);
         }
     }
 
