@@ -361,12 +361,24 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
             EXPANDS_SD_EN,
 #endif /*EXPANDS_SD_EN*/
         };
+        // [LOCAL PATCH BT.14] Bulk setup. Was pinMode + digitalWrite (two I2C
+        // read-modify-writes each) + delay(1) per pin. Outputs are written
+        // before the config, so each pin leaves high-Z straight at HIGH. Pins
+        // outside expands[] stay inputs, so their output bits don't matter
+        // (0xFF is also the XL9555 power-on value). SD_PULLEN stays an input.
+        uint16_t out_mask = 0;
         for (auto pin : expands) {
-            io.pinMode(pin, OUTPUT);
-            io.digitalWrite(pin, HIGH);
-            delay(1);
+            out_mask |= (uint16_t)(1U << pin);
         }
-        io.pinMode(EXPANDS_SD_PULLEN, INPUT);
+        io.writePort(ExtensionIOXL9555::PORT0, 0xFF);
+        io.writePort(ExtensionIOXL9555::PORT1, 0xFF);
+        int cfg0 = io.readConfig(ExtensionIOXL9555::PORT0);
+        int cfg1 = io.readConfig(ExtensionIOXL9555::PORT1);
+        uint16_t cfg = (uint16_t)(((cfg1 < 0 ? 0xFF : cfg1) << 8) | (cfg0 < 0 ? 0xFF : cfg0));
+        cfg &= (uint16_t)~out_mask;
+        cfg |= (uint16_t)(1U << EXPANDS_SD_PULLEN);
+        io.configPort(ExtensionIOXL9555::PORT0, (uint8_t)(cfg & 0xFF));
+        io.configPort(ExtensionIOXL9555::PORT1, (uint8_t)(cfg >> 8));
 
 #ifdef EXPANDS_DISP_RST
         io.digitalWrite(EXPANDS_DISP_RST, LOW);
