@@ -309,7 +309,16 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         devices_probe |= HW_GAUGE_ONLINE;
         uint16_t newDesignCapacity = 1500;
         uint16_t newFullChargeCapacity = 1500;
-        gauge.setNewCapacity(newDesignCapacity, newFullChargeCapacity);
+        // [LOCAL PATCH BT.3] setNewCapacity() unseals, enters CFG_UPDATE and exits
+        // with REINIT (>= 340 ms of polling) and throws away the learned
+        // FullChargeCapacity, so battery % jumped after every reboot. The BQ27220
+        // keeps its data memory in RAM: write it only after a gauge POR, when
+        // DesignCapacity is back at the ROM default. A failed read leaves it 0,
+        // which writes, as before.
+        gauge.refresh();
+        if (gauge.getDesignCapacity() != newDesignCapacity) {
+            gauge.setNewCapacity(newDesignCapacity, newFullChargeCapacity);
+        }
     }
     BOOT_MARK("gauge cfg");
 
