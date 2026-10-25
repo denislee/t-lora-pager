@@ -19,6 +19,7 @@
 
 #ifdef ARDUINO
 #include <algorithm>
+#include <functional>
 #include <set>
 #include <LilyGoLib.h>
 #include <SD.h>
@@ -125,12 +126,14 @@ static uint64_t s_sd_info_total = 0;
 static uint64_t s_sd_info_used = 0;
 #endif
 
-void hw_storage_info_invalidate()
-{
 #if defined(ARDUINO) && defined(HAS_SD_CARD_SOCKET)
+// The SD card may have changed underneath (mount, sleep unmount): make the
+// next hw_get_storage_info() re-read it.
+static void hw_storage_info_invalidate()
+{
     s_sd_info_epoch++;
-#endif
 }
+#endif
 
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free)
 {
@@ -435,27 +438,37 @@ bool hw_delete_path(const char *path, bool use_sd)
 #endif
 }
 
+#ifdef ARDUINO
+/* DC2.4.22: the one SD-or-internal fallback behind the whole-file readers.
+ * An SD hit leaves `lock` held (the caller drops it when done with the file);
+ * an SD miss releases it before falling back. `sd_first` keeps each caller's
+ * existing order: hw_read_file/hw_get_file_size prefer the SD copy, the
+ * snippet/bytes readers the internal one. The two can disagree only when the
+ * copies diverge (an edit over USB MSC on the SD card, a failed SD mirror
+ * write); unifying the order is a product call (DC2.3.19), so it is kept. */
+static File open_preferred(const char *path, core::MaybeSpiLock &lock, bool sd_first)
+{
+    auto open_sd = [&]() -> File {
+        if (!(HW_SD_ONLINE & hw_get_device_online())) return File();
+        lock.acquire();
+        File f = SD.open(path, FILE_READ);
+        if (!f) lock.release();
+        return f;
+    };
+    File f = sd_first ? open_sd() : FFat.open(path, FILE_READ);
+    if (!f) f = sd_first ? FFat.open(path, FILE_READ) : open_sd();
+    return f;
+}
+#endif
+
 bool hw_read_file(const char *path, std::string &content)
 {
 #ifdef ARDUINO
     char str[256];
     normalize_path(path, str, sizeof(str));
     wait_pending_save_for(str);
-    File f;
     core::MaybeSpiLock lock;
-    bool is_sd = (HW_SD_ONLINE & hw_get_device_online());
-
-    if (is_sd) {
-        lock.acquire();
-        f = SD.open(str, FILE_READ);
-        if (!f) {
-            lock.release();
-        }
-    }
-
-    if (!f) {
-        f = FFat.open(str, FILE_READ);
-    }
+    File f = open_preferred(str, lock, /*sd_first=*/true);
 
     if (!f) {
         log_e("Failed to open file for reading: %s", str);
@@ -486,20 +499,9 @@ size_t hw_get_file_size(const char *path)
     char str[256];
     normalize_path(path, str, sizeof(str));
     wait_pending_save_for(str);
-    File f;
     core::MaybeSpiLock lock;
-    bool is_sd = (HW_SD_ONLINE & hw_get_device_online());
+    File f = open_preferred(str, lock, /*sd_first=*/true);
     size_t size = 0;
-
-    if (is_sd) {
-        lock.acquire();
-        f = SD.open(str, FILE_READ);
-        if (!f) lock.release();
-    }
-
-    if (!f) {
-        f = FFat.open(str, FILE_READ);
-    }
 
     if (f) {
         size = f.size();
@@ -583,12 +585,10 @@ bool hw_read_sd_stream(const char *path, size_t chunk_bytes,
 }
 
 #ifdef ARDUINO
-struct FileInfo {
-    std::string name;
-    time_t time;
-};
-
-static void list_files(std::vector<FileInfo> &list, fs::FS &fs, const char *dirname, const char *ext,
+/* Leaf names of the `ext` files in `dirname`, unsorted. No modification time:
+ * file.getLastWrite() can trigger a slow f_stat lookup on the ESP32 FAT, and
+ * note filenames are chronological, so callers sort by name (DC2.3.18). */
+static void list_files(std::vector<std::string> &list, fs::FS &fs, const char *dirname, const char *ext,
                        void (*cb)(int, int, const char *) = nullptr)
 {
     File root = fs.open(dirname);
@@ -604,9 +604,7 @@ static void list_files(std::vector<FileInfo> &list, fs::FS &fs, const char *dirn
             if (slash >= 0) filename = filename.substring(slash + 1);
 
             if (filename.endsWith(ext)) {
-                // Skip file.getLastWrite() as it can trigger a slow f_stat lookup on some ESP32 FAT
-                // implementations. We rely on the chronological filename fallback for sorting.
-                list.push_back({filename.c_str(), 0});
+                list.push_back(filename.c_str());
                 count++;
                 if (cb) cb(count, 0, filename.c_str());
             }
@@ -623,18 +621,12 @@ void hw_get_internal_txt_files(std::vector<std::string> &list)
     list.clear();
 #ifdef ARDUINO
     wait_pending_save();
-    std::vector<FileInfo> file_infos;
-    list_files(file_infos, FFat, NOTES_DIR, ".txt");
+    std::vector<std::string> names;
+    list_files(names, FFat, NOTES_DIR, ".txt");
+    std::sort(names.begin(), names.end(), std::greater<std::string>());  // newest first
 
-    std::sort(file_infos.begin(), file_infos.end(), [](const FileInfo& a, const FileInfo& b) {
-        if (a.time != b.time) {
-            return a.time > b.time;
-        }
-        return a.name > b.name;
-    });
-
-    for (const auto& fi : file_infos) {
-        list.push_back(NOTES_PREFIX + fi.name);
+    for (const auto &name : names) {
+        list.push_back(NOTES_PREFIX + name);
     }
 #else
     list.push_back("notes/internal1.txt");
@@ -648,19 +640,15 @@ void hw_get_sd_txt_files(std::vector<std::string> &list)
 #ifdef ARDUINO
     wait_pending_save();
     if (HW_SD_ONLINE & hw_get_device_online()) {
-        std::vector<FileInfo> file_infos;
+        std::vector<std::string> names;
         {
             core::ScopedSpiLock lock;
-            list_files(file_infos, SD, NOTES_DIR, ".txt");
+            list_files(names, SD, NOTES_DIR, ".txt");
         }
+        std::sort(names.begin(), names.end(), std::greater<std::string>());  // newest first
 
-        std::sort(file_infos.begin(), file_infos.end(), [](const FileInfo & a, const FileInfo & b) {
-            if (a.time != b.time) return a.time > b.time;
-            return a.name > b.name;
-        });
-
-        for (const auto &fi : file_infos) {
-            list.push_back(NOTES_PREFIX + fi.name);
+        for (const auto &name : names) {
+            list.push_back(NOTES_PREFIX + name);
         }
     }
 #else
@@ -821,7 +809,7 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
     constexpr size_t kEvictBatch     = 35;
 
     if (cb) cb(0, 0, "Scanning internal storage...");
-    std::vector<FileInfo> infos;
+    std::vector<std::string> infos;
     list_files(infos, FFat, NOTES_DIR, ".txt");
 
     if (infos.size() < kEvictThreshold) {
@@ -841,19 +829,16 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
     }
     ensure_notes_dir();
 
-    // Sort by time ascending (oldest first) so the batch we move out is the
-    // least-recently-touched notes.
-    std::sort(infos.begin(), infos.end(), [](const FileInfo &a, const FileInfo &b) {
-        if (a.time != b.time) return a.time < b.time;
-        return a.name < b.name;
-    });
+    // Oldest first (chronological filenames), so the batch we move out is
+    // the oldest notes.
+    std::sort(infos.begin(), infos.end());
 
     size_t total_to_move = std::min<size_t>(kEvictBatch, infos.size());
 
     for (size_t i = 0; i < total_to_move; ++i) {
         // list_files returns leaf names; resolve back to absolute paths under
         // /notes for both the read (FFat) and write (SD) sides.
-        String leaf = infos[i].name.c_str();
+        String leaf = infos[i].c_str();
         String path = String(NOTES_DIR) + "/" + leaf;
 
         if (cb) cb((int)i, (int)total_to_move, ("Moving to SD: " + path).c_str());
@@ -1133,16 +1118,8 @@ bool hw_read_preferred_file_snippet(const char *path, std::string &content, size
     char str[256];
     normalize_path(path, str, sizeof(str));
     wait_pending_save_for(str);
-
-    File f = FFat.open(str, FILE_READ);
     core::MaybeSpiLock lock;
-    if (!f) {
-        if (HW_SD_ONLINE & hw_get_device_online()) {
-            lock.acquire();
-            f = SD.open(str, FILE_READ);
-        }
-    }
-
+    File f = open_preferred(str, lock, /*sd_first=*/false);
     if (!f) return false;
 
     size_t total = f.size();
@@ -1199,14 +1176,14 @@ void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t
     list.clear();
 #ifdef ARDUINO
     wait_pending_save();
-    std::vector<FileInfo> infos;
+    std::vector<std::string> infos;
 
     // Scan Internal
     list_files(infos, FFat, NOTES_DIR, ".txt", cb);
 
     // Scan SD if available
     if (HW_SD_ONLINE & hw_get_device_online()) {
-        std::vector<FileInfo> sd_infos;
+        std::vector<std::string> sd_infos;
         {
             core::ScopedSpiLock lock;
             list_files(sd_infos, SD, NOTES_DIR, ".txt", cb);
@@ -1215,16 +1192,15 @@ void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t
         // Merge SD into infos, avoiding duplicates (Internal wins). Set-backed
         // lookup — this runs on every journal reconcile, so the old O(n²) scan
         // hurt most here.
-        std::set<std::string> internal_names;
-        for (const auto &ii : infos) internal_names.insert(ii.name);
+        std::set<std::string> internal_names(infos.begin(), infos.end());
         for (const auto &sdi : sd_infos) {
-            if (!internal_names.count(sdi.name)) infos.push_back(sdi);
+            if (!internal_names.count(sdi)) infos.push_back(sdi);
         }
     }
 
     list.reserve(infos.size());
-    for (const auto &fi : infos) {
-        list.emplace_back(NOTES_PREFIX + fi.name, (uint32_t)fi.time);
+    for (const auto &name : infos) {
+        list.emplace_back(NOTES_PREFIX + name, 0u);  // no mtime, see list_files
     }
 #endif
 }
@@ -1270,19 +1246,9 @@ bool hw_read_preferred_bytes(const char *path, std::vector<uint8_t> &buf)
 #ifdef ARDUINO
     char str[256];
     normalize_path(path, str, sizeof(str));
-    File f;
+    wait_pending_save_for(str);  // DC2.3.19: like every other reader
     core::MaybeSpiLock lock;
-
-    // Try Internal first (faster)
-    f = FFat.open(str, FILE_READ);
-
-    // Fallback to SD if missing from Internal
-    if (!f && (HW_SD_ONLINE & hw_get_device_online())) {
-        lock.acquire();
-        f = SD.open(str, FILE_READ);
-        if (!f) lock.release();
-    }
-
+    File f = open_preferred(str, lock, /*sd_first=*/false);  // internal is faster
     if (!f) return false;
     hal::fs_read_all(f, buf);
     return true;

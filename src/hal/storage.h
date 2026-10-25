@@ -8,11 +8,8 @@
 
 void hw_mount_sd();
 // SD total/used/free; cached and re-read only after a filesystem-generation
-// bump or hw_storage_info_invalidate() (P7.28).
+// bump or a mount/unmount (P7.28).
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);
-// The SD card may have changed underneath (the vendor light-sleep remount):
-// make the next hw_get_storage_info() re-read it.
-void hw_storage_info_invalidate();
 // P7.34: unmount the SD card before light/deep sleep. Takes the SPI lock,
 // runs the unmount hook (closes kept-open link files) and SD.end(). Call
 // with no instance/SPI/I2C lock held; remount with hw_mount_sd().
@@ -133,7 +130,9 @@ bool hw_save_pending();
 bool hw_read_preferred_file_snippet(const char *path, std::string &content,
                                     size_t max_bytes, bool *truncated = nullptr);
 
-// Directory listing with modification time; used to build a stable index key.
+// Note listing (internal first, then SD-only names), each paired with a
+// modification time that is always 0: reading it costs an f_stat per file
+// on the ESP32 FAT (DC2.3.18). The journal keys its index on the name.
 // Optional callback: (current_count, total_count_if_known, current_filename)
 void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t>> &list,
                                      void (*cb)(int, int, const char *) = nullptr);
