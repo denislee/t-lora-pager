@@ -9,6 +9,7 @@
 #include "sensors.h"
 #include "storage.h"
 #include "keyboard_task.h"
+#include "lvgl_task.h"
 #include "radio_chip.h"
 #include "../core/spi_lock.h"
 #include "../core/kb_lock.h"
@@ -440,8 +441,9 @@ void hw_init()
     hw_update_battery_history();
 
 #ifdef ARDUINO
-    hw_set_disp_backlight(user_setting.brightness_level);
-    INPUT_PROF(core::prof::boot_mark("backlight on"));
+    // BT.11: the backlight stays off (AW9364 begin() leaves it at 0) until the
+    // LVGL task has flushed the first frame.
+    hw_lvgl_task_set_boot_backlight(user_setting.brightness_level);
 
     hw_set_kb_backlight(user_setting.keyboard_bl_level);
 

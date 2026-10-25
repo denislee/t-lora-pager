@@ -22,6 +22,7 @@
 #include "../core/scoped_lock.h"
 #include "../core/system.h"
 #include "task_util.h"
+#include "display.h"
 
 namespace {
 
@@ -54,6 +55,26 @@ constexpr uint32_t    kStackBytes   = 16384;
 
 TaskHandle_t s_task = nullptr;
 
+// BT.11: brightness waiting for the first flushed frame (-1 = none pending).
+int16_t s_boot_backlight = -1;
+volatile bool s_first_flush = false;
+
+void first_flush_cb(lv_event_t *) { s_first_flush = true; }
+
+// Under the instance lock, right after lv_timer_handler(). Skipped during fake
+// sleep: the wake path restores the backlight itself, and the next pass here
+// then corrects it to the user's level.
+void apply_boot_backlight()
+{
+    if (s_boot_backlight < 0 || !s_first_flush || ui_is_fake_sleep()) return;
+    if (lv_display_t *disp = lv_display_get_default()) {
+        lv_display_remove_event_cb_with_user_data(disp, first_flush_cb, nullptr);
+    }
+    hw_set_disp_backlight((uint8_t)s_boot_backlight);
+    s_boot_backlight = -1;
+    INPUT_PROF(core::prof::boot_mark("backlight on"));
+}
+
 void lvgl_task_fn(void *)
 {
     for (;;) {
@@ -72,6 +93,7 @@ void lvgl_task_fn(void *)
 #endif
             next = lv_timer_handler();
             INPUT_PROF(core::prof::frame(core::prof::now_us() - f0));
+            apply_boot_backlight();
             core::System::getInstance().loop();
         }
 
@@ -92,9 +114,19 @@ void lvgl_task_fn(void *)
 
 void hw_lvgl_task_notify_wake() { hal::notify_task(s_task); }
 
+void hw_lvgl_task_set_boot_backlight(uint8_t level) { s_boot_backlight = level; }
+
 void hw_lvgl_task_start()
 {
     if (s_task) return;
+    if (s_boot_backlight >= 0) {
+        lv_display_t *disp = lv_display_get_default();
+        if (disp) {
+            lv_display_add_event_cb(disp, first_flush_cb, LV_EVENT_FLUSH_FINISH, nullptr);
+        } else {
+            s_first_flush = true;   // no display to wait for
+        }
+    }
     hal::start_pinned_task(lvgl_task_fn, "lvgl", kStackBytes,
                            kTaskPriority, kTaskCore, &s_task, "lvgl_task");
 }
@@ -103,5 +135,6 @@ void hw_lvgl_task_start()
 
 void hw_lvgl_task_start() {}
 void hw_lvgl_task_notify_wake() {}
+void hw_lvgl_task_set_boot_backlight(uint8_t) {}
 
 #endif  // ARDUINO

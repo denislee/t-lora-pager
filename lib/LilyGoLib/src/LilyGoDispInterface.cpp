@@ -712,8 +712,10 @@ bool LilyGoDispArduinoSPI::init(int sck,
     _spi_freq = freq_Mhz * 1000U * 1000U;
 
     log_v("_init_width:%u _init_height:%u", _init_width, _init_height);
-    std::vector<uint16_t> draw_buf(_width * _height * 2, 0x0000);
-    pushColors( 0, 0, _width, _height, draw_buf.data());
+    // [LOCAL PATCH BT.10] No boot clear (was a zeroed 426 KB vector, twice the
+    // frame, pushed to the panel). This init runs only from the pager's
+    // begin(); the backlight is off until LVGL's first full frame has
+    // overwritten every pixel (BT.11, src/hal/lvgl_task.cpp).
     xSemaphoreGive(_lock);
     return true;
 }
