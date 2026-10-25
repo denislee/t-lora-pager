@@ -5,9 +5,13 @@
  * @copyright Copyright (c) 2026
  *
  * Home screen. Layout, top-to-bottom:
- *   1. Quick-toggles strip (media pills + WiFi/BT), right-aligned.
+ *   1. Quick-toggles strip (media pills + WiFi/BT + Settings), right-aligned.
  *   2. App-tile grid, ordered by activity:
  *        Create → Communicate → Info → System.
+ *
+ * IS.3: the screen is built once and kept alive while apps run; onStop only
+ * pauses the live timers and onStart either resumes or (layout changed)
+ * rebuilds.
  *
  * The grid uses a darkened resting state with a subtle accent border so tiles
  * carry their identity even when unfocused, and a tinted fill + outer accent
@@ -27,11 +31,8 @@
 #include <string>
 #ifdef ARDUINO
 #include <Preferences.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #endif
 
-LV_FONT_DECLARE(lv_font_montserrat_12);
 LV_FONT_DECLARE(lv_font_montserrat_14);
 LV_FONT_DECLARE(lv_font_montserrat_18);
 LV_FONT_DECLARE(font_montserrat_48_subset);  // P7.51 src/fonts/font_montserrat_48_subset.c
@@ -61,6 +62,7 @@ struct HomeItem {
 //   [create/capture]        Notes, Tasks, Recorder
 //   [communicate]           Telegram, Chat
 //   [consume/check]         Weather
+//   [system]                SSH
 // Settings lives in the top toggle strip as a small icon rather than the grid.
 //
 // All tiles share the global accent color so the grid reads as a single
@@ -70,14 +72,14 @@ static const HomeItem kItems[] = {
     {"Tasks",    LV_SYMBOL_OK,        "Tasks",    nullptr,              false, false},
     {"Recorder", LV_SYMBOL_AUDIO,     "Recorder", nullptr,              false, false},
     {"Telegram", LV_SYMBOL_ENVELOPE,  "Telegram", tg_get_unread_count,  true,  true },
-    {"Chat",     LV_SYMBOL_BELL,      "Chat",     nullptr,              true,  false},
+    {"Chat",     LV_SYMBOL_BELL,      "Chat",     nullptr,              true,  true },
     {"Weather",  LV_SYMBOL_TINT,      "Weather",  nullptr,              false, false},
     {"SSH",      LV_SYMBOL_KEYBOARD,  "SSH",      nullptr,              true,  false},
 };
 constexpr int kItemCount = sizeof(kItems) / sizeof(kItems[0]);
 
 // Keeps the badge labels alive for the lifetime of the menu view so the
-// periodic timer can refresh them. Reset each time the menu re-mounts.
+// periodic timer can refresh them. Reset each time the home screen is rebuilt.
 struct Badge {
     lv_obj_t* label;
     BadgeFn   fn;
@@ -346,8 +348,6 @@ static bool media_controls_should_show() {
     return hw_get_bt_enable() && hw_get_ble_kb_connected();
 }
 
-static void refresh_volume_visual();
-
 static bool volume_is_editing() {
     if (!s_volume_btn) return false;
     lv_group_t* g = lv_obj_get_group(s_volume_btn);
@@ -436,6 +436,15 @@ static void apply_wifi_gated_state(bool wifi, bool link) {
     if (needs_focus_advance && grp) lv_group_focus_next(grp);
 }
 
+// Re-apply the gated-tile visual when Wi-Fi / phone-link state changed since
+// the last call (always after s_wifi_gated_last_state was reset to -1).
+static void refresh_wifi_gated_state() {
+    int state = (hw_get_wifi_connected() ? 1 : 0) | (hw_link_connected() ? 2 : 0);
+    if (state == s_wifi_gated_last_state) return;
+    apply_wifi_gated_state((state & 1) != 0, (state & 2) != 0);
+    s_wifi_gated_last_state = state;
+}
+
 static void media_visibility_tick(lv_timer_t* t) {
     (void)t;
     INPUT_PROF_SPAN("media_vis");
@@ -445,11 +454,7 @@ static void media_visibility_tick(lv_timer_t* t) {
     }
     // Re-evaluate WiFi-gated tiles on the same tick — cheap, and the user
     // can flip the WiFi pill or drop the phone link without leaving the menu.
-    int state = (hw_get_wifi_connected() ? 1 : 0) | (hw_link_connected() ? 2 : 0);
-    if (state != s_wifi_gated_last_state) {
-        apply_wifi_gated_state((state & 1) != 0, (state & 2) != 0);
-        s_wifi_gated_last_state = state;
-    }
+    refresh_wifi_gated_state();
 }
 
 static void play_pause_click_cb(lv_event_t* e) {
@@ -535,8 +540,7 @@ void tile_click_cb(lv_event_t* e) {
         hw_feedback();
         return;
     }
-    hw_feedback();
-    core::System::getInstance().queueEnterApp(item->appName);
+    launch_app_from_home(item->appName);
 }
 
 } // namespace
@@ -587,9 +591,8 @@ static void start_live_state() {
     // first frame already reflects the connection state — otherwise the
     // tile flashes its accent color until the 1 s tick fires.
     if (!s_wifi_gated.empty()) {
-        int state = (hw_get_wifi_connected() ? 1 : 0) | (hw_link_connected() ? 2 : 0);
-        apply_wifi_gated_state((state & 1) != 0, (state & 2) != 0);
-        s_wifi_gated_last_state = state;
+        s_wifi_gated_last_state = -1;
+        refresh_wifi_gated_state();
     }
 
     // Poll BLE pairing state so media buttons appear/disappear while the
@@ -942,10 +945,9 @@ void MenuApp::onStart(lv_obj_t* parent) {
     start_live_state();
 
     // Wire the home-screen letter shortcuts ('d'/'w'/'b'/'p'/...) on every
-    // focusable object — LV_EVENT_KEY fires only on the focused widget.
-    // LV_EVENT_KEY fires on the focused widget only, so attaching to each
-    // group member is the way to make the shortcut work regardless of which
-    // tile/pill the user happens to be sitting on.
+    // focusable object: LV_EVENT_KEY fires on the focused widget only, so
+    // attaching to each group member makes the shortcut work regardless of
+    // which tile/pill the user happens to be sitting on.
     if (grp) {
         uint32_t n = lv_group_get_obj_count(grp);
         for (uint32_t i = 0; i < n; i++) {

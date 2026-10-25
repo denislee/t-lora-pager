@@ -4,13 +4,15 @@
  *            and folder listing.
  *
  * State reset on onStop (ui_files_exit):
- *   widgets: menu, parent_obj, file_list, quit_btn, main_page,
+ *   widgets: menu, file_list, quit_btn,
  *            src_btn_int, src_btn_sd,
  *            filter_btn_txt / _non_txt / _all   — destroyed via lv_obj_del
  *                                                  then nulled
+ *   caches:  all_entries, raw_cache              — cleared
  *   job:     s_list_job (directory listing worker, P7.19)
- *                                              — teardown(): drain stopped,
- *                                                a running worker detached
+ *                                              — teardown(): a running
+ *                                                worker detached (its
+ *                                                result freed on arrival)
  *   timers:  s_loading_timer (150 ms loader delay) — lv_timer_delete + null
  *   modal:   s_loading (ui_loading_t)            — ui_loading_close
  * No hardware sessions are held here. If you add cached state, list it
@@ -19,7 +21,6 @@
  */
 #include "../ui_define.h"
 #include "app_registry.h"
-#include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
 #include "../hal/system.h"
 #include "../hal/storage.h"
@@ -60,10 +61,8 @@ static inline bool ends_with_ci(const std::string &s, const char *suffix)
 }
 
 static lv_obj_t *menu = NULL;
-static lv_obj_t *parent_obj = NULL;
 static lv_obj_t *file_list = NULL;
 static lv_obj_t *quit_btn = NULL;
-static lv_obj_t *main_page = NULL;
 static lv_obj_t *src_btn_int = NULL;
 static lv_obj_t *src_btn_sd = NULL;
 static lv_obj_t *filter_btn_txt = NULL;
@@ -307,7 +306,7 @@ static void style_toggle_btn(lv_obj_t *btn, bool active)
 }
 
 void ui_file_browser_enter(lv_obj_t *parent);
-void ui_file_browser_exit(lv_obj_t *parent);
+void ui_file_browser_exit();
 
 static void refresh_ui()
 {
@@ -387,7 +386,7 @@ static void source_click_cb(lv_event_t *e)
     refresh_ui();
 }
 
-// LVGL thread (OneShotJob drain, or inline on the emulator / task failure).
+// LVGL thread (OneShotJob delivery, or inline on task-spawn failure).
 static void list_done(ListResult &r)
 {
     if (!menu) return;
@@ -516,7 +515,6 @@ static void file_list_key_cb(lv_event_t *e)
 void ui_file_browser_enter(lv_obj_t *parent)
 {
     if (menu != NULL) return;
-    parent_obj = parent;
     enable_keyboard();
 
     bool sd_online = (HW_SD_ONLINE & hw_get_device_online()) != 0;
@@ -525,7 +523,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
 
     menu = create_menu(parent, nullptr);
 
-    main_page = lv_menu_page_create(menu, NULL);
+    lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(main_page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_all(main_page, 0, 0);
@@ -584,21 +582,19 @@ void ui_file_browser_enter(lv_obj_t *parent)
     lv_obj_set_style_pad_all(file_list, 2, 0);
     lv_obj_add_event_cb(file_list, file_list_key_cb, LV_EVENT_KEY, NULL);
 
-    kick_load(current_source, current_dir);   // inline on the emulator
+    kick_load(current_source, current_dir);
 
     lv_menu_set_page(menu, main_page);
 
 #ifdef USING_TOUCHPAD
-    quit_btn = create_floating_button([](lv_event_t *e) {
-        do_exit();
-    }, NULL);
+    quit_btn = create_floating_button(exit_btn_cb, NULL);
 #endif
 }
 
-void ui_file_browser_exit(lv_obj_t *parent)
+void ui_file_browser_exit()
 {
-    // Safe while a listing runs: teardown() detaches the worker, which then
-    // frees its own result; it never touches LVGL.
+    // Safe while a listing runs: teardown() detaches the worker, whose result
+    // is then freed on arrival; it never touches LVGL.
     loader_hide();
     s_list_job.teardown();
     ui_hide_back_button();
@@ -613,7 +609,6 @@ void ui_file_browser_exit(lv_obj_t *parent)
         quit_btn = NULL;
     }
     file_list = NULL;
-    main_page = NULL;
     src_btn_int = NULL;
     src_btn_sd = NULL;
     filter_btn_txt = NULL;
@@ -631,7 +626,7 @@ public:
     FileBrowserApp() : core::App("Files") {}
     void onStart(lv_obj_t *parent) override { ui_file_browser_enter(parent); }
     void onStop() override {
-        ui_file_browser_exit(getRoot());
+        ui_file_browser_exit();
         core::App::onStop();
     }
 };

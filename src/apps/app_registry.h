@@ -38,7 +38,7 @@ std::shared_ptr<core::App> make_ssh_app();
 std::shared_ptr<core::App> make_chat_app();
 
 // Starts the persistent Telegram unread-count poll (see ui_telegram.cpp).
-// Safe to call multiple times. A noop on the emulator build.
+// Safe to call multiple times. Runs on the emulator too (phone path).
 void tg_begin_background_poll();
 
 // Total unread messages across all chats as of the last successful poll.
@@ -47,8 +47,8 @@ void tg_begin_background_poll();
 int tg_get_unread_count();
 
 // Telegram bridge config, driven by the Settings app (Settings → Telegram).
-// Reads and writes go through NVS; set_* mirrors the change into a running
-// Telegram app if one is currently on-screen.
+// Reads and writes go through NVS; a running Telegram app is never on screen
+// at the same time, and re-reads the config in its onStart.
 std::string tg_cfg_get_url();
 void        tg_cfg_set_url(const char *url);
 // Masked display string ("(not set)", "(locked)", or "********abcd").
@@ -77,17 +77,17 @@ void tg_cfg_set_notif_vibrate(bool on);
 bool tg_cfg_get_notif_banner();
 void tg_cfg_set_notif_banner(bool on);
 
-// Blocking HTTP fetch of the full chat list from the bridge, for the
-// Favorites subpage to render. Returns false with *err populated when the
+// Blocking fetch of the full chat list (via the phone when connected, else
+// direct to the bridge), for the Favorites subpage to render; worker thread
+// only. Returns false with *err populated when there is no uplink, the
 // bridge is unconfigured, the token is locked, or the network call fails.
-// Only meaningful on hardware — returns false on the emulator.
 bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
                             std::string *err = nullptr);
 
 // GitHub notes-sync config, driven by the Settings app (Settings » Notes
 // Sync). Storage lives in the "notesync" NVS namespace and mirrors the
-// Telegram token pattern: the PAT is AES-wrapped with the notes passphrase
-// when crypto is enabled+unlocked, plaintext otherwise. Default branch is
+// Telegram token pattern: the PAT is only ever stored AES-wrapped with the
+// notes passphrase (hal::secret_store refuses plaintext). Default branch is
 // "main".
 std::string nsync_cfg_get_repo();
 void        nsync_cfg_set_repo(const char *v);
