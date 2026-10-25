@@ -14,8 +14,6 @@ package pagerlink
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
-	"hash/crc32"
 	"time"
 )
 
@@ -32,9 +30,6 @@ func (c *Client) Handle(method string, h Handler) {
 	if h == nil {
 		delete(c.handlers, method)
 		return
-	}
-	if c.handlers == nil {
-		c.handlers = make(map[string]Handler)
 	}
 	c.handlers[method] = h
 }
@@ -142,44 +137,7 @@ func (c *Client) AcceptBytes(size uint32, crc uint32) (uint16, func(timeout time
 		if size == 0 {
 			return []byte{}, nil
 		}
-
-		var buf bytes.Buffer
-		r := NewReceiver(size, InitialCredits, 4, 0,
-			func(_ uint32, b []byte) error {
-				buf.Write(b)
-				return nil
-			},
-			func(payload []byte) error {
-				return c.SendBulk(Ack, id, payload)
-			},
-		)
-
-		// One idle timer, restarted per message (not a time.After each loop).
-		idle := time.NewTimer(timeout)
-		defer idle.Stop()
-		for r.State() == XferActive {
-			select {
-			case msg := <-ch:
-				resetTimer(idle, timeout)
-				if msg.Type == Data {
-					r.OnData(msg.Payload)
-				}
-				// ACK messages do not belong on a download; ignore them.
-			case <-idle.C:
-				return nil, errors.New("accept: timeout")
-			case <-c.done:
-				return nil, ErrDisconnected
-			}
-		}
-		if r.State() == XferFailed {
-			return nil, errors.New("accept: transfer failed")
-		}
-
-		data := buf.Bytes()
-		if crc32.ChecksumIEEE(data) != crc {
-			return nil, errors.New("crc mismatch")
-		}
-		return data, nil
+		return c.receive(id, ch, size, crc, timeout, "accept")
 	}
 	return id, wait
 }

@@ -16,12 +16,9 @@ import (
 	"time"
 )
 
-// Sentinel errors for SendBytes. WriteFile prefixes them with "fs.write: ",
-// so its error strings are unchanged.
-var (
-	errSendFailed  = errors.New("transfer failed")
-	errSendTimeout = errors.New("timeout")
-)
+// errSendFailed is SendBytes' "transfer failed"; an idle timeout is ErrTimeout.
+// WriteFile prefixes both with "fs.write: ".
+var errSendFailed = errors.New("transfer failed")
 
 // FileInfo is the fs.read / fs.stat metadata for one file. Protected reports
 // whether the on-disk bytes are Salted__ ciphertext.
@@ -57,8 +54,20 @@ func (c *Client) ReadFile(vol, path string, timeout time.Duration) ([]byte, File
 	}
 	info := FileInfo{Size: body.Size, CRC32: body.CRC32, Protected: body.Protected}
 
+	data, err := c.receive(id, ch, info.Size, info.CRC32, timeout, "fs.read")
+	return data, info, err
+}
+
+// receive runs the Receiver/ACK loop for an incoming transfer on sink ch (ACK
+// every 4 messages, InitialCredits window) until size bytes arrive, then checks
+// them against crc (CRC-32/ISO-HDLC). timeout bounds each idle wait for a DATA
+// message. Errors: "<prefix>: timeout" (wraps ErrTimeout), "<prefix>: transfer
+// failed", "crc mismatch", or ErrDisconnected. The caller owns the sink and
+// closes the transfer.
+func (c *Client) receive(id uint16, ch <-chan Message, size, crc uint32,
+	timeout time.Duration, prefix string) ([]byte, error) {
 	var buf bytes.Buffer
-	r := NewReceiver(info.Size, InitialCredits, 4, 0,
+	r := NewReceiver(size, InitialCredits, 4, 0,
 		func(_ uint32, b []byte) error {
 			buf.Write(b)
 			return nil
@@ -80,20 +89,20 @@ func (c *Client) ReadFile(vol, path string, timeout time.Duration) ([]byte, File
 			}
 			// ACK messages do not belong on a download; ignore them.
 		case <-idle.C:
-			return nil, info, errors.New("fs.read: timeout")
+			return nil, fmt.Errorf("%s: %w", prefix, ErrTimeout)
 		case <-c.done:
-			return nil, info, ErrDisconnected
+			return nil, ErrDisconnected
 		}
 	}
 	if r.State() == XferFailed {
-		return nil, info, errors.New("fs.read: transfer failed")
+		return nil, errors.New(prefix + ": transfer failed")
 	}
 
 	data := buf.Bytes()
-	if crc32.ChecksumIEEE(data) != info.CRC32 {
-		return nil, info, errors.New("crc mismatch")
+	if crc32.ChecksumIEEE(data) != crc {
+		return nil, errors.New("crc mismatch")
 	}
-	return data, info, nil
+	return data, nil
 }
 
 // BeginWrite starts an upload and returns the transfer id the pager allocated.
@@ -155,7 +164,7 @@ func (c *Client) WriteFile(vol, path string, data []byte, overwrite bool, timeou
 // section 4), honouring the pager credit window. It returns once every byte is
 // acknowledged; timeout bounds each idle wait for an ACK, while a longer gap
 // with bytes unacknowledged fires the sender's retransmit timeout. Errors:
-// "transfer failed", "timeout", or ErrDisconnected.
+// "transfer failed", ErrTimeout, or ErrDisconnected.
 func (c *Client) SendBytes(xfer uint16, data []byte, timeout time.Duration) error {
 	ch := c.openXfer(xfer)
 	defer c.closeXfer(xfer)
@@ -202,7 +211,7 @@ func (c *Client) SendBytes(xfer uint16, data []byte, timeout time.Duration) erro
 			}
 			rto.Reset(RetransmitTimeout)
 		case <-idle.C:
-			ferr = errSendTimeout
+			ferr = ErrTimeout
 		case <-c.done:
 			ferr = ErrDisconnected
 		}

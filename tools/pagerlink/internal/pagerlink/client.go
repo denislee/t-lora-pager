@@ -14,7 +14,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -42,15 +41,6 @@ func (e *RPCError) Error() string { return e.Code + ": " + e.Msg }
 type Notification struct {
 	Name   string          `json:"e"`
 	Params json.RawMessage `json:"p"`
-}
-
-// Stats is a snapshot of the Client's error counters. Resets counts every
-// reassembly reset (empty, seq_gap, unexpected_start, unexpected_continue,
-// oversize); Malformed counts reassembled messages dropped by Decode and EVT
-// payloads that would not parse as JSON. Both are cheap enough to poll.
-type Stats struct {
-	Resets    uint64
-	Malformed uint64
 }
 
 // result is what the reader delivers to a waiting Call.
@@ -91,8 +81,6 @@ type Client struct {
 	done   chan struct{}
 
 	closeOnce sync.Once
-	resets    atomic.Uint64
-	malformed atomic.Uint64
 }
 
 // Dial opens a TCP connection to addr and starts the reader. timeout bounds the
@@ -127,11 +115,6 @@ func newClient(conn net.Conn) *Client {
 // 32; if the consumer falls behind, further events are dropped rather than
 // blocking the reader (the link must keep servicing outstanding Calls).
 func (c *Client) Events() <-chan Notification { return c.events }
-
-// Stats returns a snapshot of the link's error counters.
-func (c *Client) Stats() Stats {
-	return Stats{Resets: c.resets.Load(), Malformed: c.malformed.Load()}
-}
 
 // Call sends a REQ for method with JSON params and waits up to timeout for the
 // matching RES (whose payload is returned) or ERR (returned as *RPCError).
@@ -340,11 +323,9 @@ func (c *Client) readLoop() {
 			return
 		}
 		for _, ev := range c.re.Feed(pkt) {
-			if ev.Reset != "" {
-				c.resets.Add(1)
-				continue
+			if ev.Reset == "" {
+				c.dispatch(ev.Message)
 			}
-			c.dispatch(ev.Message)
 		}
 	}
 }
@@ -353,8 +334,7 @@ func (c *Client) readLoop() {
 func (c *Client) dispatch(raw []byte) {
 	msg, err := Decode(raw)
 	if err != nil {
-		c.malformed.Add(1)
-		return
+		return // malformed: dropped, the link stays up
 	}
 	switch msg.Type {
 	case Req:
@@ -369,7 +349,6 @@ func (c *Client) dispatch(raw []byte) {
 			Msg  string `json:"msg"`
 		}
 		if err := json.Unmarshal(msg.Payload, &body); err != nil {
-			c.malformed.Add(1)
 			return
 		}
 		if body.Code == "" {
@@ -379,7 +358,6 @@ func (c *Client) dispatch(raw []byte) {
 	case Evt:
 		var n Notification
 		if err := json.Unmarshal(msg.Payload, &n); err != nil {
-			c.malformed.Add(1)
 			return
 		}
 		select {
