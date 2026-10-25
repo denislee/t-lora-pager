@@ -5,13 +5,7 @@ package main
 // The pager dials us (main already did); serve registers the phone-side
 // responder handlers and answers pager-initiated requests (D→P) with canned
 // results, optionally overridden per method by a -responses JSON file. It keeps
-// running until SIGINT/SIGTERM or the link drops.
-//
-// Link-drop detection: the Client's Events() channel is never closed on
-// shutdown (the reader simply stops), so a closed channel cannot signal a drop.
-// Instead serve polls sys.ping every 5 s; a failing call means the reader has
-// shut the link down, and serve returns. The closed-Events alternative does not
-// work here.
+// running until SIGINT/SIGTERM or the link drops (Client.Done closes).
 
 import (
 	"encoding/json"
@@ -87,20 +81,13 @@ func cmdServe(c *pagerlink.Client, addr string, timeout time.Duration, args []st
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sig)
 
-	tick := time.NewTicker(5 * time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case s := <-sig:
-			fmt.Printf("serve: %v, stopping\n", s)
-			return 0
-		case <-tick.C:
-			if _, err := c.Call("sys.ping", map[string]any{"t": time.Now().UnixMilli()}, timeout); err != nil {
-				fmt.Printf("serve: link closed (%v)\n", err)
-				return 0
-			}
-		}
+	select {
+	case s := <-sig:
+		fmt.Printf("serve: %v, stopping\n", s)
+	case <-c.Done():
+		fmt.Println("serve: link closed")
 	}
+	return 0
 }
 
 // register installs every handler. Built-in methods are registered first so a

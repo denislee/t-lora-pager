@@ -123,8 +123,8 @@ func TestAcceptBytesIdleTimeout(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil || err.Error() != "accept: timeout" {
-			t.Fatalf("wait error = %v, want accept: timeout", err)
+		if err == nil || err.Error() != "accept: timeout" || !errors.Is(err, ErrTimeout) {
+			t.Fatalf("wait error = %v, want accept: timeout wrapping ErrTimeout", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("wait did not return within 1s")
@@ -171,10 +171,31 @@ func TestReadFileIdleTimeout(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err == nil || err.Error() != "fs.read: timeout" {
-			t.Fatalf("ReadFile error = %v, want fs.read: timeout", err)
+		if err == nil || err.Error() != "fs.read: timeout" || !errors.Is(err, ErrTimeout) {
+			t.Fatalf("ReadFile error = %v, want fs.read: timeout wrapping ErrTimeout", err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ReadFile did not return within 1s")
+	}
+}
+
+// TestDoneClosesOnDrop asserts Done stays open while the link is up and closes
+// once the peer hangs up.
+func TestDoneClosesOnDrop(t *testing.T) {
+	clientEnd, peerEnd := net.Pipe()
+	c := newClient(clientEnd)
+	defer c.Close()
+
+	select {
+	case <-c.Done():
+		t.Fatal("Done closed while the link is up")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	peerEnd.Close()
+	select {
+	case <-c.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done not closed within 1s of the peer hanging up")
 	}
 }

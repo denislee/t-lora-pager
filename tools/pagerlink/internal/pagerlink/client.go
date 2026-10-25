@@ -116,6 +116,10 @@ func newClient(conn net.Conn) *Client {
 // blocking the reader (the link must keep servicing outstanding Calls).
 func (c *Client) Events() <-chan Notification { return c.events }
 
+// Done returns a channel that is closed once the link is down: the connection
+// failed or Close was called. Events() is never closed, so select on this.
+func (c *Client) Done() <-chan struct{} { return c.done }
+
 // Call sends a REQ for method with JSON params and waits up to timeout for the
 // matching RES (whose payload is returned) or ERR (returned as *RPCError).
 // Passing nil params omits "p", which the peer reads as {}. The returned

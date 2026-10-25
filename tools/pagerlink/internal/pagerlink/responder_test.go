@@ -10,10 +10,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"io"
 	"net"
-	"strings"
 	"testing"
 	"time"
 )
@@ -480,8 +480,8 @@ func TestSendBytesTimeout(t *testing.T) {
 	defer c.Close()
 
 	err := c.SendBytes(33, []byte("hello, pager"), 50*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "timeout") {
-		t.Fatalf("SendBytes = %v, want timeout", err)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("SendBytes = %v, want ErrTimeout", err)
 	}
 }
 
