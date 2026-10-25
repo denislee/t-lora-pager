@@ -375,16 +375,15 @@ void loop()
         }
 #endif
 
-        // P4.3: restore full brightness when waking (s_dimmed may have been
-        // set just before the sleep threshold fired). The restore-on-wake path
-        // runs through ui_resume_timers() -> hw_power_up_all() ->
-        // hw_set_disp_backlight(user_setting.brightness_level), so the
-        // hardware is already correct; we just need to clear our dim state so
-        // the next awake cycle doesn't mis-detect "activity" from the counter
-        // wrapping at zero.
+        // P4.3: s_dimmed may have been set just before the sleep threshold
+        // fired. Wake restores the display backlight through
+        // ui_resume_timers() -> hw_power_up_all() ->
+        // hw_set_disp_backlight(user_setting.brightness_level) (DC2.0.2) and
+        // the keyboard backlight through hw_enable_keyboard(); here we only
+        // clear the dim state so the next awake cycle doesn't mis-detect
+        // "activity" from the counter wrapping at zero.
         if (auto_sleep_pending && s_dimmed) {
             s_dimmed = false;
-            // Hardware restore is handled by hw_power_up_all() on wake.
         }
     }
 

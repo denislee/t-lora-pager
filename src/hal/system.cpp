@@ -888,6 +888,11 @@ void hw_power_up_all()
         instance.powerControl(POWER_KEYBOARD, true);
     }
     hw_enable_keyboard();
+    // DC2.0.2: the vendor perform_fake_sleep_toggle() restores the brightness
+    // it saved at sleep entry, which is the dim level when auto-sleep fired
+    // from the P4.3 dim stage. It calls ui_resume_timers() (and so this) after
+    // its own setBrightness(), so writing the user level here wins.
+    hw_set_disp_backlight(user_setting.brightness_level);
     // Re-enable BQ25896 continuous ADC measurement so the battery gauge is
     // live again after wake.  Mirrors vendor lightSleep() (LilyGo_LoRa_Pager.cpp:756).
 #if defined(USING_PPM_MANAGE)
