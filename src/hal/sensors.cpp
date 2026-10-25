@@ -3,6 +3,7 @@
  * @brief     GPS power toggle, IMU.
  */
 #include "sensors.h"
+#include "board_config.h"  // USING_BHI260_SENSOR / USING_BMA423_SENSOR (DC2.0.1)
 #include "system.h"
 #include "internal.h"
 #include "../core/kb_lock.h"
@@ -11,7 +12,9 @@
 #include <LilyGoLib.h>
 #endif
 
-#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)  // not USING_BHI260_SENSOR: board_config.h is not in this TU
+// Pager only, not USING_BHI260_SENSOR: the Ultra's begin() still brings the
+// BHI260 up itself (it needs the sensor's GPIO expander early).
+#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)
 #include <mutex>
 // P6.2 / BT.2: lazy BHI260 bring-up. The mutex is a leaf lock (initSensor()
 // takes no other project lock), so it cannot deadlock with the instance lock
@@ -23,7 +26,7 @@ static bool s_imu_start_attempted = false;
 
 void hw_imu_ensure_started()
 {
-#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)  // not USING_BHI260_SENSOR: board_config.h is not in this TU
+#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)
     std::lock_guard<std::mutex> guard(s_imu_start_mtx);
     if (s_imu_start_attempted) return;
     s_imu_start_attempted = true;
@@ -34,6 +37,7 @@ void hw_imu_ensure_started()
         ok = instance.initSensor();
     }
     log_i("BHI260 lazy init %s in %lu ms", ok ? "ok" : "FAILED", (unsigned long)(millis() - t0));
+    (void)t0; (void)ok;  // log_i compiles out at CORE_DEBUG_LEVEL=0
 #endif
 }
 

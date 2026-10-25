@@ -57,10 +57,10 @@
 #define USING_TOUCHPAD
 #define FLOAT_BUTTON_WIDTH   40
 #define FLOAT_BUTTON_HEIGHT  40
+#define USING_BLE_KEYBOARD
 
 #ifndef USING_BMA423_SENSOR
 #define USING_BMA423_SENSOR
-#define USING_BLE_KEYBOARD
 #endif
 
 #define MAIN_FONT   &lv_font_montserrat_16
