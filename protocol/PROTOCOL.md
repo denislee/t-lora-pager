@@ -290,7 +290,8 @@ method families each side implements (`"sys"`, `"fs"`, `"weather"`, …).
 
 `vectors/*.json` — consumed by `test/test_link_frame` (via
 `support/gen_link_vectors.py`, which turns them into a C header at test-build
-time) and by `ios/PagerKit/Tests/PagerKitTests`. Byte strings are lowercase
+time), by `ios/PagerKit/Tests/PagerKitTests` and by
+`tools/pagerlink/internal/pagerlink/frame_test.go`. Byte strings are lowercase
 hex with no separators. Files:
 
 - `message.json` — header encode/decode, valid and malformed.
