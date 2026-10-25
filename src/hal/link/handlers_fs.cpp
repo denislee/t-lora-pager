@@ -6,8 +6,6 @@
  * Writes land in <path>.part and are renamed on a CRC-matching commit, so a
  * dropped link never leaves a half-written file.
  */
-#include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -47,8 +45,8 @@ struct Transfer {
     std::string part;  /* upload staging path ("<path>.part") */
     uint32_t crc;      /* CRC-32/ISO-HDLC of the whole file */
     bool overwrite;
-    uint32_t last_ms;  /* now_ms() at the start or the last bulk message */
-    uint32_t rto_ms;   /* now_ms() at the start, the last ACK, or the last retransmit (reads) */
+    uint32_t last_ms;  /* steady_ms() at the start or the last bulk message */
+    uint32_t rto_ms;   /* steady_ms() at the start, the last ACK, or the last retransmit (reads) */
     /* The file the chunks go through (path for reads, part for writes), kept
      * open for the whole transfer (P7.34). Shared with the tx/rx callbacks, so
      * it survives g_xfers reallocating. */
@@ -70,18 +68,9 @@ std::vector<Transfer> g_xfers;
 uint16_t g_next_upload_id = 1;
 uint32_t g_last_boost_ms = 0;
 
-/** Monotonic milliseconds, wrapping at 2^32. Read directly rather than taken
- * from fs_tick(): the TCP transport only ticks when the socket is idle, so a
- * tick-fed clock would freeze for the length of a busy transfer. */
-uint32_t now_ms() {
-    using namespace std::chrono;
-    return static_cast<uint32_t>(
-        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
-}
-
 /** Keep the CPU at full speed while bytes move (P6.11 busy vote), rate-limited. */
 void boost() {
-    const uint32_t now = now_ms();
+    const uint32_t now = steady_ms();
     if (g_last_boost_ms == 0 || static_cast<uint32_t>(now - g_last_boost_ms) >= 500) {
         hw_cpu_boost_for_input();
         g_last_boost_ms = now;
@@ -365,7 +354,7 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
     t.vol = v;
     t.path = path;
     t.crc = crc;
-    t.last_ms = now_ms();
+    t.last_ms = steady_ms();
     t.rto_ms = t.last_ms;
     t.file = file;
     t.crc_check = (offset == 0);
@@ -456,7 +445,7 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
     t.part = part;
     t.crc = crc;
     t.overwrite = overwrite;
-    t.last_ms = now_ms();
+    t.last_ms = steady_ms();
     t.rto_ms = t.last_ms;
     t.file = file;
     uint16_t credits = 0;
@@ -634,10 +623,10 @@ bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len)
         return false; /* not an fs transfer; the caller decides where it goes */
     }
     boost();
-    t->last_ms = now_ms();
+    t->last_ms = steady_ms();
 
     if (type == MsgType::Ack && !t->upload && t->tx) {
-        t->rto_ms = now_ms();
+        t->rto_ms = steady_ms();
         t->tx->on_ack(payload, len);
         pump_read(xfer); /* sends more DATA, or finishes the read */
     } else if (type == MsgType::Data && t->upload && t->rx) {
@@ -685,7 +674,7 @@ void fs_tick(uint32_t now) {
 uint32_t fs_next_wait_ms(uint32_t cap) {
     /* The same two deadlines fs_tick() checks: a read's retransmit timer, and
      * the stall drop (strict `>`, hence the + 1). */
-    const uint32_t now = now_ms();
+    const uint32_t now = steady_ms();
     uint32_t wait = cap;
     for (const Transfer &t : g_xfers) {
         if (t.tx && !t.upload) {

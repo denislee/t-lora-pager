@@ -8,6 +8,7 @@
 #include "system.h"
 #include "core/system_hooks.h"
 #include "ca_certs.h"   // P4.27 root CA bundle
+#include "ble_stack.h"  // hal::ble::DEVICE_NAME
 
 #ifdef ARDUINO
 #include <LilyGoLib.h>
@@ -778,7 +779,7 @@ void hw_set_bt_enable(bool en) {
 
 const char *hw_get_ble_kb_name()
 {
-    return "lilygo-pager";
+    return hal::ble::DEVICE_NAME;
 }
 
 void hw_set_ble_kb_enable()

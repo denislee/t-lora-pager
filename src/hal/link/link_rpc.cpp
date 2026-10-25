@@ -204,10 +204,8 @@ void Rpc::handle_req(const MessageView &m) {
             send_err(m.id, "bad_request", "bad request");
             return;
         }
-    } else if (!params.parse("{}")) {
-        stats_.bad_requests++;
-        send_err(m.id, "bad_request", "bad request");
-        return;
+    } else {
+        params.parse("{}"); /* no params: an empty object (cannot fail) */
     }
 
     auto it = handlers_.find(method);
@@ -291,9 +289,8 @@ void Rpc::handle_evt(const MessageView &m) {
             stats_.malformed++;
             return;
         }
-    } else if (!params.parse("{}")) {
-        stats_.malformed++;
-        return;
+    } else {
+        params.parse("{}"); /* no params: an empty object (cannot fail) */
     }
 
     if (on_event_) {

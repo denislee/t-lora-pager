@@ -21,16 +21,24 @@
  */
 #pragma once
 
-#ifdef ARDUINO
-
 #include <cstdint>
 #include <string>
 
 namespace hal {
 namespace ble {
 
-/** Device name advertised and used by existing bonds; do not change. */
+/** Device name advertised and used by existing bonds; do not change. Also
+ * hw_get_ble_kb_name() and sys.hello `name` (so it is visible on the emulator,
+ * which has no BLE). */
 constexpr const char *DEVICE_NAME = "lilygo-pager";
+
+}  // namespace ble
+}  // namespace hal
+
+#ifdef ARDUINO
+
+namespace hal {
+namespace ble {
 
 /** ATT_MTU requested from peers; PagerLink packet size P = ATT_MTU - 3 = 244,
  * the same P as over TCP. */

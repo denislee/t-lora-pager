@@ -23,13 +23,15 @@
 
 namespace {
 
-/** One-shot completion: the link-task callback writes, the caller waits. */
+/** One-shot completion: the link-task callback writes, the caller waits.
+ * `r.ok` is the outcome for every call; hw_link_call() fills the rest of `r`,
+ * hw_link_accept_wait() fills `bytes`. */
 struct Wait {
     std::mutex m;
     std::condition_variable cv;
     bool done = false;
-    bool ok = false;
     HwLinkResult r;
+    std::string bytes;
 };
 
 /** Extra time on top of the request timeout before hw_link_call() stops waiting
@@ -48,7 +50,6 @@ HwLinkResult hw_link_call(const char *method, const std::string &params_json,
         method ? method : "", params_json, timeout_ms,
         [w](bool ok, const std::string &result_json, const pagerlink::RpcError &err) {
             std::lock_guard<std::mutex> lock(w->m);
-            w->ok = ok;
             w->r.ok = ok;
             w->r.json = result_json;
             w->r.code = err.code;
@@ -82,7 +83,7 @@ bool hw_link_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
     const bool started =
         pagerlink::service_send_bytes(xfer, data, len, stall_ms, [w](bool ok) {
             std::lock_guard<std::mutex> lock(w->m);
-            w->ok = ok;
+            w->r.ok = ok;
             w->done = true;
             w->cv.notify_all();
         });
@@ -94,7 +95,7 @@ bool hw_link_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
      * disconnect), so no guard is needed here. */
     std::unique_lock<std::mutex> lock(w->m);
     w->cv.wait(lock, [w] { return w->done; });
-    return w->ok;
+    return w->r.ok;
 }
 
 int hw_link_subscribe(const char *event, HwLinkEventFn fn) {
@@ -110,19 +111,12 @@ uint16_t hw_link_accept_open(uint32_t max_size) { return pagerlink::service_acce
 
 bool hw_link_accept_wait(uint16_t xfer, uint32_t size, uint32_t crc32, std::string &out,
                          uint32_t stall_ms) {
-    struct AcceptWait {
-        std::mutex m;
-        std::condition_variable cv;
-        bool done = false;
-        bool ok = false;
-        std::string bytes;
-    };
     /* No std::make_shared: the hardware toolchain targets C++11. */
-    std::shared_ptr<AcceptWait> w(new AcceptWait);
+    std::shared_ptr<Wait> w(new Wait);
     const bool started = pagerlink::service_accept_expect(
         xfer, size, crc32, stall_ms, [w](bool ok, std::string &bytes) {
             std::lock_guard<std::mutex> lock(w->m);
-            w->ok = ok;
+            w->r.ok = ok;
             w->bytes.swap(bytes);
             w->done = true;
             w->cv.notify_all();
@@ -135,10 +129,10 @@ bool hw_link_accept_wait(uint16_t xfer, uint32_t size, uint32_t crc32, std::stri
      * so no guard is needed here — the same contract as hw_link_send_bytes(). */
     std::unique_lock<std::mutex> lock(w->m);
     w->cv.wait(lock, [w] { return w->done; });
-    if (w->ok) {
+    if (w->r.ok) {
         out.swap(w->bytes);
     }
-    return w->ok;
+    return w->r.ok;
 }
 
 void hw_link_accept_close(uint16_t xfer) { pagerlink::service_accept_close(xfer); }

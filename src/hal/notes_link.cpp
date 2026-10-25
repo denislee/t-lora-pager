@@ -9,7 +9,6 @@
  */
 #include "notes_link.h"
 
-#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -20,7 +19,6 @@
 #include "link.h"
 #include "link/fs_volume.h"
 #include "link/link_json.h"
-#include "link/link_xfer.h"
 #include "notes_path.h"
 
 // Map a failed hw_link_call() to a HalError plus a UI-ready message.

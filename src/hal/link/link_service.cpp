@@ -154,13 +154,6 @@ Subscribers &subscribers() {
     return s;
 }
 
-/** Milliseconds from a monotonic clock, wrapping at 2^32 (Rpc's ClockFn). */
-uint32_t steady_ms() {
-    using namespace std::chrono;
-    return static_cast<uint32_t>(
-        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
-}
-
 /**
  * Finish outbound transfer `i`: take its completion callback and erase the
  * entry BEFORE invoking it, so the callback may start another transfer.
@@ -319,6 +312,24 @@ Reassembler &reassembler() {
 }
 
 }  // namespace
+
+const char *board_tag() {
+#ifdef ARDUINO_T_LORA_PAGER
+    return "pager";
+#elif defined(ARDUINO_T_WATCH_S3)
+    return "twatch_s3";
+#elif defined(ARDUINO_T_WATCH_S3_ULTRA)
+    return "twatch_ultra";
+#else
+    return "unknown";
+#endif
+}
+
+uint32_t steady_ms() {
+    using namespace std::chrono;
+    return static_cast<uint32_t>(
+        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
+}
 
 void service_on_connect(const TransportOps &ops) {
     LinkLock lock(__func__);

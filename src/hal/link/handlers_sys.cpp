@@ -33,19 +33,6 @@ void timezone_set_user_tz(const char *tz);
 namespace pagerlink {
 namespace {
 
-/** The board tag reported by sys.hello, derived from the build target. */
-const char *board_name() {
-#ifdef ARDUINO_T_LORA_PAGER
-    return "pager";
-#elif defined(ARDUINO_T_WATCH_S3)
-    return "twatch_s3";
-#elif defined(ARDUINO_T_WATCH_S3_ULTRA)
-    return "twatch_ultra";
-#else
-    return "unknown";
-#endif
-}
-
 /** TZ strings are IANA names (and POSIX forms): [A-Za-z0-9_/+-], 1..64 chars. */
 bool tz_charset_ok(const std::string &tz) {
     if (tz.empty() || tz.size() > 64) {
@@ -85,9 +72,9 @@ void register_sys_handlers(Rpc &rpc) {
             .key("fw")
             .str_val(hw_get_firmware_hash_string())
             .key("board")
-            .str_val(board_name())
+            .str_val(board_tag())
             .key("name")
-            .str_val("lilygo-pager")
+            .str_val(hw_get_ble_kb_name())
             .key("caps")
             .begin_array()
             .str_val("sys")

@@ -20,13 +20,10 @@
 
 #ifdef ARDUINO
 #include <FFat.h>
-#include <LilyGoLib.h>
+#include <LilyGoLib.h> /* HW_SD_ONLINE (LilyGoTypedef.h) */
 #include <SD.h>
 
-#include <memory>
-
 #include "../../core/spi_lock.h"
-#include "../storage.h"
 #include "../system.h"
 #else
 #include <dirent.h>
@@ -46,6 +43,23 @@ namespace {
  * bottom): the storage-HAL generation does not see them. */
 void crc_forget_path(Vol v, const std::string &path);
 void crc_forget_all();
+
+/** Leaf component of a path or a vendor entry.name() (SD reports full paths). */
+std::string leaf_name(const char *name) {
+    const std::string s = name ? name : "";
+    const size_t slash = s.rfind('/');
+    return slash == std::string::npos ? s : s.substr(slash + 1);
+}
+
+/** Orders a listing: folders first, then files, each by leaf name. */
+void append_sorted(std::vector<VolEntry> &out, std::vector<VolEntry> dirs,
+                   std::vector<VolEntry> files) {
+    auto by_name = [](const VolEntry &a, const VolEntry &b) { return a.name < b.name; };
+    std::sort(dirs.begin(), dirs.end(), by_name);
+    std::sort(files.begin(), files.end(), by_name);
+    out = std::move(dirs);
+    out.insert(out.end(), files.begin(), files.end());
+}
 }  // namespace
 
 bool vol_from_string(const std::string &s, Vol &out) {
@@ -64,13 +78,6 @@ bool vol_from_string(const std::string &s, Vol &out) {
 
 namespace {
 
-/** Leaf component of a path or a vendor entry.name() (SD reports full paths). */
-std::string leaf_name(const char *name) {
-    const std::string s = name ? name : "";
-    const size_t slash = s.rfind('/');
-    return slash == std::string::npos ? s : s.substr(slash + 1);
-}
-
 /** Holds the SPI bus only while the SD volume is in use; a no-op for FFat. */
 struct VolLock {
     std::unique_ptr<core::ScopedSpiLock> l;
@@ -81,16 +88,6 @@ struct VolLock {
 
 fs::FS &fs_for(Vol v) {
     return v == Vol::Sd ? static_cast<fs::FS &>(SD) : static_cast<fs::FS &>(FFat);
-}
-
-/** Orders a listing: folders first, then files, each by leaf name. */
-void append_sorted(std::vector<VolEntry> &out, std::vector<VolEntry> dirs,
-                   std::vector<VolEntry> files) {
-    auto by_name = [](const VolEntry &a, const VolEntry &b) { return a.name < b.name; };
-    std::sort(dirs.begin(), dirs.end(), by_name);
-    std::sort(files.begin(), files.end(), by_name);
-    out = std::move(dirs);
-    out.insert(out.end(), files.begin(), files.end());
 }
 
 /** Recursive delete; the caller holds the volume lock for the whole walk. */
@@ -449,12 +446,6 @@ bool VolFile::write_at(uint32_t offset, const uint8_t *buf, size_t n) {
 
 namespace {
 
-/** Leaf component of an absolute path. */
-std::string leaf(const std::string &path) {
-    const size_t slash = path.rfind('/');
-    return slash == std::string::npos ? path : path.substr(slash + 1);
-}
-
 /** The backing root, created once: $PAGERLINK_FS_ROOT or /tmp/pagerlink-fs. */
 const std::string &root() {
     static const std::string r = [] {
@@ -474,16 +465,6 @@ std::string host(Vol v, const std::string &path) {
     p += (v == Vol::Int) ? "/int" : "/sd";
     if (path != "/") p += path;
     return p;
-}
-
-/** Orders a listing: folders first, then files, each by leaf name. */
-void append_sorted(std::vector<VolEntry> &out, std::vector<VolEntry> dirs,
-                   std::vector<VolEntry> files) {
-    auto by_name = [](const VolEntry &a, const VolEntry &b) { return a.name < b.name; };
-    std::sort(dirs.begin(), dirs.end(), by_name);
-    std::sort(files.begin(), files.end(), by_name);
-    out = std::move(dirs);
-    out.insert(out.end(), files.begin(), files.end());
 }
 
 /** Recursive delete of a host path. */
@@ -552,7 +533,7 @@ bool vol_stat(Vol v, const std::string &path, VolEntry &out) {
     struct stat st;
     if (::stat(host(v, path).c_str(), &st) != 0) return false;
 
-    out.name = leaf(path);
+    out.name = leaf_name(path.c_str());
     out.dir = S_ISDIR(st.st_mode);
     out.size = out.dir ? 0u : static_cast<uint32_t>(st.st_size);
     out.mtime = static_cast<uint32_t>(st.st_mtime);

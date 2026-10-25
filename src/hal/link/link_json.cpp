@@ -103,14 +103,13 @@ void JsonWriter::clear()
 
 namespace {
 
-/* Value of four hex digits at `p`, or -1 if out of range / not hex. */
-template <class T>  /* std::string or JsonObject::Text */
-int hex4(const T &t, size_t p)
+/* Value of the four hex digits at `p` in text[0, n), or -1 if out of range / not hex. */
+int hex4(const char *text, size_t n, size_t p)
 {
-    if (p + 4 > t.size()) return -1;
+    if (p + 4 > n) return -1;
     int v = 0;
     for (size_t k = 0; k < 4; ++k) {
-        const char c = t[p + k];
+        const char c = text[p + k];
         int d;
         if (c >= '0' && c <= '9')      d = c - '0';
         else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
@@ -181,7 +180,7 @@ bool JsonObject::parse_string(size_t &i, std::string *out, bool strict) const
             case 'r':  if (out) out->push_back('\r'); ++i; break;
             case 't':  if (out) out->push_back('\t'); ++i; break;
             case 'u': {
-                const int first = hex4(t, i + 1);
+                const int first = hex4(t.data(), t.size(), i + 1);
                 if (first < 0) return false;
                 size_t adv = 5; /* 'u' + 4 hex digits */
                 uint32_t code = static_cast<uint32_t>(first);
@@ -189,7 +188,7 @@ bool JsonObject::parse_string(size_t &i, std::string *out, bool strict) const
                     /* High surrogate: only valid when paired with a low one. */
                     bool paired = false;
                     if (i + 7 < n && t[i + 5] == '\\' && t[i + 6] == 'u') {
-                        const int low = hex4(t, i + 7);
+                        const int low = hex4(t.data(), t.size(), i + 7);
                         if (low >= 0xDC00 && low <= 0xDFFF) {
                             code = 0x10000 + ((code - 0xD800) << 10) +
                                    (static_cast<uint32_t>(low) - 0xDC00);
@@ -438,9 +437,9 @@ bool JsonObject::get_object(const char *key, JsonObject &out) const
 {
     const Member *m = find(key);
     if (m == nullptr) return false;
-    const std::string raw(src().substr(m->off, m->len));
-    if (raw.empty() || raw[0] != '{') return false;
-    return out.parse(raw);
+    const Text t = src();
+    if (m->len == 0 || t[m->off] != '{') return false;
+    return out.parse(t.data() + m->off, m->len);
 }
 
 bool JsonObject::get_object_view(const char *key, JsonObject &out) const

@@ -71,6 +71,11 @@ uint32_t service_next_tick_ms(uint32_t cap);
 
 /** True while a transport is connected. */
 bool service_connected();
+/** Milliseconds from a monotonic clock, wrapping at 2^32: the Rpc clock and
+ * every transfer timer. Read it directly rather than from a tick argument: the
+ * TCP transport only ticks when the socket is idle, so a tick-fed clock would
+ * freeze for the length of a busy transfer. */
+uint32_t steady_ms();
 /** Negotiated packet size P (0 when no transport is connected). */
 size_t service_packet_size();
 /** The transport renegotiated its packet size (BLE MTU exchange after the
@@ -84,6 +89,10 @@ void service_bulk_activity();
  * transport's receive queue (rx_credits_for / rx_ack_every_for). Takes the
  * service lock. */
 void service_rx_window(uint16_t &credits, unsigned &ack_every);
+
+/** Board tag from the build target ("pager", "twatch_s3", "twatch_ultra"):
+ * sys.hello `board` and the BLE info characteristic. */
+const char *board_tag();
 
 /** Register the sys.* handlers on `rpc` (implemented in handlers_sys.cpp). */
 void register_sys_handlers(Rpc &rpc);

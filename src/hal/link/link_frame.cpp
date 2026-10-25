@@ -319,8 +319,9 @@ size_t packet_size_for_mtu(uint16_t mtu, uint16_t max_mtu) {
     if (mtu > max_mtu) {
         mtu = max_mtu;
     }
-    if (mtu < 23) {
-        mtu = 23;
+    constexpr uint16_t MIN_MTU = MIN_PACKET + 3; /* the BLE minimum ATT_MTU, 23 */
+    if (mtu < MIN_MTU) {
+        mtu = MIN_MTU;
     }
     return static_cast<size_t>(mtu) - 3;
 }

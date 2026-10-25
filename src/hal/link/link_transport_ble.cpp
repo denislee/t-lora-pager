@@ -521,18 +521,6 @@ QueueHandle_t create_tx_queue() {
     return xQueueCreate(TX_QUEUE_DEPTH_INTERNAL, sizeof(TxPacket));
 }
 
-const char *board_tag() {
-#ifdef ARDUINO_T_LORA_PAGER
-    return "pager";
-#elif defined(ARDUINO_T_WATCH_S3)
-    return "twatch_s3";
-#elif defined(ARDUINO_T_WATCH_S3_ULTRA)
-    return "twatch_ultra";
-#else
-    return "unknown";
-#endif
-}
-
 }  // namespace
 
 void build(NimBLEServer *server) {
