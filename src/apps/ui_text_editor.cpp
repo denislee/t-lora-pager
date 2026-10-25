@@ -9,6 +9,7 @@
  *            float_sync_btn, float_sync_icon, float_journal_btn
  *                                       — destroyed via lv_obj_del then nulled
  *   widgets: pending_editor_parent      — nulled (was deferred-build pointer)
+ *   display: clip_invalidate_cb         — removed from the default display
  *   timers:  sync_pill_wifi_timer       — lv_timer_del + null
  *            word_count_debounce_timer  — lv_timer_del + null
  *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
@@ -141,6 +142,84 @@ static void schedule_word_count_update()
     lv_timer_set_repeat_count(word_count_debounce_timer, 1);
 }
 
+// Typing redraw clip. Every insert/delete makes the textarea's label
+// invalidate itself whole, so each keystroke repainted (and pushed over SPI)
+// the entire visible note. An edit at the cursor can only change the line
+// above it (a delete can pull a word up) and everything below, so while the
+// textarea's own key handler runs, invalidated areas are clipped to start at
+// the line above the cursor. If the edit scrolled or changed the label
+// height (new or removed line: scrollbar moves), the whole textarea is
+// invalidated afterwards instead.
+static bool s_clip_armed = false;
+static int32_t s_clip_y1 = 0;
+static int32_t s_clip_scroll_y = 0;
+static int32_t s_clip_label_h = 0;
+
+static bool is_edit_key(uint32_t key)
+{
+    // Printable chars and LV_KEY_DEL (127) are >= 0x20; navigation/ESC are not.
+    return key == LV_KEY_BACKSPACE || key == LV_KEY_ENTER || key == '\r' || key >= 0x20;
+}
+
+static void clip_invalidate_cb(lv_event_t *e)
+{
+    if (!s_clip_armed) return;
+    lv_area_t *area = (lv_area_t *)lv_event_get_param(e);
+    if (area->y2 < s_clip_y1) {
+        area->y1 = area->y2;  // nothing below the clip line; keep a sliver
+    } else if (area->y1 < s_clip_y1) {
+        area->y1 = s_clip_y1;
+    } else {
+        return;
+    }
+    area->y1 &= ~1;  // the pager's flush rounder wants an even y1
+}
+
+static void clip_arm_cb(lv_event_t *e)
+{
+    s_clip_armed = false;
+    if (!text_area || !is_edit_key(lv_event_get_key(e))) return;
+    lv_obj_t *label = lv_textarea_get_label(text_area);
+    lv_point_t p;
+    lv_label_get_letter_pos(label, lv_textarea_get_cursor_pos(text_area), &p);
+    lv_area_t lc;
+    lv_obj_get_coords(label, &lc);
+    const lv_font_t *font = lv_obj_get_style_text_font(text_area, LV_PART_MAIN);
+    int32_t line_h = lv_font_get_line_height(font) +
+                     lv_obj_get_style_text_line_space(text_area, LV_PART_MAIN);
+    s_clip_y1 = lc.y1 + p.y - line_h - 2;
+    s_clip_scroll_y = lv_obj_get_scroll_y(text_area);
+    s_clip_label_h = lv_obj_get_height(label);
+    s_clip_armed = true;
+}
+
+// Encoder click toggles editing. Runs as a PREPROCESS handler so the
+// textarea's own KEY handler never sees the ENTER: it used to insert a '\n'
+// that was deleted again afterwards, and at the bottom of a note that pair
+// started an animated scroll down and back (full-note redraws) right as the
+// user began rotating to the back button.
+static void encoder_enter_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) != LV_KEY_ENTER) return;
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev || lv_indev_get_type(indev) != LV_INDEV_TYPE_ENCODER) return;
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    lv_group_t *g = (lv_group_t *)lv_obj_get_group(obj);
+    if (g) lv_group_set_editing(g, !lv_group_get_editing(g));
+    lv_event_stop_processing(e);
+}
+
+static void clip_disarm()
+{
+    if (!s_clip_armed) return;
+    s_clip_armed = false;
+    if (!text_area) return;
+    if (lv_obj_get_scroll_y(text_area) != s_clip_scroll_y ||
+        lv_obj_get_height(lv_textarea_get_label(text_area)) != s_clip_label_h) {
+        lv_obj_invalidate(text_area);
+    }
+}
+
 static void do_exit()
 {
     save_content_async();
@@ -170,19 +249,9 @@ static void text_area_event_cb(lv_event_t *e)
             lv_group_set_editing(g, !editing);
         }
     } else if (code == LV_EVENT_KEY) {
+        clip_disarm();  // the textarea's own handler has run (clip_arm_cb)
         uint32_t key = lv_event_get_key(e);
-        lv_indev_t *indev = lv_indev_get_act();
         bool editing = lv_group_get_editing(g);
-
-        if (indev && lv_indev_get_type(indev) == LV_INDEV_TYPE_ENCODER && key == LV_KEY_ENTER) {
-            lv_group_set_editing(g, !editing);
-            if (editing) {
-                // Remove the newline character inserted by the default textarea handler
-                lv_textarea_delete_char((lv_obj_t *)lv_event_get_target(e));
-            }
-            lv_event_stop_processing(e);
-            return;
-        }
 
         if (key == 0x1E) {
             lv_event_stop_processing(e);
@@ -390,11 +459,14 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_set_style_bg_color(text_area, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(text_area, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(text_area, UI_RADIUS, 0);
+    /* Same border width in both states: border_width is a layout property, so
+     * changing it on focus/defocus re-wrapped the whole note and made the
+     * first scroll off the textarea (e.g. to the back button) lag. Only
+     * color/opa (draw-only) change with focus. */
     lv_obj_set_style_border_color(text_area, UI_COLOR_MUTED, 0);
-    lv_obj_set_style_border_width(text_area, 1, 0);
-    lv_obj_set_style_border_opa(text_area, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(text_area, UI_BORDER_W, 0);
+    lv_obj_set_style_border_opa(text_area, LV_OPA_40, 0);
     lv_obj_set_style_border_color(text_area, UI_COLOR_ACCENT, LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(text_area, UI_BORDER_W, LV_STATE_FOCUSED);
     lv_obj_set_style_border_opa(text_area, LV_OPA_COVER, LV_STATE_FOCUSED);
 
     /* Cursor style */
@@ -404,7 +476,14 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_set_style_anim_duration(text_area, 0, LV_PART_CURSOR | LV_STATE_FOCUSED);
     lv_obj_set_style_border_width(text_area, 0, LV_PART_CURSOR | LV_STATE_FOCUSED);
 
+    lv_obj_add_event_cb(text_area, encoder_enter_cb,
+                        (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
+    lv_obj_add_event_cb(text_area, clip_arm_cb,
+                        (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
     lv_obj_add_event_cb(text_area, text_area_event_cb, LV_EVENT_ALL, NULL);
+    if (lv_display_t *disp = lv_display_get_default()) {
+        lv_display_add_event_cb(disp, clip_invalidate_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+    }
     lv_group_add_obj(lv_group_get_default(), text_area);
 
     /* Floating Sync / Journal pills, anchored bottom-right of the app panel.
@@ -528,6 +607,11 @@ static void ui_text_editor_exit(lv_obj_t *parent)
     save_content_async();
 
     ui_hide_back_button();
+
+    s_clip_armed = false;
+    if (lv_display_t *disp = lv_display_get_default()) {
+        lv_display_remove_event_cb_with_user_data(disp, clip_invalidate_cb, NULL);
+    }
 
     if (word_count_label) {
         lv_obj_del(word_count_label);
