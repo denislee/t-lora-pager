@@ -169,11 +169,11 @@ void charger_enable_cb(lv_event_t *e)
     bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
     local_param.charger_enable = turnOn;
 
-    // Persist eagerly so the background battery loop sees the new state
-    // on its next tick, then refresh battery-history to re-apply limits.
+    // Persist eagerly so the background charge-limit check sees the new
+    // state on its next tick, then re-apply the limit now.
     hw_set_user_setting(local_param);
     hw_set_charger(turnOn);
-    hw_update_battery_history();
+    hw_apply_charge_limit();
 }
 
 void charger_current_cb(lv_event_t *e)
@@ -202,7 +202,7 @@ void charge_limit_cb(lv_event_t *e)
         // once the 80% cap is off.
         hw_set_charger(local_param.charger_enable);
     } else {
-        hw_update_battery_history();
+        hw_apply_charge_limit();
     }
 }
 

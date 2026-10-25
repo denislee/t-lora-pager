@@ -374,6 +374,17 @@ void hw_init()
 #endif
 
 #ifdef ARDUINO
+#if defined(USING_PPM_MANAGE)
+    // DC2.3.20: the vendor initPMU() starts the BQ25896 ADC in continuous
+    // mode, but nothing reads an ADC result: charge state comes from status
+    // registers (isCharging/isChargeDone/isVbusIn) and voltage/percent from
+    // the BQ27220 fuel gauge. Off once here saves ~0.5-1 mA awake; the vendor
+    // lightSleep() wake no longer turns it back on.
+    {
+        core::ScopedI2cLock i2c;  // P7.45
+        instance.ppm.disableMeasure();
+    }
+#endif
     hw_set_charger(user_setting.charger_enable);
     hw_set_charger_current(user_setting.charger_current);
     instance.setMSCPreferSD(user_setting.msc_prefer_sd != 0);
@@ -386,10 +397,10 @@ void hw_init()
     hw_set_haptic_enable(user_setting.haptic_enable);
 #endif
 
-    // Battery history recording every 1 minute (60,000 ms)
-    lv_timer_create(battery_history_timer_cb, 60000, NULL);
-    // Record first point immediately - This also triggers the 80% charge limit check
-    hw_update_battery_history();
+    // 80 % charge-limit check every minute while awake (the charge task covers
+    // fake sleep), plus once now.
+    lv_timer_create(charge_limit_timer_cb, 60000, NULL);
+    hw_apply_charge_limit();
 
 #ifdef ARDUINO
     // BT.11: the backlight stays off (AW9364 begin() leaves it at 0) until the
@@ -759,14 +770,8 @@ void hw_shutdown()
 void hw_power_down_all()
 {
 #ifdef ARDUINO
-    // Disable BQ25896 continuous ADC measurement during fake sleep — nobody
-    // reads the gauge while LVGL is blocked, so the ~0.5–1 mA conversion
-    // current is pure waste.  Mirrors vendor lightSleep() (LilyGo_LoRa_Pager.cpp:685).
     {
         core::ScopedI2cLock i2c;  // P7.45
-#if defined(USING_PPM_MANAGE)
-        instance.ppm.disableMeasure();
-#endif
         instance.powerControl(POWER_GPS, false);
         instance.powerControl(POWER_NFC, false);
         instance.powerControl(POWER_HAPTIC_DRIVER, false);
@@ -834,14 +839,6 @@ void hw_power_up_all()
     // from the P4.3 dim stage. It calls ui_resume_timers() (and so this) after
     // its own setBrightness(), so writing the user level here wins.
     hw_set_disp_backlight(user_setting.brightness_level);
-    // Re-enable BQ25896 continuous ADC measurement so the battery gauge is
-    // live again after wake.  Mirrors vendor lightSleep() (LilyGo_LoRa_Pager.cpp:756).
-#if defined(USING_PPM_MANAGE)
-    {
-        core::ScopedI2cLock i2c;  // P7.45
-        instance.ppm.enableMeasure();
-    }
-#endif
     // Speaker is only powered on when needed by playback routines and if enabled
 
     // The radio stays asleep from hw_power_down_all(). Nothing transmits or

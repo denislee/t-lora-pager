@@ -16,25 +16,23 @@
 #include <cstring>
 #endif
 
-// --- Battery history ---------------------------------------------------
+// --- Charge limit (P4.5) ------------------------------------------------
 
-static std::vector<int16_t> battery_history;
-static const size_t MAX_BATTERY_HISTORY = 60; // 1 hour at 60 s interval (was "5 hours if 5 mins", corrected P4.30)
+#ifdef ARDUINO
+static bool hw_get_charge_enable();
+#endif
 
-void hw_update_battery_history()
+// Battery-life conservation: with charge_limit_en, stop charging at >= 80 %
+// and resume below 75 %; without it the charger follows charger_enable.
+// Driven once a minute (awake: charge_limit_timer_cb; fake sleep: the charge
+// task) and right after the Settings charger toggles change (DC2.3.15).
+void hw_apply_charge_limit()
 {
 #ifdef ARDUINO
     monitor_params_t params;
     hw_get_monitor_params(params);
     int16_t percent = params.battery_percent;
     if (percent >= 0 && percent <= 100) {
-        if (battery_history.size() >= MAX_BATTERY_HISTORY) {
-            battery_history.erase(battery_history.begin());
-        }
-        battery_history.push_back(percent);
-        log_d("Recorded battery percent: %d%%", percent);
-
-        // Charge conservation logic: Stop charging if >= 80% and feature is enabled
         if (user_setting.charge_limit_en) {
             if (percent >= 80) {
                 if (hw_get_charge_enable()) {
@@ -55,20 +53,13 @@ void hw_update_battery_history()
             }
         }
     }
-#else
-    static int16_t sim_percent = 100;
-    if (battery_history.size() >= MAX_BATTERY_HISTORY) {
-        battery_history.erase(battery_history.begin());
-    }
-    battery_history.push_back(sim_percent);
-    sim_percent -= 2;
-    if (sim_percent < 10) sim_percent = 100;
 #endif
 }
 
-void battery_history_timer_cb(lv_timer_t *timer)
+void charge_limit_timer_cb(lv_timer_t *timer)
 {
-    hw_update_battery_history();
+    (void)timer;
+    hw_apply_charge_limit();
 }
 
 // --- BQ27220 targeted reads (P7.16) -------------------------------------
@@ -188,20 +179,21 @@ bool hw_has_otg_function()
 
 // --- Charger -----------------------------------------------------------
 
-bool hw_get_charge_enable()
-{
 #ifdef ARDUINO
+// Only hw_apply_charge_limit() asks (DC2.3.31).
+static bool hw_get_charge_enable()
+{
 #if defined(USING_PPM_MANAGE)
     core::ScopedI2cLock i2c;  // P7.45
     return  instance.ppm.isEnableCharge();
 #elif defined(USING_PMU_MANAGE)
     core::ScopedI2cLock i2c;  // P7.45
     return  instance.isEnableCharge();
-#endif
 #else
     return false;
 #endif
 }
+#endif
 
 void hw_set_charger(bool enable)
 {
@@ -300,9 +292,8 @@ static uint32_t s_monitor_last_refresh = 0;
 #endif
 
 // On the pager none of these reads use the BQ25896 ADC (charge status is a
-// status-register bit; voltage and percent come from the fuel gauge), so the
-// result stays valid in fake sleep, where hw_power_down_all() turns the ADC
-// off.
+// status-register bit; voltage and percent come from the fuel gauge), which
+// hw_init() turns off for good (DC2.3.20).
 void hw_get_monitor_params(monitor_params_t &params)
 {
 #ifdef ARDUINO

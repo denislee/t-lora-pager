@@ -819,7 +819,8 @@ void LilyGoLoRaPager::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_SD_CARD, true);
     if (!sleepSkipsSD) installSD();   // [LOCAL PATCH P7.34]
 
-    ppm.enableMeasure();
+    // [LOCAL PATCH DC2.3.20] No ppm.enableMeasure(): src/hal/system.cpp
+    // hw_init() keeps the BQ25896 ADC off (nothing reads it).
 
     initKeyboard();
     if (devices_probe & HW_KEYBOARD_ONLINE) {

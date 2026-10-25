@@ -200,15 +200,15 @@ void charge_task_fn(void *)
 
         // P4.5 — 80 % charge-cap slow tick.  lv_timers are frozen during
         // fake sleep so the cap would never fire overnight.  Drive the same
-        // hw_update_battery_history() that the awake lv_timer calls, once
-        // per minute.  Only battery_percent (from the fuel gauge) matters
-        // for enforcement — the BQ gauge does not need ppm.enableMeasure().
+        // hw_apply_charge_limit() that the awake lv_timer calls, once per
+        // minute.  Only battery_percent (from the fuel gauge) matters for
+        // enforcement; the BQ25896 charger ADC stays off (DC2.3.20).
         {
             uint32_t now = millis();
             if (now - last_battery_chk_ms >= kBatteryCheckMs) {
                 last_battery_chk_ms = now;
                 core::ScopedInstanceLock lock;
-                hw_update_battery_history();
+                hw_apply_charge_limit();
             }
         }
 

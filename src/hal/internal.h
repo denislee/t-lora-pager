@@ -19,7 +19,7 @@ extern user_setting_params_t user_setting;
 extern device_const_var_t dev_conts_var;
 
 #include <lvgl.h>
-void battery_history_timer_cb(lv_timer_t *timer);
+void charge_limit_timer_cb(lv_timer_t *timer);  // hal/power.cpp, every 60 s
 
 void hw_audio_init();
 void hw_audio_deinit_task();
