@@ -20,6 +20,8 @@
 #include <functional>
 #include <string>
 
+#include "result.h"
+
 #ifndef ARDUINO
 // Emulator only: open the TCP listener once (env PAGERLINK_PORT, "0" keeps it
 // off). On hardware the link has no switch of its own: it follows Bluetooth.
@@ -50,6 +52,11 @@ struct HwLinkResult {
     std::string code;
     std::string msg;
 };
+
+// Map a failed hw_link_call() to a HalError plus a UI-ready `err`:
+// "disconnected" -> LinkOffline, anything else -> InternalError with
+// "phone: <code>: <msg>".
+HalError hal_error_from_link(const HwLinkResult &r, std::string &err);
 
 // Send a request to the phone and wait for its answer. `params_json` is a JSON
 // object text or "" (no params). Default timeout 10 s (PROTOCOL.md §3.3).

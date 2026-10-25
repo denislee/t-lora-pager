@@ -31,42 +31,6 @@ void tearDown(void) {}
 
 /* --- loopback harness ---------------------------------------------------- */
 
-/* Carries encoded DATA payloads one way and encoded ACK payloads the other. */
-struct Loop {
-    std::deque<std::string> data; /* DATA payloads: sender -> receiver */
-    std::deque<std::string> ack;  /* ACK payloads:  receiver -> sender */
-
-    bool send_data(const std::string &payload) {
-        data.push_back(payload);
-        return true;
-    }
-    bool send_ack(const std::string &payload) {
-        ack.push_back(payload);
-        return true;
-    }
-
-    void deliver_data(XferReceiver &rx) {
-        std::string p = std::move(data.front());
-        data.pop_front();
-        rx.on_data(reinterpret_cast<const uint8_t *>(p.data()), p.size());
-    }
-    void deliver_ack(XferSender &tx) {
-        std::string p = std::move(ack.front());
-        ack.pop_front();
-        tx.on_ack(reinterpret_cast<const uint8_t *>(p.data()), p.size());
-    }
-    void deliver_all_data(XferReceiver &rx) {
-        while (!data.empty()) {
-            deliver_data(rx);
-        }
-    }
-    void deliver_all_acks(XferSender &tx) {
-        while (!ack.empty()) {
-            deliver_ack(tx);
-        }
-    }
-};
-
 /* Lossy loopback: every send is counted, and the k-th (0-based) DATA or ACK
  * send can be discarded without failing the sender/receiver. */
 struct LossyLoop {
@@ -110,6 +74,9 @@ struct LossyLoop {
         }
     }
 };
+
+/* Plain loopback: a LossyLoop that drops nothing. */
+using Loop = LossyLoop;
 
 /* Carry a lossy loop to completion. When both queues drain and the sender is
  * not Done, the owner's retransmit timer fires: retransmit() then pump(). */

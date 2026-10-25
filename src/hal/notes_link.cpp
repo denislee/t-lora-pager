@@ -21,58 +21,18 @@
 #include "link/link_json.h"
 #include "notes_path.h"
 
-// Map a failed hw_link_call() to a HalError plus a UI-ready message.
-static HalError link_fail(const HwLinkResult &r, std::string &err)
+// Collect the errors reported by one event: `raw` is a JSON array; every
+// string element is decoded (all escapes, \uXXXX included), anything else is
+// skipped.
+static void parse_string_array(const std::string &raw, std::vector<std::string> &out)
 {
-    if (r.code == "disconnected") {
-        err = hal_error_string(HalError::LinkOffline);
-        return HalError::LinkOffline;
+    std::vector<std::string> items;
+    if (!pagerlink::json_array_items(raw, items)) return;
+    for (const std::string &item : items) {
+        pagerlink::JsonObject o;
+        std::string s;
+        if (o.parse("{\"s\":" + item + "}") && o.get_string("s", s)) out.push_back(std::move(s));
     }
-    err = "phone: " + r.code + ": " + r.msg;
-    return HalError::InternalError;
-}
-
-// Collect the errors reported by one event: a JSON array of strings held in
-// `raw`. Decodes the common escapes; other escapes are kept verbatim (slash
-// included). Malformed input simply yields what it can.
-static bool parse_string_array(const std::string &raw, std::vector<std::string> &out)
-{
-    size_t i = 0;
-    const size_t n = raw.size();
-    while (i < n) {
-        while (i < n && raw[i] != '"') ++i;  // find the next opening quote
-        if (i >= n) break;
-        ++i;
-
-        std::string cur;
-        while (i < n && raw[i] != '"') {
-            const char c = raw[i];
-            if (c == '\\' && i + 1 < n) {
-                const char e = raw[i + 1];
-                i += 2;
-                switch (e) {
-                    case '"': cur += '"'; break;
-                    case '\\': cur += '\\'; break;
-                    case '/': cur += '/'; break;
-                    case 'n': cur += '\n'; break;
-                    case 't': cur += '\t'; break;
-                    case 'r': cur += '\r'; break;
-                    case 'b': cur += '\b'; break;
-                    case 'f': cur += '\f'; break;
-                    default:  // keep an unsupported escape literal, backslash and all
-                        cur += '\\';
-                        cur += e;
-                        break;
-                }
-            } else {
-                cur += c;
-                ++i;
-            }
-        }
-        if (i < n && raw[i] == '"') ++i;  // skip the closing quote
-        out.push_back(std::move(cur));
-    }
-    return true;
 }
 
 // Append every *.txt entry (not a directory, name ending in ".txt", and not in
@@ -191,7 +151,7 @@ HalResult<NotesSyncSummary> notes_link_sync(const std::vector<NoteEntry> &files,
     for (const std::pair<size_t, size_t> &b : batches) {
         const HwLinkResult r =
             hw_link_call("notes.sync", notes_sync_params(targets, files, b.first, b.second));
-        if (!r.ok) return link_fail(r, err);
+        if (!r.ok) return hal_error_from_link(r, err);
 
         pagerlink::JsonObject reply;
         int64_t job = 0;

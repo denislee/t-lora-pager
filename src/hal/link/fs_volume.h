@@ -58,13 +58,6 @@ bool vol_stat(Vol v, const std::string &path, VolEntry &out);
 /** Read exactly `n` bytes at `offset`; false when the file is shorter or unreadable. */
 bool vol_read_at(Vol v, const std::string &path, uint32_t offset, uint8_t *buf, size_t n);
 
-/**
- * Write `n` bytes at `offset`. offset 0 creates or truncates the file (n may
- * be 0); any other offset must equal the current file size (append). False on
- * any short write or an offset that is not the current size.
- */
-bool vol_write_at(Vol v, const std::string &path, uint32_t offset, const uint8_t *buf, size_t n);
-
 /** Remove a file, or a directory with everything under it. Never the root. */
 bool vol_remove(Vol v, const std::string &path);
 
@@ -88,8 +81,8 @@ bool vol_free_bytes(Vol v, uint64_t &out);
  * VolFile under the SPI lock, so no FILE* outlives its mount. A closed file
  * (close(), one closed by the SD unmount, or one closed by its owner before a
  * delete/rename of its path) reopens itself on
- * the next read_at/write_at, by path, with the same checks vol_read_at /
- * vol_write_at make. The destructor closes.
+ * the next read_at/write_at, by path, with the same checks vol_read_at makes
+ * (writes: the file size must equal the offset). The destructor closes.
  */
 class VolFile {
 public:
@@ -123,7 +116,7 @@ private:
  * stored. Thread-safe (link_task and the notes-sync worker both call it); the
  * cache lock is never held across I/O. Nothing is stored while a background
  * note save is pending or when the generation moved during the pass. Writes
- * through this layer (vol_write_at, VolFile writes) forget their path, and
+ * through this layer (VolFile writes) forget their path, and
  * vol_remove / vol_rename forget everything, because they bump no generation.
  */
 bool vol_file_crc(Vol v, const std::string &path, uint32_t size, uint32_t mtime, uint32_t &out);

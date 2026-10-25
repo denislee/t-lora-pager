@@ -98,6 +98,15 @@ bool hw_link_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
     return w->r.ok;
 }
 
+HalError hal_error_from_link(const HwLinkResult &r, std::string &err) {
+    if (r.code == "disconnected") {
+        err = hal_error_string(HalError::LinkOffline);
+        return HalError::LinkOffline;
+    }
+    err = "phone: " + r.code + ": " + r.msg;
+    return HalError::InternalError;
+}
+
 int hw_link_subscribe(const char *event, HwLinkEventFn fn) {
     if (!event || !fn) {
         return 0;

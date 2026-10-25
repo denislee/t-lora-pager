@@ -33,8 +33,6 @@
 namespace pagerlink {
 namespace {
 
-/** Default hw_link_call() timeout, matching Rpc::DEFAULT_TIMEOUT_MS. */
-constexpr int TEST_DEFAULT_TIMEOUT_MS = 10000;
 /** Largest `bytes` payload the sink step will generate (4 MiB). */
 constexpr int TEST_MAX_BYTES = 4 * 1024 * 1024;
 
@@ -158,9 +156,11 @@ void run_notes_step(const std::string &mode) {
     }
     for (const SeedFile &f : files) {
         const std::string path = std::string("/notes/") + f.name;
-        if (!pagerlink::vol_write_at(f.vol, path, 0, f.data.data(), f.data.size())) {
+        pagerlink::VolFile vf;
+        if (!vf.open_write(f.vol, path) || !vf.write_at(0, f.data.data(), f.data.size())) {
             seed_ok = false;
         }
+        vf.close();
     }
 
     HalResult<NotesSyncSummary> r = HalResult<NotesSyncSummary>(HalError::InternalError);
@@ -315,7 +315,7 @@ bool handle_test_callback(const JsonObject &params, JsonWriter &result, RpcError
         return false;
     }
 
-    int64_t timeout_ms = TEST_DEFAULT_TIMEOUT_MS;
+    int64_t timeout_ms = Rpc::DEFAULT_TIMEOUT_MS;
     if (params.has("timeout_ms") &&
         (!params.get_int("timeout_ms", timeout_ms) || timeout_ms < 0)) {
         err.code = hal_error_code(HalError::InvalidArgument);

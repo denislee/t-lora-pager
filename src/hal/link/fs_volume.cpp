@@ -203,31 +203,6 @@ bool vol_read_at(Vol v, const std::string &path, uint32_t offset, uint8_t *buf, 
     return got == n;
 }
 
-bool vol_write_at(Vol v, const std::string &path, uint32_t offset, const uint8_t *buf, size_t n) {
-    if (!vol_available(v)) return false;
-    crc_forget_path(v, path);
-
-    VolLock lock(v);
-    fs::FS &fs = fs_for(v);
-
-    File f;
-    if (offset == 0) {
-        f = fs.open(path.c_str(), FILE_WRITE);  // create + truncate
-    } else {
-        f = fs.open(path.c_str(), FILE_APPEND);
-        if (!f) return false;
-        if (static_cast<uint32_t>(f.size()) != offset) {
-            f.close();
-            return false;
-        }
-    }
-    if (!f) return false;
-
-    const size_t wrote = n ? f.write(buf, n) : 0;
-    f.close();
-    return wrote == n;
-}
-
 bool vol_remove(Vol v, const std::string &path) {
     if (!vol_available(v)) return false;
     if (path.empty() || path == "/") return false;
@@ -562,25 +537,6 @@ bool vol_read_at(Vol v, const std::string &path, uint32_t offset, uint8_t *buf, 
     }
     std::fclose(f);
     return got == n;
-}
-
-bool vol_write_at(Vol v, const std::string &path, uint32_t offset, const uint8_t *buf, size_t n) {
-    crc_forget_path(v, path);
-    const std::string h = host(v, path);
-
-    const char *mode = "wb";  // offset 0: create + truncate
-    if (offset != 0) {
-        struct stat st;
-        if (::stat(h.c_str(), &st) != 0) return false;
-        if (static_cast<uint64_t>(st.st_size) != offset) return false;
-        mode = "ab";
-    }
-
-    FILE *f = std::fopen(h.c_str(), mode);
-    if (!f) return false;
-    const size_t wrote = n ? std::fwrite(buf, 1, n, f) : 0;
-    std::fclose(f);
-    return wrote == n;
 }
 
 bool vol_remove(Vol v, const std::string &path) {

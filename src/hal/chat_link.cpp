@@ -21,17 +21,6 @@
 #include <esp_heap_caps.h>
 #endif
 
-// Map a failed hw_link_call() to a HalError plus a UI-ready message.
-static HalError link_fail(const HwLinkResult &r, std::string &err)
-{
-    if (r.code == "disconnected") {
-        err = hal_error_string(HalError::LinkOffline);
-        return HalError::LinkOffline;
-    }
-    err = "phone: " + r.code + ": " + r.msg;
-    return HalError::InternalError;
-}
-
 #ifdef ARDUINO
 // hw_read_sd_stream() sink state: append into the caller's buffer.
 struct AudioSink {
@@ -58,88 +47,65 @@ static bool read_audio(const std::string &path, uint8_t *&buf, size_t &len, HalE
 {
     buf = nullptr;
     len = 0;
+    auto fail = [&e, &err](HalError code, const char *msg) {
+        e = code;
+        err = msg;
+        return false;
+    };
 
 #ifdef ARDUINO
     const size_t n = hw_get_file_size(path.c_str());
-    if (n <= 44) {
-        e = HalError::InvalidArgument;
-        err = "no audio captured";
-        return false;
-    }
+    if (n <= 44) return fail(HalError::InvalidArgument, "no audio captured");
     if (n > CHAT_AUDIO_MAX_BYTES) {
-        e = HalError::InvalidArgument;
-        err = "voice memo too long (max 15 s)";
-        return false;
+        return fail(HalError::InvalidArgument, "voice memo too long (max 15 s)");
     }
 
     uint8_t *b = static_cast<uint8_t *>(heap_caps_malloc(n, MALLOC_CAP_SPIRAM));
     if (!b) b = static_cast<uint8_t *>(malloc(n));
-    if (!b) {
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
-    }
+    if (!b) return fail(HalError::InternalError, "audio read failed");
 
     AudioSink sink = {b, n, 0};
     const bool ok = hw_read_sd_stream(path.c_str(), 4096, audio_sink, &sink) && sink.filled == n;
     if (!ok) {
         free(b);
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
+        return fail(HalError::InternalError, "audio read failed");
     }
     buf = b;
     len = n;
     return true;
 #else
     FILE *f = fopen(path.c_str(), "rb");
-    if (!f) {
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
-    }
+    if (!f) return fail(HalError::InternalError, "audio read failed");
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
+        return fail(HalError::InternalError, "audio read failed");
     }
     const long end = ftell(f);
     if (end < 0 || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
+        return fail(HalError::InternalError, "audio read failed");
     }
 
     const size_t n = static_cast<size_t>(end);
     if (n <= 44) {
         fclose(f);
-        e = HalError::InvalidArgument;
-        err = "no audio captured";
-        return false;
+        return fail(HalError::InvalidArgument, "no audio captured");
     }
     if (n > CHAT_AUDIO_MAX_BYTES) {
         fclose(f);
-        e = HalError::InvalidArgument;
-        err = "voice memo too long (max 15 s)";
-        return false;
+        return fail(HalError::InvalidArgument, "voice memo too long (max 15 s)");
     }
 
     uint8_t *b = static_cast<uint8_t *>(malloc(n));
     if (!b) {
         fclose(f);
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
+        return fail(HalError::InternalError, "audio read failed");
     }
     const size_t got = fread(b, 1, n, f);
     fclose(f);
     if (got != n) {
         free(b);
-        e = HalError::InternalError;
-        err = "audio read failed";
-        return false;
+        return fail(HalError::InternalError, "audio read failed");
     }
     buf = b;
     len = n;
@@ -186,7 +152,7 @@ HalResult<ChatReply> chat_link_ask(const std::string &text, const std::string &a
         const HwLinkResult b = hw_link_call("chat.audio.begin", w.str());
         if (!b.ok) {
             free(buf);
-            return link_fail(b, err);
+            return hal_error_from_link(b, err);
         }
 
         pagerlink::JsonObject obj;
@@ -218,7 +184,7 @@ HalResult<ChatReply> chat_link_ask(const std::string &text, const std::string &a
     w.end_object();
 
     const HwLinkResult r = hw_link_call("chat.ask", w.str(), CHAT_ASK_TIMEOUT_MS);
-    if (!r.ok) return link_fail(r, err);
+    if (!r.ok) return hal_error_from_link(r, err);
 
     pagerlink::JsonObject obj;
     if (!obj.parse(r.json)) {

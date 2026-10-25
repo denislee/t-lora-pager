@@ -11,17 +11,6 @@
 #include "link.h"
 #include "link/link_json.h"
 
-// Map a failed hw_link_call() to a HalError plus a UI-ready message.
-static HalError link_fail(const HwLinkResult &r, std::string &err)
-{
-    if (r.code == "disconnected") {
-        err = hal_error_string(HalError::LinkOffline);
-        return HalError::LinkOffline;
-    }
-    err = "phone: " + r.code + ": " + r.msg;
-    return HalError::InternalError;
-}
-
 HalResult<WeatherPayload> weather_link_get(const std::string &key, std::string &err)
 {
     err.clear();
@@ -40,7 +29,7 @@ HalResult<WeatherPayload> weather_link_get(const std::string &key, std::string &
     w.begin_object().key("key").str_val(key).end_object();
 
     const HwLinkResult r = hw_link_call("weather.get", w.str(), WEATHER_GET_TIMEOUT_MS);
-    if (!r.ok) return link_fail(r, err);
+    if (!r.ok) return hal_error_from_link(r, err);
 
     WeatherPayload p;
     std::string why;
