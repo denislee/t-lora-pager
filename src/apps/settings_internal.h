@@ -95,11 +95,8 @@ void unregister_subpage_items_for(lv_obj_t *page);
 // eagerly, so settings survive a crash/power-loss between changes.
 extern user_setting_params_t local_param;
 
-// --- Timezone: defined in ui_time_sync.cpp ---
-std::string timezone_get_user_tz();
-void        timezone_set_user_tz(const char *tz);
-// Fills `out` with the bundled IANA zone names (replaces its contents).
-void        timezone_fetch_list(std::vector<std::string> &out);
+// --- Timezone (timezone_get_user_tz/set_user_tz/fetch_list) ---
+#include "../hal/timezone.h"
 
 // --- Weather geocoding: defined in ui_weather.cpp ---
 struct weather_city_match {

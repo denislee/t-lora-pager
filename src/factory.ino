@@ -28,8 +28,7 @@
 extern "C" void lilygo_request_fake_sleep_toggle();
 #endif
 
-const char *timezone_get_user_posix();
-
+#include "hal/timezone.h"
 
 
 /* Defined in ui_lock.cpp — shows the unlock modal if crypto is enabled and

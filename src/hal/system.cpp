@@ -11,6 +11,7 @@
 #include "keyboard_task.h"
 #include "lvgl_task.h"
 #include "radio_chip.h"
+#include "timezone.h"
 #include "../core/spi_lock.h"
 #include "../core/kb_lock.h"
 
@@ -727,9 +728,6 @@ void hw_set_date_time(struct tm &timeinfo)
 // which in the default SNTP_SYNC_MODE_IMMED often stays at RESET even after
 // a successful update.
 static volatile bool g_ntp_sync_completed = false;
-
-// Defined in ui_time_sync.cpp: the POSIX TZ rule for the user's zone.
-const char *timezone_get_user_posix();
 
 bool hw_start_time_sync_ntp()
 {

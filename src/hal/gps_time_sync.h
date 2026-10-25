@@ -14,8 +14,8 @@
  */
 #pragma once
 
-// Returns true if the sync started. Powers on the GPS rail if it was off
-// (and remembers so hw_stop_time_sync_gps can restore the prior state).
+// Returns true if the sync started. Powers the GPS rail on (it is off at boot
+// and has no other owner); a restart while a sync is running keeps it up.
 // Resets the parser; any partial NMEA from a previous attempt is discarded.
 bool hw_start_time_sync_gps();
 
@@ -31,6 +31,6 @@ void hw_pump_time_sync_gps();
 //  -2  — not supported (emulator build)
 int  hw_get_time_sync_gps_status();
 
-// Stop an in-flight sync. Idempotent. Restores GPS power if start() turned
-// it on transiently.
+// Stop an in-flight sync. Idempotent. Powers the GPS rail off, as a fix or a
+// timeout does.
 void hw_stop_time_sync_gps();

@@ -9,6 +9,7 @@
 #include "../power.h"
 #include "../storage.h"
 #include "../system.h"
+#include "../timezone.h"
 #include "../wireless.h"
 
 #include <chrono>
@@ -26,9 +27,6 @@
 #define LINK_LOG(fmt, ...) printf("[link] " fmt "\n", ##__VA_ARGS__)
 #endif
 
-// Defined in ui_time_sync.cpp. Forward-declared here so the link layer does
-// not have to pull in apps/settings_internal.h.
-void timezone_set_user_tz(const char *tz);
 
 namespace pagerlink {
 namespace {

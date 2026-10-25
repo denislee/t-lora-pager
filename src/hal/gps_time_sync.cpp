@@ -2,18 +2,18 @@
  * @file      gps_time_sync.cpp
  * @brief     GPS NMEA → wall-clock sync. See gps_time_sync.h.
  *
- * The GPS NMEA stream gives us UTC date+time; we apply the user's POSIX
- * timezone rule (resolved by ui_time_sync.cpp::timezone_fetch_offset) to
- * compute local wall-clock, then drive the same settimeofday + RTC write
- * path that the NTP sync uses. That keeps the RTC contents consistent
- * with what NTP would have written for the same wall time.
+ * The GPS NMEA stream gives us UTC date+time. We set the system clock from
+ * it, then write the local wall clock to the RTC exactly as the NTP path does
+ * (factory.ino time_available() -> rtc.hwClockWrite(), i.e. localtime_r()
+ * under the process TZ). That keeps the RTC contents consistent with what NTP
+ * would have written for the same instant, DST included.
  */
 #include "gps_time_sync.h"
 #include "sensors.h"
 #include "system.h"
 #include "../core/kb_lock.h"
 
-#include <string>
+#include <cstdint>
 #include <ctime>
 #include <sys/time.h>
 
@@ -22,12 +22,6 @@
 #include <LilyGoLib.h>
 #include <TinyGPS++.h>
 #endif
-
-// Defined in ui_time_sync.cpp. Forward-declared here so the HAL layer does
-// not have to pull in apps/settings_internal.h.
-std::string timezone_get_user_tz();
-bool        timezone_fetch_offset(const char *tz, int &offset_sec,
-                                  std::string &err);
 
 namespace {
 
@@ -46,21 +40,18 @@ bool s_active = false;
 
 uint32_t s_deadline_ms = 0;
 
-// Convert a UTC struct tm to time_t portably. ESP32 newlib doesn't ship
-// timegm(), so we temporarily switch TZ to UTC and let mktime() interpret
-// the broken-down time as UTC. The previous TZ env var is restored before
-// returning so callers that rely on localtime() don't observe a flicker.
-time_t utc_tm_to_epoch(struct tm &utc_tm)
+// Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's
+// days_from_civil). ESP32 newlib ships no timegm(); this replaces the old
+// TZ=UTC0 + mktime() round trip, which flipped the process-global TZ under
+// every other task that calls localtime() (DC2.0.3).
+int64_t days_from_civil(int y, unsigned m, unsigned d)
 {
-    const char *prev = getenv("TZ");
-    std::string saved = prev ? prev : "";
-    setenv("TZ", "UTC0", 1);
-    tzset();
-    time_t epoch = mktime(&utc_tm);
-    if (prev) setenv("TZ", saved.c_str(), 1);
-    else      unsetenv("TZ");
-    tzset();
-    return epoch;
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);                        // [0, 399]
+    const unsigned doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;  // [0, 365]
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;           // [0, 146096]
+    return (int64_t)era * 146097 + (int64_t)doe - 719468;
 }
 #endif
 
@@ -119,43 +110,26 @@ void hw_pump_time_sync_gps()
                  && s_gps.date.age() < 2000 && s_gps.time.age() < 2000
                  && s_gps.date.year() >= 2024;
     if (fresh) {
-        struct tm utc_tm = {};
-        utc_tm.tm_year  = s_gps.date.year() - 1900;
-        utc_tm.tm_mon   = s_gps.date.month() - 1;
-        utc_tm.tm_mday  = s_gps.date.day();
-        utc_tm.tm_hour  = s_gps.time.hour();
-        utc_tm.tm_min   = s_gps.time.minute();
-        utc_tm.tm_sec   = s_gps.time.second();
-        utc_tm.tm_isdst = 0;
-
-        time_t utc = utc_tm_to_epoch(utc_tm);
-
-        std::string tz = timezone_get_user_tz();
-        int offset_sec = 0;
-        std::string err;
-        bool have_offset = timezone_fetch_offset(tz.c_str(), offset_sec, err);
+        const time_t utc = (time_t)(days_from_civil(s_gps.date.year(),
+                                                    s_gps.date.month(),
+                                                    s_gps.date.day()) * 86400
+                                    + s_gps.time.hour() * 3600
+                                    + s_gps.time.minute() * 60
+                                    + s_gps.time.second());
 
         struct timeval tv = { utc, 0 };
         settimeofday(&tv, nullptr);
 
-        // Mirror the NTP path: write the user's local wall-clock to the
-        // RTC chip. hwClockWrite() itself calls localtime_r() under the
-        // active TZ env, so we'd ordinarily want to setenv("TZ", ...) and
-        // let it do the conversion. We do the offset arithmetic explicitly
-        // instead so this path doesn't perturb the global TZ env on builds
-        // that don't otherwise touch it.
+        // Mirror the NTP path: write the user's local wall clock to the RTC.
+        // TZ already holds the user's POSIX rule (factory.ino seeds it at boot,
+        // timezone_set_user_tz() keeps it current), so localtime_r() of the
+        // synced instant applies the right DST offset. It is evaluated after
+        // settimeofday(), never against the pre-sync clock (DC2.0.3).
         if (hw_get_device_online() & HW_RTC_ONLINE) {
             struct tm local_tm;
-            if (have_offset) {
-                time_t local = utc + offset_sec;
-                gmtime_r(&local, &local_tm);
-            } else {
-                local_tm = utc_tm;
-            }
-            {
-                core::ScopedI2cLock i2c;  // P7.45
-                instance.rtc.setDateTime(local_tm);
-            }
+            localtime_r(&utc, &local_tm);
+            core::ScopedI2cLock i2c;  // P7.45
+            instance.rtc.setDateTime(local_tm);
         }
 
         s_status = 1;

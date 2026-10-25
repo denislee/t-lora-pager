@@ -1,15 +1,11 @@
 /**
  * @file      ui_time_sync.cpp
- * @brief     Timezone (city) selection + timezone-aware NTP sync.
+ * @brief     Timezone (city) selection; the API is hal/timezone.h.
  *
- * The device's Date & Time screen lets the user pick an IANA city; we use the
- * resulting POSIX TZ rule to compute the correct UTC offset (including DST).
- *
- * We previously used worldtimeapi.org for both the city list and the offset
- * lookup, but that service was retired and the round-trip was blocking the
- * UI. Everything here is now local: the list below is bundled at compile
- * time, and offsets are derived from newlib's TZ machinery via
- * setenv("TZ", ...) + localtime_r() + tm.tm_gmtoff.
+ * The device's Date & Time screen lets the user pick an IANA city; its POSIX
+ * TZ rule (DST transitions included) goes into the process TZ env, so
+ * localtime_r() — and the NTP and GPS clock syncs that rely on it — yield the
+ * correct local time year-round. The city list is bundled at compile time.
  *
  * The user's chosen IANA name is persisted in NVS so it survives reboots and
  * is reused by the "Sync from Internet" button in the Date & Time settings
@@ -21,16 +17,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "hal/timezone.h"
+
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <Preferences.h>
-#endif
 
 #define TZ_PREFS_NS  "timezone"
+#endif
+
 #define TZ_DEFAULT   "America/Sao_Paulo"
 
 // IANA name → POSIX TZ rule. Curated list of ~80 widely-used zones; the POSIX
-// rules encode DST transitions where applicable so tm_gmtoff is correct
+// rules encode DST transitions where applicable so localtime_r() is correct
 // year-round without further lookups. Add entries here as needed — the
 // picker surfaces them in insertion order, so keep regional groupings
 // together for usability.
@@ -173,8 +172,6 @@ void timezone_set_user_tz(const char *tz)
 #endif
 }
 
-// Returns the POSIX TZ rule for the user's selected zone (or the default).
-// Exposed so the NTP sync path can hand it to configTzTime() directly.
 const char *timezone_get_user_posix()
 {
     std::string tz = timezone_get_user_tz();
@@ -188,49 +185,4 @@ void timezone_fetch_list(std::vector<std::string> &out)
     out.clear();
     out.reserve(sizeof(TZ_TABLE) / sizeof(TZ_TABLE[0]));
     for (const TzEntry &e : TZ_TABLE) out.emplace_back(e.name);
-}
-
-// Compute the total UTC offset (DST included) for `tz` using newlib's TZ
-// machinery, at the current wall time. Restores the previous TZ env var
-// before returning so we don't perturb anyone else's view of time.
-bool timezone_fetch_offset(const char *tz, int &offset_sec, std::string &err)
-{
-    offset_sec = 0;
-
-    const char *posix = tz_find_posix(tz);
-    if (!posix) {
-        err = "unknown timezone";
-        return false;
-    }
-
-#ifdef ARDUINO
-    const char *prev = getenv("TZ");
-    std::string saved = prev ? std::string(prev) : std::string();
-    setenv("TZ", posix, 1);
-    tzset();
-
-    time_t now = time(nullptr);
-    if (now < 24 * 3600) now = 24 * 3600;  // pre-sync clock sentinel
-
-    // ESP32 newlib doesn't expose tm_gmtoff, so derive the offset ourselves:
-    // treat localtime(now) and gmtime(now) as input to mktime() (which
-    // interprets its arg as local time under the current TZ). mktime(lt)
-    // returns `now`; mktime(gm) returns `now - offset`, so the difference
-    // is the UTC offset we want, DST included.
-    struct tm lt, gm;
-    localtime_r(&now, &lt);
-    gmtime_r(&now, &gm);
-    gm.tm_isdst = 0;
-    long gmtoff = (long)difftime(mktime(&lt), mktime(&gm));
-
-    if (prev) setenv("TZ", saved.c_str(), 1);
-    else      unsetenv("TZ");
-    tzset();
-
-    offset_sec = (int)gmtoff;
-    return true;
-#else
-    (void)err;
-    return false;
-#endif
 }
