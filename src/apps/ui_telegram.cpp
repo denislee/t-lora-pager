@@ -27,32 +27,34 @@
  * the default for Telegram so Portuguese messages render out of the box.
  *
  * State reset on onStop:
- *   widgets: s_root, s_list_holder, s_msgs_holder, s_status_label, s_input_ta
+ *   widgets: s_root, s_list_holder, s_msgs_holder, s_status_label
  *                                       — nulled (deleted with parent)
  *   timers:  s_timer (poll scheduler)   — lv_timer_del + null
- *            s_drain_timer (result drain)— lv_timer_del + null
- *   tasks:   network worker slot (FreeRTOS s_bg_task on hardware, detached
- *            std::thread + s_bg_running on the emulator) — left to finish;
- *            the epoch bump makes any late result be discarded. A phone-path
- *            worker's link receiver (hw_link_accept_*) is opened and closed
- *            inside tg_link_request(), so nothing link-side outlives it.
- *   results: s_fg_result / s_fg_done      — dropped by fg_discard() (under
- *            s_tg_mu on the emulator, where the instance lock is a no-op)
+ *   job:     s_tg_job (the network worker slot, core::OneShotJob) — left to
+ *            finish; the s_fg_epoch bump makes its late result be discarded
+ *            on delivery. A phone-path worker's link receiver
+ *            (hw_link_accept_*) is opened and closed inside
+ *            tg_link_request(), so nothing link-side outlives it.
+ *   state:   s_pending_send / _chat     — cleared
+ *            s_view, s_current_chat_id  — V_NONE / 0
+ *            s_chats, s_msgs            — cleared
+ *            s_auth_header, s_base_url  — scrubbed / cleared
  *   note:    s_bg_timer is the global background notifier (fast: 60 s / slow: 5 min)
  *            created once at boot by tg_begin_background_poll(); it is NOT torn
  *            down here.  onStart() snaps its period back to TG_BG_POLL_FAST_MS.
+ *            s_favorites / s_favorite_titles, s_unread_total and the notifier
+ *            baseline are app-independent and outlive the app on purpose.
  *
- * The foreground poll / send / mark-read run on a one-shot worker (§2.1):
- * it only writes heap state under the instance mutex, never the LVGL tree, so
- * it is safe to outlive the app instance — the drain timer applies the result
- * back on the UI thread. Previously these ran full HTTPS round-trips inline on
- * the LVGL thread, freezing the UI ~1-2 s per poll and per keystroke-send.
+ * The foreground poll / send / mark-read run on the worker slot (§2.1): the
+ * worker never touches the LVGL tree, so it is safe to outlive the app
+ * instance — the job applies the result back on the UI thread. Previously
+ * these ran full HTTPS round-trips inline on the LVGL thread, freezing the UI
+ * ~1-2 s per poll and per keystroke-send.
  * If you add a cached LVGL pointer or a task, list it above AND extend onStop().
  */
 #include "../ui_define.h"
 #include "../hal/wireless.h"
 #include "../hal/system.h"
-#include "../hal/notes_crypto.h"
 #include "../hal/secrets.h"
 #include "../hal/nvs.h"
 #include "../hal/str_encode.h"
@@ -64,13 +66,13 @@
 #include "../core/notify.h"
 #include "../core/system.h"
 #include "../core/input_focus.h"
+#include "../core/one_shot_job.h"
 #include "app_registry.h"
 #include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <map>
-#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -81,7 +83,6 @@
 #include "../core/scoped_lock.h"
 #else
 #include <mutex>
-#include <thread>
 #include "telegram_test.h"
 #endif
 
@@ -92,7 +93,6 @@ namespace {
 #define TG_CHAT_POLL_MS   5000
 #define TG_CHAT_LIMIT     30
 #define TG_MSG_LIMIT      20
-#define TG_DRAIN_MS         120     // async-worker result poll (see §2.1 worker)
 #define TG_BG_POLL_FAST_MS  60000   // background poll: 60 s while user active
 #define TG_BG_POLL_SLOW_MS  300000  // background poll: 5 min while user idle
 #define TG_BG_IDLE_MS       180000  // inactivity threshold for slow cadence (3 min)
@@ -122,11 +122,7 @@ static std::string load_token_plain() {
 
 // secret_store trims the pasted whitespace that would break every Bot API URL.
 static bool save_token(const char *value, std::string *err) {
-    bool ok = hal::secret_store(TG_PREFS_NS, "token_enc", value, err);
-    // Clearing or rewriting the encrypted slot also nukes any legacy
-    // plaintext sibling so the two never coexist.
-    if (ok) hal::secret_purge_legacy(TG_PREFS_NS, "token");
-    return ok;
+    return hal::secret_store(TG_PREFS_NS, "token_enc", value, err);
 }
 
 // --- state ----------------------------------------------------------------
@@ -165,7 +161,6 @@ enum View { V_NONE, V_LIST, V_CHAT, V_NOT_CONFIGURED };
 static View s_view = V_NONE;
 
 static long long s_current_chat_id = 0;
-static std::string s_current_chat_title;
 // Highest message id we've asked the bridge to mark as read in the current
 // chat view. Reset to 0 whenever we open a new chat so the first fetch
 // always fires the mark-read POST.
@@ -178,7 +173,6 @@ static lv_obj_t *s_msgs_holder = nullptr;
 // bottom, yanking the view back down while the user is trying to scroll up.
 static bool s_msgs_scroll_mode = false;
 static lv_obj_t *s_status_label = nullptr;
-static lv_obj_t *s_input_ta = nullptr;
 static int32_t   s_input_expanded_h = 0;
 
 static std::vector<Chat> s_chats;
@@ -218,18 +212,12 @@ static int s_last_notified_unread = -1;
 // emulator test hook diffs it around one tick.
 static int s_notify_fired = 0;
 
-// The single network worker slot, shared between the background unread
-// notifier and the foreground poll/send worker so the two never run a TLS
-// session (or a phone request) at the same time (each TLS session costs
-// several KB of internal heap). A FreeRTOS task on hardware, a detached
-// std::thread on the emulator.
+// Worker <-> UI coordination for the background notifier state
+// (s_unread_total, s_last_notified_unread, s_notify_fired): the instance
+// mutex on hardware (the LVGL thread holds it while timers and events run).
 #ifdef ARDUINO
-static TaskHandle_t s_bg_task = nullptr;
-// Worker <-> UI coordination: the instance mutex (the LVGL thread holds it
-// while timers and events run).
 typedef core::ScopedInstanceLock TgLock;
 #else
-static std::atomic<bool> s_bg_running{false};
 // The emulator's instance lock is a no-op, so worker <-> UI state gets its own
 // mutex; UI-thread code takes it explicitly where it touches that state.
 static std::mutex s_tg_mu;
@@ -240,51 +228,6 @@ struct TgLock {
     TgLock &operator=(const TgLock &) = delete;
 };
 #endif
-
-static bool worker_busy()
-{
-#ifdef ARDUINO
-    return s_bg_task != nullptr;
-#else
-    return s_bg_running.load();
-#endif
-}
-
-// Start `fn(arg)` in the worker slot. False (slot left free) when the spawn fails.
-static bool worker_spawn(void (*fn)(void *), const char *name, void *arg)
-{
-#ifdef ARDUINO
-    if (xTaskCreate(fn, name, 8192, arg, 2, &s_bg_task) != pdPASS) {
-        s_bg_task = nullptr;
-        return false;
-    }
-    return true;
-#else
-    (void)name;
-    s_bg_running = true;
-    std::thread(fn, arg).detach();
-    return true;
-#endif
-}
-
-// Worker side: free the slot (the fg worker does this under TgLock).
-static void worker_release()
-{
-#ifdef ARDUINO
-    s_bg_task = nullptr;
-#else
-    s_bg_running = false;
-#endif
-}
-
-// Worker side, last statement: a FreeRTOS task deletes itself; the emulator
-// thread simply returns.
-static void worker_end()
-{
-#ifdef ARDUINO
-    vTaskDelete(NULL);
-#endif
-}
 // Mirrors the period currently set on s_bg_timer so tg_bg_tick() can detect
 // when it needs to change without a second lv_timer API call.
 // Also kept in sync by onStart() which snaps back to the fast cadence on open.
@@ -293,7 +236,7 @@ static uint32_t s_bg_timer_period = 0;
 // --- foreground async worker state (§2.1) ---------------------------------
 enum FgOp { FG_FETCH_CHATS, FG_FETCH_MSGS, FG_SEND };
 
-// Handed to the worker (heap-owned by the task, freed there). base_url/auth are
+// Handed to the worker (heap-owned by it, freed there). base_url/auth are
 // captured at kick time so the worker never reads s_base_url / s_auth_header,
 // which onStop scrubs and which may be gone before the worker finishes.
 struct FgReq {
@@ -303,10 +246,10 @@ struct FgReq {
     long long   chat_id;      // FG_FETCH_MSGS / FG_SEND
     int         mark_from;    // FG_FETCH_MSGS: snapshot of s_last_marked_msg_id
     std::string send_text;    // FG_SEND
-    uint32_t    epoch;        // discarded on the far side if it no longer matches
+    uint32_t    epoch;        // discarded on delivery if it no longer matches
 };
 
-// Handed back to the UI thread (heap-owned, freed in the drain tick).
+// A foreground request's outcome.
 struct FgResult {
     FgOp        op;
     bool        ok;
@@ -319,29 +262,31 @@ struct FgResult {
     int         marked_to;    // FG_FETCH_MSGS: new mark-read high-water (0 = none)
 };
 
-static lv_timer_t   *s_drain_timer = nullptr;
-static std::atomic<bool> s_fg_done{false};
-static FgResult     *s_fg_result = nullptr;   // heap-owned; the drain frees it
-// Bumped by onStop/onStart; a worker whose captured epoch no longer matches
-// discards its result instead of publishing into a torn-down / fresh view.
+// What the worker slot hands back to the UI thread (heap-owned; the job frees
+// it after tg_job_done).
+struct TgJobResult {
+    bool     bg;              // the background unread poll (already applied)
+    uint32_t epoch;           // foreground: the request's epoch
+    FgResult fg;              // foreground: the outcome
+};
+
+// The single network worker slot, shared between the background unread
+// notifier and the foreground poll/send worker so the two never run a TLS
+// session (or a phone request) at the same time (each TLS session costs
+// several KB of internal heap). A FreeRTOS task on hardware, a thread on the
+// emulator.
+static void tg_job_done(TgJobResult &r);
+static core::OneShotJob<TgJobResult> s_tg_job(tg_job_done);
+
+static bool worker_busy() { return s_tg_job.busy(); }
+
+// Bumped by onStop; a result whose captured epoch no longer matches is
+// discarded on delivery instead of landing in a torn-down / fresh view.
 static uint32_t      s_fg_epoch  = 0;
 // A send the user fired while the worker was busy with a poll fetch. Queued
-// here so a keystroke-send is never dropped; the drain launches it once free.
+// here so a keystroke-send is never dropped; the next delivery launches it.
 static std::string   s_pending_send;
 static long long     s_pending_send_chat = 0;
-
-// Drop a published-but-undrained foreground result; bump_epoch also makes any
-// worker still running discard its result. UI thread only (on hardware it
-// already holds the instance mutex there).
-static void fg_discard(bool bump_epoch)
-{
-#ifndef ARDUINO
-    TgLock lock;
-#endif
-    if (bump_epoch) s_fg_epoch++;
-    s_fg_done = false;
-    if (s_fg_result) { delete s_fg_result; s_fg_result = nullptr; }
-}
 
 // --- forward decls --------------------------------------------------------
 
@@ -551,12 +496,17 @@ static uint32_t s_inet_check_ts = 0;
 static bool     s_inet_ok       = false;
 static volatile bool s_inet_probe_running = false;
 
+// Blocking probe (worker / task-spawn fallback): refresh the cached verdict.
+static void run_inet_probe()
+{
+    s_inet_ok = hw_ping_internet("1.1.1.1", 53, TG_INET_PING_MS, nullptr, nullptr);
+    s_inet_check_ts = lv_tick_get();
+}
+
 static void inet_probe_task(void *arg)
 {
     (void)arg;
-    bool ok = hw_ping_internet("1.1.1.1", 53, TG_INET_PING_MS, nullptr, nullptr);
-    s_inet_ok = ok;
-    s_inet_check_ts = lv_tick_get();
+    run_inet_probe();
     s_inet_probe_running = false;
     vTaskDelete(NULL);
 }
@@ -569,8 +519,7 @@ static void kick_inet_probe()
     s_inet_probe_running = true;
     if (xTaskCreate(inet_probe_task, "tg_inet", 3072, nullptr, 1, nullptr) != pdPASS) {
         // Task slots exhausted — probe inline so the verdict still refreshes.
-        s_inet_ok = hw_ping_internet("1.1.1.1", 53, TG_INET_PING_MS, nullptr, nullptr);
-        s_inet_check_ts = lv_tick_get();
+        run_inet_probe();
         s_inet_probe_running = false;
     }
 }
@@ -873,7 +822,6 @@ static void render_msgs()
     lv_obj_scroll_to_y(s_msgs_holder, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
-static void tg_drain_tick(lv_timer_t *t);   // fwd (defined after the kickers)
 
 // Load the bridge URL and build the "Bearer <token>" header from NVS (worker
 // safe). On failure `auth` is empty and *err says what is missing; the token
@@ -1089,38 +1037,17 @@ static void tg_run_fg(const FgReq *req, FgResult *res)
 }
 
 // The network worker. Runs one request (chats / messages / send) into a heap
-// FgResult and publishes it under TgLock for the drain tick. Never touches
-// the LVGL tree (parsing produces plain strings; only rendering happens on
-// the UI thread), so it is safe to outlive the app.
-static void tg_fg_task(void *arg)
+// result for tg_job_done. Never touches the LVGL tree (parsing produces plain
+// strings; only rendering happens on the UI thread), so it is safe to outlive
+// the app. Owns `req`: scrubs the bearer and frees it.
+static TgJobResult *tg_fg_task(FgReq *req)
 {
-    FgReq *req = (FgReq *)arg;
-    FgResult *res = new FgResult();
-    tg_run_fg(req, res);
-
-    // Publish under TgLock — the drain tick reads these under the same lock.
-    // Discard if the app moved on (epoch bumped by onStop/onStart) so a late
-    // worker can't flash a result into a torn-down / fresh view.
-    {
-        TgLock lock;
-        if (req->epoch == s_fg_epoch) {
-            if (s_fg_result) { delete s_fg_result; s_fg_result = nullptr; }
-            s_fg_result = res;
-            s_fg_done   = true;
-            res = nullptr;
-        }
-        worker_release();
-    }
-    if (res) delete res;
+    TgJobResult *res = new TgJobResult();
+    res->epoch = req->epoch;
+    tg_run_fg(req, &res->fg);
     hal::secret_scrub(req->auth);
     delete req;
-    worker_end();
-}
-
-static void ensure_drain_timer()
-{
-    if (!s_drain_timer)
-        s_drain_timer = lv_timer_create(tg_drain_tick, TG_DRAIN_MS, nullptr);
+    return res;
 }
 
 // Snapshot the config + chat cursor into a heap request for the worker.
@@ -1140,15 +1067,15 @@ static FgReq *make_req(FgOp op)
 // after freeing req — if the single worker slot is busy or the spawn fails.
 static bool kick_worker(FgReq *req)
 {
-    if (worker_busy()) { hal::secret_scrub(req->auth); delete req; return false; }
     // 8 KB stack: the mbedtls TLS handshake + cert chain dominates, same as the
     // weather worker; parsing 30 chats / 20 messages is cheap next to it.
-    if (!worker_spawn(tg_fg_task, "tg_fg", req)) {
+    if (worker_busy() ||
+        s_tg_job.start([req]() { return tg_fg_task(req); }, 8192, "tg_fg", 2) !=
+            core::OneShotJob<TgJobResult>::Start::Started) {
         hal::secret_scrub(req->auth);
         delete req;
         return false;
     }
-    ensure_drain_timer();
     return true;
 }
 
@@ -1213,23 +1140,10 @@ static uint32_t msgs_signature(const std::vector<Message> &v)
     return h;
 }
 
-// UI-thread result applier. Runs inside lv_timer_handler() (so it already holds
-// the instance mutex) and owns s_fg_result once it takes it.
-static void tg_drain_tick(lv_timer_t *t)
+// UI-thread result applier for the foreground ops; the view checks drop a
+// result for a page the user has left.
+static void apply_fg_result(FgResult *res)
 {
-    (void)t;
-    FgResult *res = nullptr;
-    {
-#ifndef ARDUINO
-        TgLock lock;   // hardware: lv_timer_handler already holds the instance mutex
-#endif
-        if (!s_fg_done) return;
-        s_fg_done = false;
-        res = s_fg_result;
-        s_fg_result = nullptr;
-    }
-    if (!res) return;
-
     switch (res->op) {
         case FG_FETCH_CHATS:
             if (s_view == V_LIST) {
@@ -1277,7 +1191,13 @@ static void tg_drain_tick(lv_timer_t *t)
             }
             break;
     }
-    delete res;
+}
+
+// Job delivery (LVGL thread) for both worker kinds. The slot is free again
+// here, so a send queued while it was busy is launched now.
+static void tg_job_done(TgJobResult &r)
+{
+    if (!r.bg && r.epoch == s_fg_epoch) apply_fg_result(&r.fg);
 
     // Flush a send that was queued while the worker was busy (same chat only).
     if (!s_pending_send.empty()) {
@@ -1477,7 +1397,6 @@ static void common_page_prep()
     s_list_holder = nullptr;
     s_msgs_holder = nullptr;
     s_status_label = nullptr;
-    s_input_ta = nullptr;
     s_input_expanded_h = 0;
     // Fresh (empty) holders → force the next render regardless of signature.
     s_chats_sig_valid = false;
@@ -1550,7 +1469,7 @@ static void show_chat(long long id, const char *title)
 {
     s_view = V_CHAT;
     s_current_chat_id = id;
-    s_current_chat_title = title ? title : "";
+    const std::string chat_title = title ? title : "";
     s_last_marked_msg_id = 0;   // fresh chat → re-arm the mark-read POST
     s_input_expanded_h = 0;
     s_msgs_scroll_mode = false;
@@ -1594,7 +1513,7 @@ static void show_chat(long long id, const char *title)
     lv_obj_add_event_cb(s_msgs_holder, msgs_holder_event_cb, LV_EVENT_DEFOCUSED, nullptr);
 
     // Floating chat-title pill at the top-right of the history area.
-    make_pill(msgs_wrap, ascii_safe(s_current_chat_title).c_str(),
+    make_pill(msgs_wrap, ascii_safe(chat_title).c_str(),
               LV_ALIGN_TOP_RIGHT, -2, 2);
 
     // Status label floats at bottom-right of history too, same style, so
@@ -1602,19 +1521,19 @@ static void show_chat(long long id, const char *title)
     s_status_label = make_pill(msgs_wrap, "", LV_ALIGN_BOTTOM_RIGHT, -2, -2);
     lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
 
-    s_input_ta = lv_textarea_create(s_root);
-    lv_textarea_set_one_line(s_input_ta, true);
-    lv_textarea_set_placeholder_text(s_input_ta, "Message...");
-    lv_obj_set_width(s_input_ta, lv_pct(100));
-    lv_obj_set_style_text_font(s_input_ta, get_telegram_font(), 0);
-    lv_obj_set_style_text_color(s_input_ta, UI_COLOR_MUTED, LV_PART_TEXTAREA_PLACEHOLDER);
-    lv_obj_add_event_cb(s_input_ta, input_event_cb, LV_EVENT_ALL, nullptr);
-    lv_group_add_obj(lv_group_get_default(), s_input_ta);
+    lv_obj_t *input_ta = lv_textarea_create(s_root);
+    lv_textarea_set_one_line(input_ta, true);
+    lv_textarea_set_placeholder_text(input_ta, "Message...");
+    lv_obj_set_width(input_ta, lv_pct(100));
+    lv_obj_set_style_text_font(input_ta, get_telegram_font(), 0);
+    lv_obj_set_style_text_color(input_ta, UI_COLOR_MUTED, LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_add_event_cb(input_ta, input_event_cb, LV_EVENT_ALL, nullptr);
+    lv_group_add_obj(lv_group_get_default(), input_ta);
     // Force the expanded height to be measured before collapse so the first
     // focus animates into a real size rather than LV_SIZE_CONTENT.
-    lv_obj_update_layout(s_input_ta);
-    s_input_expanded_h = lv_obj_get_height(s_input_ta);
-    set_input_collapsed(s_input_ta, true);
+    lv_obj_update_layout(input_ta);
+    s_input_expanded_h = lv_obj_get_height(input_ta);
+    set_input_collapsed(input_ta, true);
 
     s_msgs.clear();
     if (tg_uplink() == TG_UP_NONE) {
@@ -1714,11 +1633,8 @@ public:
             s_bg_timer_period = TG_BG_POLL_FAST_MS;
         }
 
-        // Drop any result a worker from a previous session published after we
-        // tore down (no drain timer was live to collect it) so it can't flash
-        // into this fresh view. onStop already bumped the epoch, so a still-
-        // running worker will discard rather than publish a new one.
-        fg_discard(false);
+        // A worker from a previous session is still discarded on delivery:
+        // onStop bumped the epoch.
         s_pending_send.clear();
         s_pending_send_chat = 0;
 
@@ -1747,13 +1663,11 @@ public:
 
     void onStop() override {
         stop_timer();
-        // §2.1 async teardown: stop draining and abandon any in-flight/pending
-        // result. The worker itself is left to finish — it only writes heap
-        // state under TgLock, never the LVGL tree, so it is safe to outlive
-        // us; bumping the epoch makes its late result be discarded instead of
-        // published into a freed view.
-        if (s_drain_timer) { lv_timer_del(s_drain_timer); s_drain_timer = nullptr; }
-        fg_discard(true);
+        // §2.1 async teardown: abandon any in-flight result. The worker itself
+        // is left to finish — it never touches the LVGL tree, so it is safe to
+        // outlive us; bumping the epoch makes its late result be discarded on
+        // delivery instead of landing in a freed view.
+        s_fg_epoch++;
         s_pending_send.clear();
         s_pending_send_chat = 0;
         ui_hide_back_button();
@@ -1763,7 +1677,6 @@ public:
         s_status_label = nullptr;
         s_list_holder = nullptr;
         s_msgs_holder = nullptr;
-        s_input_ta = nullptr;
         s_chats.clear();
         s_msgs.clear();
         // Wipe the plaintext bearer header; clear() keeps capacity, so we
@@ -1861,14 +1774,16 @@ static bool tg_bg_poll(const std::string &url, const std::string &auth)
     return true;
 }
 
-static void tg_bg_task(void *arg)
+// Background worker body: one unread poll, applied on the worker (the
+// notifier fires from here); the delivery only frees the slot.
+static TgJobResult *tg_bg_task()
 {
-    (void)arg;
     std::string url, auth;
     if (load_bridge_auth(url, auth, nullptr)) (void)tg_bg_poll(url, auth);
     hal::secret_scrub(auth);
-    worker_release();
-    worker_end();
+    TgJobResult *res = new TgJobResult();
+    res->bg = true;
+    return res;
 }
 
 static void tg_bg_tick(lv_timer_t *t)
@@ -1897,7 +1812,7 @@ static void tg_bg_tick(lv_timer_t *t)
     if (worker_busy()) return;                  // previous fetch still in flight
 
     // Launch the worker to avoid blocking the LVGL timer thread
-    (void)worker_spawn(tg_bg_task, "tg_bg", nullptr);
+    (void)s_tg_job.start(tg_bg_task, 8192, "tg_bg", 2);
 }
 
 } // namespace
@@ -1980,17 +1895,14 @@ bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
                             std::string *err)
 {
     out.clear();
-    // Runs on the Settings favourites worker (synchronously on the emulator),
-    // so only worker-safe checks here (internet_available() is UI-thread only).
+    // Runs on the Settings favourites worker, so only worker-safe checks here
+    // (internet_available() is UI-thread only).
     std::string url, auth;
     if (!load_bridge_auth(url, auth, err)) return false;
 #ifdef ARDUINO
     // No probe has run yet (Telegram never opened, first bg tick pending):
     // settle the verdict inline — we're on a worker — so Direct isn't missed.
-    if (hw_get_wifi_connected() && s_inet_check_ts == 0) {
-        s_inet_ok = hw_ping_internet("1.1.1.1", 53, TG_INET_PING_MS, nullptr, nullptr);
-        s_inet_check_ts = lv_tick_get();
-    }
+    if (hw_get_wifi_connected() && s_inet_check_ts == 0) run_inet_probe();
 #endif
     if (tg_uplink_now() == TG_UP_NONE) {
         hal::secret_scrub(auth);
@@ -2044,9 +1956,9 @@ TgTestResult tg_test_step(const std::string &op, const std::string &bridge,
             out.notified = s_notify_fired - before;
             out.unread_total = s_unread_total;
         }
-        out.uplink = up == TG_UP_PHONE ? "phone" : up == TG_UP_DIRECT ? "direct" : "none";
+        out.uplink = up == TG_UP_PHONE ? "phone" : "none";   // no Direct on the emulator
         // What poll_tick / the views show for this verdict.
-        out.status = up == TG_UP_NONE ? TG_OFFLINE : up == TG_UP_PHONE ? "via phone" : "";
+        out.status = up == TG_UP_PHONE ? "via phone" : TG_OFFLINE;
     } else {
         FgReq req;
         req.op        = op == "chats" ? FG_FETCH_CHATS : op == "msgs" ? FG_FETCH_MSGS : FG_SEND;
@@ -2060,7 +1972,7 @@ TgTestResult tg_test_step(const std::string &op, const std::string &bridge,
         tg_run_fg(&req, &res);
         hal::secret_scrub(req.auth);
         const TgUplink up = tg_uplink_now();
-        out.uplink = up == TG_UP_PHONE ? "phone" : up == TG_UP_DIRECT ? "direct" : "none";
+        out.uplink = up == TG_UP_PHONE ? "phone" : "none";   // no Direct on the emulator
         out.ok = res.ok;
         out.status = res.status;
         out.unread_total = res.unread_total;

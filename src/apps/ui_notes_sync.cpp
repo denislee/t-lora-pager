@@ -35,18 +35,20 @@
  *
  * State reset on onStop (exit_cb):
  *   widgets: s_log_label, s_log_scroll               — nulled
- *   timers:  s_bg_timer (drain ticker)               — lv_timer_del + null
- *   queue:   s_pending_log                           — cleared (under the
- *                                                      instance lock on
- *                                                      hardware, s_log_mu on
- *                                                      the emulator)
- *   tasks:   sync worker (FreeRTOS s_bg_task on      — left to finish and
- *            hardware, detached pthread +              self-delete/exit; it
- *            s_bg_running on the emulator)             only touches the log
- *                                                      queue
- * If you add a new cached LVGL pointer, timer, or FreeRTOS task, list it
- * above AND extend exit_cb() — a sync worker outliving the UI would
- * write into freed log buffers.
+ *   text:    s_log_text                              — cleared
+ *   timers:  s_bg_timer (log drain ticker)           — lv_timer_del + null
+ *   queue:   s_pending_log                           — cleared (s_log_mu)
+ *   job:     s_sync_job (sync worker,                — teardown(): left to
+ *            core::OneShotJob)                         finish (it only
+ *                                                      touches the log
+ *                                                      queue); its
+ *                                                      completion is dropped
+ *                                                      unless a re-entry
+ *                                                      re-attaches it
+ *   flags:   s_syncing                               — cleared
+ * If you add a new cached LVGL pointer, timer, or worker, list it above AND
+ * extend exit_cb() — a sync worker outliving the UI would write into freed
+ * log buffers.
  */
 #include "../ui_define.h"
 #include "../hal/storage.h"
@@ -61,28 +63,20 @@
 #include "../hal/nvs.h"
 #include "../core/app.h"
 #include "../core/app_manager.h"
-#include "../core/system.h"
+#include "../core/one_shot_job.h"
 #include "app_registry.h"
 
-#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
-#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #ifdef ARDUINO
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include "../core/scoped_lock.h"
 extern "C" {
 #include "cJSON.h"
 }
-#else
-#include <mutex>
-#include <pthread.h>
 #endif
 
 namespace {
@@ -106,16 +100,10 @@ static bool token_is_encrypted() {
     return hal::secret_exists(NSYNC_PREFS_NS, "token_enc");
 }
 
-static std::string load_token_plain() {
-    return hal::secret_load(NSYNC_PREFS_NS, "token_enc");
-}
-
 // secret_store trims the pasted whitespace that would otherwise yield a
 // silent 401 from GitHub.
 static bool save_token(const char *value, std::string *err) {
-    bool ok = hal::secret_store(NSYNC_PREFS_NS, "token_enc", value, err);
-    if (ok) hal::secret_purge_legacy(NSYNC_PREFS_NS, "token");
-    return ok;
+    return hal::secret_store(NSYNC_PREFS_NS, "token_enc", value, err);
 }
 
 // --- state ----------------------------------------------------------------
@@ -125,47 +113,24 @@ static lv_obj_t *s_log_scroll = nullptr;
 static std::string s_log_text;
 static bool s_syncing = false;
 
-// The sync runs on a worker (FreeRTOS task on hardware, detached std::thread
-// on the emulator) so the LVGL thread keeps servicing the keyboard/encoder.
-// The worker only ever touches `s_pending_log` (under the instance mutex on
-// hardware, s_log_mu on the emulator where the instance lock is a no-op) and
-// the `s_bg_done` flag; a UI-thread timer drains the queue and finalizes when
-// the worker is gone.
-#ifdef ARDUINO
-static TaskHandle_t s_bg_task = nullptr;
-#else
+// The sync runs on a core::OneShotJob worker (s_sync_job, below) so the LVGL
+// thread keeps servicing the keyboard/encoder. The worker only ever touches
+// `s_pending_log` (under s_log_mu); a UI-thread timer drains the queue, and
+// the job's completion drains it one last time and finalizes.
 static std::mutex s_log_mu;
-static std::atomic<bool> s_bg_running{false};
-#endif
 static lv_timer_t *s_bg_timer = nullptr;
-static std::vector<std::string> s_pending_log; // bg → ui log queue
-static std::atomic<bool> s_bg_done{false};
-
-static bool bg_running()
-{
-#ifdef ARDUINO
-    return s_bg_task != nullptr;
-#else
-    return s_bg_running.load();
-#endif
-}
+static std::vector<std::string> s_pending_log; // bg → ui log queue (s_log_mu)
 
 static void bg_log_append(const char *line)
 {
-#ifdef ARDUINO
-    core::ScopedInstanceLock lock;
-#else
     std::lock_guard<std::mutex> lock(s_log_mu);
-#endif
     s_pending_log.emplace_back(line ? line : "");
 }
 
 // Drop queued lines (no UI to render them / a fresh run).
 static void bg_log_clear()
 {
-#ifndef ARDUINO
     std::lock_guard<std::mutex> lock(s_log_mu);
-#endif
     s_pending_log.clear();
 }
 
@@ -224,6 +189,10 @@ struct Config {
 };
 
 #ifdef ARDUINO
+
+static std::string load_token_plain() {
+    return hal::secret_load(NSYNC_PREFS_NS, "token_enc");
+}
 
 static bool load_config(Config &c, std::string *err)
 {
@@ -362,8 +331,8 @@ static bool try_hub_sync(const Config &cfg,
 
 // --- sync driver ----------------------------------------------------------
 
-// Runs on a FreeRTOS task. Touches only the bg log queue and shared task
-// flags; never the LVGL widget tree.
+// Runs on the sync worker. Touches only the bg log queue; never the LVGL
+// widget tree.
 static void run_sync_bg()
 {
     std::string err;
@@ -479,34 +448,20 @@ static void notes_sync_worker()
         bg_log_append("ERR: Connect your phone (or set Settings " "\xC2\xBB" " Local Hub)");
     }
     bg_log_append("Done.");
-    s_bg_done = true;
 }
-
-#ifdef ARDUINO
-static void notes_sync_bg_task(void *arg)
-{
-    (void)arg;
-    notes_sync_worker();
-    s_bg_task = nullptr;
-    vTaskDelete(NULL);
-}
-#endif
 
 // --- UI -------------------------------------------------------------------
 
 static void back_btn_cb(lv_event_t *) { menu_show_deferred(); }
 
-// LVGL timer: drains queued log lines from the worker and finalizes once it
-// has exited. On hardware it runs inside `lv_timer_handler()`, which already
-// holds the instance mutex; the emulator takes s_log_mu for the swap.
+// LVGL timer (and the job's completion): drain queued log lines from the
+// worker into the log label.
 static void notes_sync_drain_tick(lv_timer_t *t)
 {
     (void)t;
     std::vector<std::string> drained;
     {
-#ifndef ARDUINO
         std::lock_guard<std::mutex> lock(s_log_mu);
-#endif
         drained.swap(s_pending_log);
     }
     if (!drained.empty()) {
@@ -521,15 +476,23 @@ static void notes_sync_drain_tick(lv_timer_t *t)
             log_append(batch.c_str());
         }
     }
-    if (s_bg_done && !bg_running()) {
-        s_bg_done = false;
-        s_syncing = false;
-        if (s_bg_timer) {
-            lv_timer_del(s_bg_timer);
-            s_bg_timer = nullptr;
-        }
+}
+
+struct SyncDone {};
+
+// Job delivery (LVGL thread): the worker has queued its last line ("Done.");
+// show it and finalize.
+static void sync_done(SyncDone &)
+{
+    notes_sync_drain_tick(nullptr);
+    s_syncing = false;
+    if (s_bg_timer) {
+        lv_timer_del(s_bg_timer);
+        s_bg_timer = nullptr;
     }
 }
+
+static core::OneShotJob<SyncDone> s_sync_job(sync_done);
 
 static void start_sync()
 {
@@ -541,45 +504,21 @@ static void start_sync()
     log_append("Starting sync...");
     // Drop any leftover queue entries from a previous (cancelled-by-exit) run.
     bg_log_clear();
-    s_bg_done = false;
 
-    if (bg_running()) {
-        // A previous task is still finishing in the background. Adopt it
-        // by starting the drain timer instead of spawning a duplicate.
-        if (!s_bg_timer) {
-            s_bg_timer = lv_timer_create(notes_sync_drain_tick, 100, nullptr);
-        }
-        return;
-    }
-
-#ifdef ARDUINO
+    // A previous run still finishing in the background (the app was left and
+    // re-entered mid-sync) is re-attached rather than duplicated: its
+    // completion then finalizes this run (DC2.0.7e).
     // 8 KB stack: HTTPS round-trip via mbedtls is the floor here — TLS
     // handshake plus cert chain easily eats 6 KB on its own.
-    if (xTaskCreate(notes_sync_bg_task, "nsync_bg", 8192, nullptr, 2,
-                    &s_bg_task) != pdPASS) {
-        s_bg_task = nullptr;
+    auto started = s_sync_job.start([]() {
+        notes_sync_worker();
+        return new SyncDone();
+    }, 8192, "nsync_bg", 2);
+    if (started == core::OneShotJob<SyncDone>::Start::Failed) {
         log_append("ERR: failed to start sync task");
         s_syncing = false;
         return;
     }
-#else
-    // Emulator: no FreeRTOS; a detached thread plays the worker task (as in
-    // ui_chat).
-    s_bg_running = true;
-    // P7.52: pthread + return-code check instead of std::thread + catch (...).
-    pthread_t th;
-    if (pthread_create(&th, nullptr, [](void *) -> void * {
-            notes_sync_worker();
-            s_bg_running = false;
-            return nullptr;
-        }, nullptr) != 0) {
-        s_bg_running = false;
-        log_append("ERR: failed to start sync task");
-        s_syncing = false;
-        return;
-    }
-    pthread_detach(th);
-#endif
     if (!s_bg_timer) {
         s_bg_timer = lv_timer_create(notes_sync_drain_tick, 100, nullptr);
     }
@@ -647,18 +586,19 @@ static void enter(lv_obj_t *parent)
     lv_obj_add_event_cb(s_log_label, log_size_changed_cb, LV_EVENT_SIZE_CHANGED, nullptr);
 }
 
-static void exit_cb(lv_obj_t *) {
+static void exit_cb() {
     ui_hide_back_button();
     s_log_label = s_log_scroll = nullptr;
     s_log_text.clear();
-    // Stop draining; the worker (if any) is left to finish and self-delete
-    // (or exit, on the emulator). It only writes to the heap-backed log
-    // queue, never the UI tree, so it is safe to outlive the app instance.
-    // Drop queued log entries since there's no UI to render them into.
+    // Stop draining; the worker (if any) is left to finish. It only writes to
+    // the heap-backed log queue, never the UI tree, so it is safe to outlive
+    // the app instance. Drop queued log entries since there's no UI to render
+    // them into.
     if (s_bg_timer) {
         lv_timer_del(s_bg_timer);
         s_bg_timer = nullptr;
     }
+    s_sync_job.teardown();
     bg_log_clear();
     s_syncing = false;
 }
@@ -701,7 +641,7 @@ public:
 #endif
     }
     void onStop() override {
-        exit_cb(getRoot());
+        exit_cb();
         core::App::onStop();
     }
 };

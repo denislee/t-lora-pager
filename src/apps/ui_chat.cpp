@@ -22,10 +22,15 @@
  *            s_status_lbl                  — nulled (deleted with parent)
  *   timers:  s_poll_timer (also drives the
  *            15 s recording cap)           — lv_timer_del + null
- *   tasks:   send_task (FreeRTOS task on hardware, detached pthread on
- *            the emulator; no handle kept) — abandoned via s_ctx handoff
+ *   job:     s_send_job (send worker,
+ *            core::OneShotJob)             — abandon(): the worker finishes
+ *                                            on its own, its result is freed
+ *   ctx:     s_ctx (the in-flight SendCtx,
+ *            owned by s_send_job)          — marked abandoned + nulled
  *   hw:      mic recording                 — stopped via hw_rec_stop()
- *   ctx:     s_ctx (SendCtx*)              — abandoned + freed if worker done
+ *   state:   s_log_text,
+ *            s_pending_audio_path          — cleared
+ *            s_recording, s_busy           — false
  * If you add new cached state, list it here AND extend exit_cb() — a
  * leaked timer pointer will fire into a destroyed LVGL tree on next entry.
  */
@@ -39,15 +44,12 @@
 #include "../hal/system.h"
 #include "../hal/str_encode.h"
 #include "../core/app.h"
-#include "../core/app_manager.h"
-#include "../core/scoped_lock.h"
+#include "../core/one_shot_job.h"
 #include "app_registry.h"
 
 #include <atomic>
 #include <cstdio>
-#include <cstring>
 #include <string>
-#include <vector>
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -60,8 +62,6 @@
 extern "C" {
 #include "cJSON.h"
 }
-#else
-#include <pthread.h>
 #endif
 
 namespace {
@@ -86,21 +86,15 @@ static bool        s_busy      = false;
 
 // --- async send context ---------------------------------------------------
 //
-// The send task runs off the LVGL thread because chat_link_ask / chat_post
-// block.
-// We coordinate with atomics rather than the global instance lock — the
-// LVGL task already holds that lock around lv_timer_handler(), and the
-// instance mutex is non-recursive, so a poll-timer callback that tried
-// to retake it would deadlock the entire UI.
+// The send runs on a core::OneShotJob worker (s_send_job) because
+// chat_link_ask / chat_post block. The UI thread fills a heap SendCtx, the
+// worker fills in its result fields and hands it back; the job delivers it to
+// send_done on the LVGL thread and frees it afterwards.
 //
-// `done` flips when the worker has filled in result fields. After that,
-// non-atomic fields (reply/transcript/error/ok) are stable and safe to
-// read from the UI thread (release/acquire pairing on `done`).
-//
-// `abandoned` is set by exit_cb when the user navigates away while a
-// request is in flight. Whichever party (worker on done, exit_cb on
-// abandon-after-done) wins the `claimed` CAS owns deletion; the other
-// leaves the buffer alone.
+// A cancel (tap, watchdog, leaving the app) marks the ctx `abandoned` and
+// abandon()s the job: the next send spawns a fresh worker at once, and the
+// abandoned one's ctx is freed (undelivered) when it finishes. The hub-path
+// base64 sink polls `abandoned` to stop encoding early.
 struct SendCtx {
     bool        phone = false;  // true: chat_link_ask; false: hub chat_post
     std::string text;           // phone path: the typed question
@@ -115,10 +109,10 @@ struct SendCtx {
     std::string error;
     uint32_t    start_ms = 0;
     bool        ok       = false;
-    std::atomic<bool> done{false};
     std::atomic<bool> abandoned{false};
-    std::atomic<bool> claimed{false};
 };
+// The in-flight request (owned by s_send_job), or null. Read on the UI
+// thread for the watchdog / progress / grace window only.
 static SendCtx *s_ctx = nullptr;
 
 // Watchdog: if the worker task hasn't flipped done within this window, give
@@ -238,21 +232,18 @@ static void set_busy(bool busy)
     }
 }
 
+static void send_done(SendCtx &ctx);
+static core::OneShotJob<SendCtx> s_send_job(send_done);
+
 // Detach an in-flight send. The HTTP call itself is blocking and lives in
-// the worker task — we can't truly abort it, but we can stop caring about
-// the result. Whoever wins the `claimed` CAS frees the buffer.
+// the worker — we can't truly abort it, but we can stop caring about the
+// result: the job frees the ctx when the worker finishes.
 static void cancel_inflight()
 {
     if (!s_ctx) return;
-    SendCtx *c = s_ctx;
+    s_ctx->abandoned.store(true);
     s_ctx = nullptr;
-    c->abandoned.store(true);
-    // If the worker already finished, take responsibility for delete here.
-    // Otherwise the worker will see abandoned=true on its way out and
-    // delete via the same CAS.
-    if (c->done.load() && !c->claimed.exchange(true)) {
-        delete c;
-    }
+    s_send_job.abandon();
 }
 
 static void status_click_cb(lv_event_t *)
@@ -455,20 +446,6 @@ static bool chat_b64_sink(void *user, const uint8_t *data, size_t len)
 }
 #endif
 
-// Single worker exit: publish the result (release pairs with
-// poll_timer_cb's acquire), free ctx if the UI already abandoned it, and
-// self-delete.
-static void send_task_exit(SendCtx *ctx)
-{
-    ctx->done.store(true, std::memory_order_release);
-    if (ctx->abandoned.load() && !ctx->claimed.exchange(true)) {
-        delete ctx;
-    }
-#ifdef ARDUINO
-    vTaskDelete(NULL);
-#endif
-}
-
 // Phone path: one chat_link_ask() turn (voice upload + chat.ask). No
 // device_id: the phone keeps the history per pager.
 static void send_phone(SendCtx *ctx)
@@ -565,18 +542,16 @@ static void send_hub(SendCtx *ctx)
 }
 #endif
 
-static void send_task(void *arg)
+// Worker body: fills in ctx's result fields and hands it back to the job.
+static SendCtx *send_task(SendCtx *ctx)
 {
-    SendCtx *ctx = (SendCtx *)arg;
 #ifdef ARDUINO
     if (ctx->phone) send_phone(ctx);
     else            send_hub(ctx);
 #else
     send_phone(ctx);
 #endif
-    // All result fields are set; send_task_exit publishes them via `done`
-    // so the UI sees a consistent ctx (reply/transcript/ok all populated).
-    send_task_exit(ctx);
+    return ctx;
 }
 
 #ifdef ARDUINO
@@ -595,100 +570,87 @@ static void poll_timer_cb(lv_timer_t *)
         finish_recording();
     }
 #endif
-    if (!s_ctx) return;
-    // Acquire pairs with the worker's release-store of `done` — once we
-    // see done=true, every other field of *s_ctx is safe to read here.
-    // We do NOT take ScopedInstanceLock: this callback runs inside
-    // lv_timer_handler() which already holds the (non-recursive)
-    // instance mutex from lvgl_task_fn, and re-taking it here deadlocks
-    // the entire UI task.
-    bool done = s_ctx->done.load(std::memory_order_acquire);
-    if (!done) {
-        if (s_ctx->start_ms != 0) {
-            uint32_t elapsed = chat_now_ms() - s_ctx->start_ms;
+    // In flight: watchdog + live progress. The result itself arrives through
+    // s_send_job (send_done).
+    if (!s_ctx || s_ctx->start_ms == 0) return;
+    uint32_t elapsed = chat_now_ms() - s_ctx->start_ms;
 #ifdef ARDUINO
-            uint32_t budget = s_ctx->phone ? PHONE_WATCHDOG_MS : SEND_WATCHDOG_MS;
+    uint32_t budget = s_ctx->phone ? PHONE_WATCHDOG_MS : SEND_WATCHDOG_MS;
 #else
-            uint32_t budget = PHONE_WATCHDOG_MS;
+    uint32_t budget = PHONE_WATCHDOG_MS;
 #endif
-            // Watchdog — surface stuck calls instead of leaving the UI on
-            // "thinking..." indefinitely. The worker keeps running but its
-            // result will be discarded.
-            if (elapsed > budget) {
-                char msg[64];
-                snprintf(msg, sizeof(msg), "request timeout (no response in %us)",
-                         (unsigned)(budget / 1000));
+    // Watchdog — surface stuck calls instead of leaving the UI on
+    // "thinking..." indefinitely. The worker keeps running but its
+    // result will be discarded.
+    if (elapsed > budget) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "request timeout (no response in %us)",
+                 (unsigned)(budget / 1000));
 #ifdef ARDUINO
-                Serial.printf("[chat] watchdog: send_task stuck >%us, abandoning\n",
-                              (unsigned)(budget / 1000));
+        Serial.printf("[chat] watchdog: send_task stuck >%us, abandoning\n",
+                      (unsigned)(budget / 1000));
 #endif
-                cancel_inflight();
-                set_busy(false);
-                log_append("err: ", msg);
-                set_status("");
-                return;
-            }
-            // Live progress — gives the user feedback that the UI is
-            // alive and counts up to the watchdog. Updated every poll
-            // tick (~200ms) but the seconds value only changes once a
-            // second so it's not noisy.
-            char buf[48];
-            snprintf(buf, sizeof(buf),
-                     "thinking %us... (tap to cancel)",
-                     (unsigned)(elapsed / 1000));
-            set_status(buf);
-        }
+        cancel_inflight();
+        set_busy(false);
+        log_append("err: ", msg);
+        set_status("");
         return;
     }
+    // Live progress — gives the user feedback that the UI is
+    // alive and counts up to the watchdog. Updated every poll
+    // tick (~200ms) but the seconds value only changes once a
+    // second so it's not noisy.
+    char buf[48];
+    snprintf(buf, sizeof(buf),
+             "thinking %us... (tap to cancel)",
+             (unsigned)(elapsed / 1000));
+    set_status(buf);
+}
 
-    SendCtx *ctx = s_ctx;
+// Job delivery (LVGL thread): the reply (or error) for the request in flight.
+// Abandoned requests never get here.
+static void send_done(SendCtx &ctx)
+{
     s_ctx = nullptr;
 
 #ifdef ARDUINO
-    Serial.printf("[chat] poll: ok=%d reply=%u transcript=%u err='%s'\n",
-                  (int)ctx->ok, (unsigned)ctx->reply.size(),
-                  (unsigned)ctx->transcript.size(), ctx->error.c_str());
+    Serial.printf("[chat] done: ok=%d reply=%u transcript=%u err='%s'\n",
+                  (int)ctx.ok, (unsigned)ctx.reply.size(),
+                  (unsigned)ctx.transcript.size(), ctx.error.c_str());
 #endif
 
-    if (ctx->ok) {
-        if (!ctx->transcript.empty()) {
+    if (ctx.ok) {
+        if (!ctx.transcript.empty()) {
             // Voice path — the user line was deferred until we knew what
             // we heard, so render it now ahead of the reply.
-            log_append("you: ", ctx->transcript);
+            log_append("you: ", ctx.transcript);
         }
-        if (!ctx->reply.empty()) log_append("ai:  ", ctx->reply);
-        set_status("");
+        if (!ctx.reply.empty()) log_append("ai:  ", ctx.reply);
     } else {
-        log_append("err: ", ctx->error);
-        set_status("");
+        log_append("err: ", ctx.error);
     }
+    set_status("");
     set_busy(false);
-    delete ctx;
 }
 
-// Spawn send_task for ctx (already in s_ctx). Returns false on spawn failure.
+// Hand ctx to s_send_job (ctx becomes s_ctx). Returns false on spawn failure
+// (ctx is then freed).
 static bool spawn_send_task(SendCtx *ctx)
 {
-#ifdef ARDUINO
+    s_ctx = ctx;
     // Pin to core 0 — LVGL runs on core 1, so the blocking I/O and the UI
     // redraws never compete for the same scheduler slot. Priority 1 keeps it
-    // well below the LVGL task (priority 8).
-    return xTaskCreatePinnedToCore(send_task, "chat_send", 8192, ctx, 1,
-                                   nullptr, 0) == pdPASS;
-#else
-    // Emulator: no FreeRTOS; a detached thread plays the worker task (the
-    // link test hook does the same).
-    // P7.52: pthread + return-code check instead of std::thread + catch (...).
-    pthread_t th;
-    if (pthread_create(&th, nullptr, [](void *arg) -> void * {
-            send_task(arg);
-            return nullptr;
-        }, ctx) != 0) {
+    // well below the LVGL task (priority 8). (A thread on the emulator.)
+    auto started = s_send_job.start([ctx]() { return send_task(ctx); },
+                                    8192, "chat_send", 1, 0);
+    if (started != core::OneShotJob<SendCtx>::Start::Started) {
+        // Failed. (Attached cannot happen: cancel_inflight abandon()s the job
+        // and a new send only starts when s_ctx is null.)
+        s_ctx = nullptr;
+        delete ctx;
         return false;
     }
-    pthread_detach(th);
     return true;
-#endif
 }
 
 static void kick_off_send(const std::string &user_text,
@@ -700,13 +662,10 @@ static void kick_off_send(const std::string &user_text,
         ctx->phone      = true;
         ctx->text       = user_text;
         ctx->audio_path = audio_path;
-        s_ctx = ctx;
         ctx->start_ms = chat_now_ms();
         set_status(audio_path.empty() ? "thinking... (tap to cancel)"
                                       : "uploading... (tap to cancel)");
         if (!spawn_send_task(ctx)) {
-            s_ctx = nullptr;
-            delete ctx;
             log_append("err: ", "task spawn failed");
             set_busy(false);
         }
@@ -752,12 +711,9 @@ static void kick_off_send(const std::string &user_text,
         ctx->body += "}";
     }
 
-    s_ctx = ctx;
+    // set_busy(true) already shows "thinking... (tap to cancel)".
     ctx->start_ms = millis();
-    set_status("thinking... (tap to cancel)");
     if (!spawn_send_task(ctx)) {
-        s_ctx = nullptr;
-        delete ctx;
         log_append("err: ", "task spawn failed");
         set_busy(false);
     }
@@ -857,8 +813,7 @@ static void finish_recording()
     if (s_mic_btn) {
         lv_obj_set_style_bg_color(s_mic_btn, UI_COLOR_ACCENT, 0);
     }
-    set_status("transcribing...");
-    set_busy(true);
+    set_busy(true);   // shows "thinking... (tap to cancel)"
 
     // Cheap size-only check (one file open, no read) so an empty capture still
     // fails fast without pulling the bytes in.
@@ -1018,7 +973,7 @@ static void exit_cb()
 #endif
     s_recording = false;
 
-    // Abandon any in-flight request; the worker frees it on its way out.
+    // Abandon any in-flight request; the job frees it when the worker ends.
     cancel_inflight();
 
     s_log_scroll = s_log_label = nullptr;

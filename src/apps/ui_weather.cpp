@@ -11,7 +11,8 @@
  * The resolved location is cached in NVS so subsequent opens skip the geo
  * call entirely (one HTTP call instead of two). IP-derived location is
  * stable enough that caching across sessions is fine; a network/IP change
- * will just show a slightly stale city name until the user clears it.
+ * keeps forecasting for the old coordinates until the user picks a city (or
+ * re-selects auto) in Settings » Weather.
  *
  * The page lays out as a vertical scrollable column: a "24h" header row
  * (with the status text right-aligned), the 3-hourly strip, a "Week" label
@@ -30,19 +31,15 @@
  * State reset on onStop (ui_weather_exit):
  *   widgets: hourly_col, daily_col, status_label
  *                                       — nulled (deleted with parent)
- *   timer:   s_gen_timer                — emulator only (100 ms worker
- *                                         drain + cache re-check); deleted,
- *                                         nulled
  *   hooks:   weather_cache_set_change_hook(on_cache_changed)
  *                                       — set on enter, cleared on exit; the
  *                                          hook only posts to the LVGL thread
- *   job:     s_w_job (hardware: direct HTTPS / phone-step fetcher + drain
- *            ticker, core::OneShotJob)    — teardown(): drain killed, a running
- *                                          worker detached (frees its own result)
- *   thread:  emulator phone-step worker (detached std::thread, s_emu_*)
- *                                       — emu_job_teardown(): stops listening,
- *                                          drops an undrained result; a running
- *                                          worker frees its own result
+ *   job:     s_w_job (direct HTTPS / phone-step fetcher, core::OneShotJob;
+ *            a thread on the emulator too)
+ *                                       — teardown(): a running worker
+ *                                          detached (its result freed on
+ *                                          arrival unless a re-entry
+ *                                          re-attaches it)
  * If you add new cached LVGL pointers or a background task, list them
  * above AND extend ui_weather_exit() — see the file header note about
  * panel-inherited styles; the same hazard applies to leaked timers.
@@ -55,24 +52,13 @@
 #include "../hal/weather_cache.h"
 #include "../hal/weather_link.h"
 #include "../hal/weather_payload.h"
-#include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
 #include "../core/ui_post.h"
 #include "app_registry.h"
 #include "weather_test.h"
 #include "settings_internal.h"  // weather_city_match + the weather_* decls
-#include <atomic>
-#include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
-
-#ifdef ARDUINO
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#else
-#include <thread>
-#endif
 
 #ifdef ARDUINO
 #include <Preferences.h>
@@ -80,10 +66,6 @@ extern "C" {
 #include "cJSON.h"
 }
 #endif
-
-// Defined at the bottom of this file (also used by Settings » Weather).
-// "" = auto (IP geolocation); a missing key = WEATHER_DEFAULT_CITY.
-std::string weather_get_user_city();
 
 namespace {
 
@@ -125,74 +107,21 @@ static lv_obj_t *hourly_col = nullptr;
 static lv_obj_t *daily_col = nullptr;
 static lv_obj_t *status_label = nullptr;
 
-// weather.push notification: the cache change hook posts check_pushed_forecast
-// (P7.47)
-static lv_timer_t *s_gen_timer = nullptr;
+// Cache generation last rendered. weather.push (and any other saver) bumps it;
+// the cache change hook posts check_pushed_forecast to re-render (P7.47).
 static uint32_t s_seen_gen = 0;
 
 // --- async fetch state ----------------------------------------------------
 //
 // HTTP runs on a core::OneShotJob worker (s_w_job, below weather_fetch) so the
 // LVGL thread keeps servicing input (keyboard / encoder / back button) during
-// a fetch; the job's drain timer renders the result on the UI thread.
+// a fetch; the job delivers the result to the UI thread for rendering.
 
 static void back_btn_cb(lv_event_t *e)
 {
     (void)e;
     menu_show_deferred();
 }
-
-// Montserrat-10 (what we use here) only covers basic Latin — anything outside
-// 0x20–0x7F needs to be stripped or downgraded or it renders as tofu.
-#ifdef ARDUINO
-static std::string sanitize_ascii(const std::string &in)
-{
-    std::string out;
-    out.reserve(in.size());
-    size_t i = 0;
-    while (i < in.size()) {
-        unsigned char c = (unsigned char)in[i];
-        if (c < 0x80) { out.push_back((char)c); i++; continue; }
-
-        uint32_t cp = 0;
-        int extra = 0;
-        if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; extra = 1; }
-        else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; extra = 2; }
-        else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; extra = 3; }
-        else { i++; continue; }
-
-        if (i + extra >= in.size()) break;
-        bool ok = true;
-        for (int k = 1; k <= extra; k++) {
-            unsigned char cc = (unsigned char)in[i + k];
-            if ((cc & 0xC0) != 0x80) { ok = false; break; }
-            cp = (cp << 6) | (cc & 0x3F);
-        }
-        i += extra + 1;
-        if (!ok) continue;
-
-        if (cp == 0x00B0) continue;  // degree sign — dropped
-        if (cp == 0x2013 || cp == 0x2014) { out.push_back('-'); continue; }
-        if (cp == 0x2018 || cp == 0x2019) { out.push_back('\''); continue; }
-        if (cp == 0x201C || cp == 0x201D) { out.push_back('"'); continue; }
-
-        static const struct { uint32_t cp; char ch; } latin_map[] = {
-            {0x00C0,'A'},{0x00C1,'A'},{0x00C2,'A'},{0x00C3,'A'},{0x00C4,'A'},{0x00C5,'A'},
-            {0x00C7,'C'},{0x00C8,'E'},{0x00C9,'E'},{0x00CA,'E'},{0x00CB,'E'},
-            {0x00CC,'I'},{0x00CD,'I'},{0x00CE,'I'},{0x00CF,'I'},{0x00D1,'N'},
-            {0x00D2,'O'},{0x00D3,'O'},{0x00D4,'O'},{0x00D5,'O'},{0x00D6,'O'},
-            {0x00D9,'U'},{0x00DA,'U'},{0x00DB,'U'},{0x00DC,'U'},{0x00DD,'Y'},
-            {0x00E0,'a'},{0x00E1,'a'},{0x00E2,'a'},{0x00E3,'a'},{0x00E4,'a'},{0x00E5,'a'},
-            {0x00E7,'c'},{0x00E8,'e'},{0x00E9,'e'},{0x00EA,'e'},{0x00EB,'e'},
-            {0x00EC,'i'},{0x00ED,'i'},{0x00EE,'i'},{0x00EF,'i'},{0x00F1,'n'},
-            {0x00F2,'o'},{0x00F3,'o'},{0x00F4,'o'},{0x00F5,'o'},{0x00F6,'o'},
-            {0x00F9,'u'},{0x00FA,'u'},{0x00FB,'u'},{0x00FC,'u'},{0x00FD,'y'},{0x00FF,'y'},
-        };
-        for (auto &m : latin_map) if (m.cp == cp) { out.push_back(m.ch); break; }
-    }
-    return out;
-}
-#endif
 
 static void set_status(const char *text, lv_color_t color)
 {
@@ -448,7 +377,9 @@ static std::string json_str(cJSON *obj, const char *key)
     if (!obj) return "";
     cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
     if (!cJSON_IsString(v) || !v->valuestring) return "";
-    return sanitize_ascii(v->valuestring);
+    // The weather font only covers basic Latin: anything outside 0x20-0x7F
+    // is stripped or downgraded, or it renders as tofu.
+    return weather_sanitize_ascii(v->valuestring);
 }
 
 static bool parse_geo(const std::string &body, GeoData &out, std::string &err)
@@ -525,7 +456,7 @@ static bool fetch_geo_city(const std::string &city, GeoData &out, std::string &e
     }
     out.lat = lat_j->valuedouble;
     out.lon = lon_j->valuedouble;
-    out.location = sanitize_ascii(city);
+    out.location = weather_sanitize_ascii(city);
     cJSON_Delete(j);
     return true;
 }
@@ -758,7 +689,7 @@ static bool direct_fetch(const std::string &key, const std::string &user_city,
 // `try_direct` (hardware with Wi-Fi up); if that is unavailable or fails and
 // the phone is connected, the phone step. Touches only its arguments and the
 // caches, never the LVGL widget tree; the result is heap-owned and freed by
-// the drain after the UI thread renders it.
+// the job after the UI thread renders it.
 static WeatherFetchResult *weather_fetch(const std::string &key,
                                          const std::string &user_city,
                                          bool try_direct)
@@ -806,7 +737,7 @@ static WeatherFetchResult *weather_fetch(const std::string &key,
     return res;
 }
 
-// Drain callback (LVGL thread, instance mutex held by lv_timer_handler).
+// Job delivery (LVGL thread).
 static void weather_fetch_done(WeatherFetchResult &r)
 {
     s_seen_gen = weather_cache_generation();  // our own save, already rendered
@@ -814,76 +745,14 @@ static void weather_fetch_done(WeatherFetchResult &r)
     set_status(r.status.c_str(), r.status_color);
 }
 
-#ifdef ARDUINO
+// A thread on the emulator too, so the phone step (up to
+// WEATHER_GET_TIMEOUT_MS) never blocks the LVGL thread there either.
 static core::OneShotJob<WeatherFetchResult> s_w_job(weather_fetch_done);
-#else
-// Emulator worker: OneShotJob runs inline there, which would block the LVGL
-// thread for up to WEATHER_GET_TIMEOUT_MS, so the phone step gets a detached
-// std::thread (like chat/Telegram) drained by s_gen_timer. The worker never
-// touches LVGL; s_emu_mu guards the hand-off.
-static std::mutex s_emu_mu;
-static std::atomic<bool> s_emu_running{false};
-static bool s_emu_listening = false;                 // guarded by s_emu_mu
-static WeatherFetchResult *s_emu_result = nullptr;   // guarded by s_emu_mu
-
-static bool emu_job_start(const std::string &key, const std::string &user_city)
-{
-    {
-        std::lock_guard<std::mutex> lk(s_emu_mu);
-        s_emu_listening = true;              // re-attach to a running worker
-    }
-    if (s_emu_running.exchange(true)) return true;
-    std::thread([key, user_city] {
-        WeatherFetchResult *res = weather_fetch(key, user_city, false);
-        {
-            std::lock_guard<std::mutex> lk(s_emu_mu);
-            if (s_emu_listening) {
-                delete s_emu_result;
-                s_emu_result = res;
-            } else {
-                delete res;                  // nobody is listening any more
-            }
-        }
-        s_emu_running = false;
-    }).detach();
-    return true;
-}
-
-// LVGL thread: deliver a finished result, if any.
-static void emu_job_drain()
-{
-    WeatherFetchResult *res = nullptr;
-    {
-        std::lock_guard<std::mutex> lk(s_emu_mu);
-        res = s_emu_result;
-        s_emu_result = nullptr;
-    }
-    if (!res) return;
-    weather_fetch_done(*res);
-    delete res;
-}
-
-// LVGL thread (onStop): stop listening; drop an undrained result. A running
-// worker finishes on its own and frees its result.
-static void emu_job_teardown()
-{
-    std::lock_guard<std::mutex> lk(s_emu_mu);
-    s_emu_listening = false;
-    delete s_emu_result;
-    s_emu_result = nullptr;
-}
-#endif
 
 // True while this app's own fetch may still save to the cache or deliver.
 static bool fetch_in_flight()
 {
-#ifdef ARDUINO
     return s_w_job.busy();
-#else
-    if (s_emu_running) return true;
-    std::lock_guard<std::mutex> lk(s_emu_mu);
-    return s_emu_result != nullptr;
-#endif
 }
 
 // Chain (D-H6): fresh cache → render; else Wi-Fi up → direct (hardware);
@@ -952,7 +821,6 @@ static void do_fetch()
         set_status("Fetching...", UI_COLOR_ACCENT);
     }
 
-#ifdef ARDUINO
     // A fetch still in flight (user re-tapped the panel or re-entered the
     // app) is re-attached rather than duplicated, so its result still lands.
     // 8 KB stack: Open-Meteo runs over HTTPS, and mbedtls TLS handshake
@@ -963,13 +831,10 @@ static void do_fetch()
     if (started == core::OneShotJob<WeatherFetchResult>::Start::Failed) {
         set_status("task spawn fail", lv_palette_main(LV_PALETTE_RED));
     }
-#else
-    emu_job_start(key, user_city);
-#endif
 }
 
-// LVGL thread: a forecast saved by someone else (weather.push, or the
-// emulator's worker) for the key we display is re-rendered from the cache.
+// LVGL thread: a forecast saved by someone else (weather.push) for the key we
+// display is re-rendered from the cache.
 static void check_pushed_forecast()
 {
     if (!hourly_col || fetch_in_flight()) return;
@@ -988,18 +853,6 @@ static void on_cache_changed()
 {
     core::ui_post(check_pushed_forecast);
 }
-
-// LVGL thread, 100 ms, emulator only: drain the phone-step worker, then
-// re-check the cache (the emulator's weather.push also arrives through the
-// hook).
-#ifndef ARDUINO
-static void gen_poll_cb(lv_timer_t *t)
-{
-    (void)t;
-    emu_job_drain();
-    check_pushed_forecast();
-}
-#endif
 
 static void root_click_cb(lv_event_t *e)
 {
@@ -1086,9 +939,6 @@ static void ui_weather_enter(lv_obj_t *parent)
     s_seen_gen = weather_cache_generation();
     do_fetch();
     weather_cache_set_change_hook(on_cache_changed);
-#ifndef ARDUINO
-    s_gen_timer = lv_timer_create(gen_poll_cb, 100, nullptr);
-#endif
 }
 
 static void ui_weather_exit(lv_obj_t *parent)
@@ -1104,17 +954,11 @@ static void ui_weather_exit(lv_obj_t *parent)
     daily_col = nullptr;
     status_label = nullptr;
     weather_cache_set_change_hook(nullptr);
-    if (s_gen_timer) { lv_timer_delete(s_gen_timer); s_gen_timer = nullptr; }
 
-#ifdef ARDUINO
-    // Stop draining the bg fetch, if any. A running worker is left to finish
-    // on its own (it never touches the UI tree) and frees its own result; a
-    // finished-but-undrained one is dropped so a re-entry doesn't render
-    // stale data into a fresh panel.
+    // Detach the bg fetch, if any. A running worker is left to finish on its
+    // own (it never touches the UI tree); its result is freed on arrival
+    // unless a re-entry re-attaches it.
     s_w_job.teardown();
-#else
-    emu_job_teardown();
-#endif
 }
 
 class WeatherApp : public core::App {
@@ -1177,10 +1021,9 @@ void weather_set_user_city(const char *city)
     // Store "" explicitly for auto: removing the key would fall back to
     // WEATHER_DEFAULT_CITY on the next read and auto mode would never run.
     p.putString("user_city", (city && *city) ? city : "");
-    // Drop the cached lat/lon *and* the cached forecast so the next fetch
-    // resolves the new source from scratch — otherwise we'd render the old
-    // city's forecast until the key-mismatch check in weather_cache_load_forecast
-    // eventually threw it out.
+    // Drop the cached lat/lon *and* the cached forecast: they belong to the
+    // old source (weather_cache_load_geo/_forecast would refuse them on the
+    // key check anyway), so the next fetch resolves the new one from scratch.
     p.remove("ver");
     p.remove("key");
     p.remove("loc");
