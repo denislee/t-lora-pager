@@ -908,6 +908,93 @@ static void test_retransmit_contract(void) {
     TEST_ASSERT_FALSE(empty.retransmit());
 }
 
+/* SendJob: the owner-side retransmit clock (link_service outbound sends and
+ * handlers_fs reads). */
+static void test_send_job_clock(void) {
+    Loop loop;
+    SendJob job;
+    job.tx.reset(new XferSender(
+        20 * 4092, 4092, [](uint32_t, uint8_t *, size_t) { return true; },
+        [&](const uint8_t *p, size_t n) {
+            return loop.send_data(std::string(reinterpret_cast<const char *>(p), n));
+        }));
+    job.rto_ms = 1000;
+    job.tx->pump();
+
+    TEST_ASSERT_FALSE(job.rto_due(1000 + XFER_RETRANSMIT_MS - 1));
+    TEST_ASSERT_TRUE(job.rto_due(1000 + XFER_RETRANSMIT_MS));
+    TEST_ASSERT_EQUAL_UINT32(1500u, job.next_wait_ms(10000, 1000 + XFER_RETRANSMIT_MS - 1500));
+    TEST_ASSERT_EQUAL_UINT32(0u, job.next_wait_ms(10000, 1000 + XFER_RETRANSMIT_MS + 5));
+
+    /* An ACK with progress restarts the clock and reports the progress. */
+    std::string ack;
+    encode_ack(4092, INITIAL_CREDITS, ack);
+    TEST_ASSERT_TRUE(job.on_ack(2500, reinterpret_cast<const uint8_t *>(ack.data()), ack.size()));
+    TEST_ASSERT_EQUAL_UINT32(2500u, job.rto_ms);
+    TEST_ASSERT_FALSE(job.rto_due(2500 + XFER_RETRANSMIT_MS - 1));
+
+    /* A duplicate ACK restarts the clock too, without progress. */
+    TEST_ASSERT_FALSE(job.on_ack(3000, reinterpret_cast<const uint8_t *>(ack.data()), ack.size()));
+    TEST_ASSERT_EQUAL_UINT32(3000u, job.rto_ms);
+
+    /* Retransmit restarts the clock and rewinds to the acknowledged offset. */
+    job.tx->pump();
+    TEST_ASSERT_TRUE(job.retransmit(6000));
+    TEST_ASSERT_EQUAL_UINT32(6000u, job.rto_ms);
+    TEST_ASSERT_EQUAL_UINT32(job.tx->acked(), job.tx->sent());
+
+    /* Wrap-safe across 2^32. */
+    job.rto_ms = 0xFFFFFF00u;
+    TEST_ASSERT_TRUE(job.rto_due(0xFFFFFF00u + XFER_RETRANSMIT_MS));
+    TEST_ASSERT_FALSE(job.rto_due(0xFFFFFF00u + XFER_RETRANSMIT_MS - 1));
+}
+
+/* A lossy transfer driven only by the SendJob clock (returns the RTO firings) on a simulated millisecond
+ * clock: a dropped DATA is recovered once the RTO runs out. */
+static unsigned run_send_job_lossy(long drop_data) {
+    LossyRig rig(10 * 4092);
+    rig.loop.drop_data = drop_data;
+    SendJob job;
+    job.tx.reset(new XferSender(
+        static_cast<uint32_t>(rig.src.size()), 4092,
+        [&](uint32_t off, uint8_t *buf, size_t n) {
+            std::memcpy(buf, rig.src.data() + off, n);
+            return true;
+        },
+        [&](const uint8_t *p, size_t n) {
+            return rig.loop.send_data(std::string(reinterpret_cast<const char *>(p), n));
+        }));
+    uint32_t now = 0xFFFFF000u; /* crosses the 2^32 wrap on the way */
+    job.rto_ms = now;
+    job.tx->pump();
+    for (int step = 0; step < 10000 && job.tx->state() != XferState::Done; ++step) {
+        now += 10;
+        rig.loop.deliver_all_data(rig.rx);
+        while (!rig.loop.ack.empty()) {
+            std::string a = std::move(rig.loop.ack.front());
+            rig.loop.ack.pop_front();
+            job.on_ack(now, reinterpret_cast<const uint8_t *>(a.data()), a.size());
+            job.tx->pump();
+        }
+        if (job.rto_due(now) && job.retransmit(now)) {
+            ++rig.loop.timers;
+            job.tx->pump();
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                            static_cast<uint8_t>(job.tx->state()));
+    TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(XferState::Done),
+                            static_cast<uint8_t>(rig.rx.state()));
+    TEST_ASSERT_EQUAL_INT(0, std::memcmp(rig.src.data(), rig.dst.data(), rig.src.size()));
+    return rig.loop.timers;
+}
+
+static void test_send_job_lossy(void) {
+    run_send_job_lossy(3); /* mid-window: the receiver's gap ACKs may recover it */
+    /* The last DATA: nothing follows it, so only the RTO can recover it. */
+    TEST_ASSERT_TRUE(run_send_job_lossy(9) >= 1);
+}
+
 int main(int /*argc*/, char ** /*argv*/) {
     UNITY_BEGIN();
     RUN_TEST(test_crc32_check_value);
@@ -936,5 +1023,7 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN_TEST(test_sender_one_rewind_per_acked);
     RUN_TEST(test_receiver_at_most_two_acks_per_gap);
     RUN_TEST(test_retransmit_contract);
+    RUN_TEST(test_send_job_clock);
+    RUN_TEST(test_send_job_lossy);
     return UNITY_END();
 }

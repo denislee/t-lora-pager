@@ -46,7 +46,6 @@ struct Transfer {
     uint32_t crc;      /* CRC-32/ISO-HDLC of the whole file */
     bool overwrite;
     uint32_t last_ms;  /* steady_ms() at the start or the last bulk message */
-    uint32_t rto_ms;   /* steady_ms() at the start, the last ACK, or the last retransmit (reads) */
     /* The file the chunks go through (path for reads, part for writes), kept
      * open for the whole transfer (P7.34). Shared with the tx/rx callbacks, so
      * it survives g_xfers reallocating. */
@@ -59,7 +58,7 @@ struct Transfer {
     bool crc_check = false;
     uint32_t crc_next = 0;
     uint32_t crc_run = 0;
-    std::unique_ptr<XferSender> tx;   /* reads */
+    SendJob send;                     /* reads: the sender and its retransmit clock */
     std::unique_ptr<XferReceiver> rx; /* writes */
 };
 
@@ -136,10 +135,10 @@ void close_files_under(Vol v, const std::string &target) {
  * the cache) was stale — forget it so the next fs.read recomputes. */
 void note_read(uint16_t id, uint32_t off, const uint8_t *buf, size_t n) {
     Transfer *t = find(id);
-    if (!t || !t->crc_check || off != t->crc_next || !t->tx) return;
+    if (!t || !t->crc_check || off != t->crc_next || !t->send.tx) return;
     t->crc_run = crc32_update(t->crc_run, buf, n);
     t->crc_next += static_cast<uint32_t>(n);
-    if (t->crc_next == t->tx->size()) {
+    if (t->crc_next == t->send.tx->size()) {
         t->crc_check = false;
         if (t->crc_run != t->crc) {
             LINK_LOG("fs.read id=%u path=%s announced crc was stale", static_cast<unsigned>(id),
@@ -234,12 +233,12 @@ uint16_t alloc_upload_id() {
 /** Send whatever the credit window allows; finish the transfer when done. */
 void pump_read(uint16_t id) {
     Transfer *t = find(id);
-    if (!t || t->upload || !t->tx) return;
-    const XferState state = t->tx->pump();
+    if (!t || t->upload || !t->send.tx) return;
+    const XferState state = t->send.tx->pump();
     if (state == XferState::Done || state == XferState::Failed) {
         LINK_LOG("fs.read %s id=%u path=%s size=%u",
                  state == XferState::Done ? "done" : "failed", static_cast<unsigned>(id),
-                 t->path.c_str(), static_cast<unsigned>(t->tx->size()));
+                 t->path.c_str(), static_cast<unsigned>(t->send.tx->size()));
         drop(id);
     }
 }
@@ -355,10 +354,10 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
     t.path = path;
     t.crc = crc;
     t.last_ms = steady_ms();
-    t.rto_ms = t.last_ms;
+    t.send.rto_ms = t.last_ms;
     t.file = file;
     t.crc_check = (offset == 0);
-    t.tx.reset(new XferSender(
+    t.send.tx.reset(new XferSender(
         st.size, MAX_DATA_CHUNK,
         [file, xfer](uint32_t off, uint8_t *buf, size_t n) {
             const Transfer *cur = find(xfer);
@@ -446,7 +445,6 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
     t.crc = crc;
     t.overwrite = overwrite;
     t.last_ms = steady_ms();
-    t.rto_ms = t.last_ms;
     t.file = file;
     uint16_t credits = 0;
     unsigned ack_every = 0;
@@ -625,9 +623,8 @@ bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len)
     boost();
     t->last_ms = steady_ms();
 
-    if (type == MsgType::Ack && !t->upload && t->tx) {
-        t->rto_ms = steady_ms();
-        t->tx->on_ack(payload, len);
+    if (type == MsgType::Ack && !t->upload && t->send.tx) {
+        t->send.on_ack(steady_ms(), payload, len);
         pump_read(xfer); /* sends more DATA, or finishes the read */
     } else if (type == MsgType::Data && t->upload && t->rx) {
         if (t->rx->on_data(payload, len) == XferState::Failed) {
@@ -644,18 +641,16 @@ void fs_tick(uint32_t now) {
      * the ids first because pump_read() may drop a transfer. */
     std::vector<uint16_t> retransmit;
     for (const Transfer &t : g_xfers) {
-        if (t.tx && !t.upload &&
-            static_cast<uint32_t>(now - t.rto_ms) >= XFER_RETRANSMIT_MS) {
+        if (t.send.tx && !t.upload && t.send.rto_due(now)) {
             retransmit.push_back(t.id);
         }
     }
     for (uint16_t id : retransmit) {
         Transfer *t = find(id);
-        if (!t || !t->tx || t->upload) continue;
-        t->rto_ms = now;
-        if (t->tx->retransmit()) {
+        if (!t || !t->send.tx || t->upload) continue;
+        if (t->send.retransmit(now)) {
             LINK_LOG("fs.read retransmit id=%u at=%u", static_cast<unsigned>(id),
-                     static_cast<unsigned>(t->tx->acked()));
+                     static_cast<unsigned>(t->send.tx->acked()));
             pump_read(id); /* may drop the transfer */
         }
     }
@@ -677,8 +672,8 @@ uint32_t fs_next_wait_ms(uint32_t cap) {
     const uint32_t now = steady_ms();
     uint32_t wait = cap;
     for (const Transfer &t : g_xfers) {
-        if (t.tx && !t.upload) {
-            wait = min_wait_ms(wait, now, t.rto_ms + XFER_RETRANSMIT_MS);
+        if (t.send.tx && !t.upload) {
+            wait = t.send.next_wait_ms(wait, now);
         }
         wait = min_wait_ms(wait, now, t.last_ms + STALL_MS + 1);
     }

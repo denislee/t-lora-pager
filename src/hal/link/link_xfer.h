@@ -31,9 +31,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 
 #include "hal/link/link_buf.h"
+#include "hal/link/link_frame.h"
 
 namespace pagerlink {
 
@@ -104,6 +106,41 @@ private:
     /* The DATA payload being sent: ReadFn fills it in place (P7.36). One
      * MAX_PAYLOAD block, PSRAM-first, allocated at the first pump. */
     ByteBuf payload_;
+};
+
+/**
+ * Owner-side retransmit clock for one XferSender, shared by the pager's two
+ * bulk senders (link_service.cpp outbound sends, handlers_fs.cpp fs.read).
+ * `rto_ms` restarts at the start, on every ACK (progress or not) and on every
+ * retransmit; XFER_RETRANSMIT_MS after it the owner calls retransmit() and,
+ * when that rewound, pump(). Stall tracking stays with the owner: the two
+ * define progress differently.
+ */
+struct SendJob {
+    std::unique_ptr<XferSender> tx;
+    uint32_t rto_ms = 0;
+
+    /** Feed one ACK at `now`: restarts the clock. True when acked() moved.
+     * Call tx->pump() next. */
+    bool on_ack(uint32_t now, const uint8_t *payload, size_t len) {
+        rto_ms = now;
+        const uint32_t before = tx->acked();
+        tx->on_ack(payload, len);
+        return tx->acked() != before;
+    }
+    /** The retransmit timeout has run out at `now`. */
+    bool rto_due(uint32_t now) const {
+        return static_cast<uint32_t>(now - rto_ms) >= XFER_RETRANSMIT_MS;
+    }
+    /** Restart the clock and rewind; true when it rewound (pump() next). */
+    bool retransmit(uint32_t now) {
+        rto_ms = now;
+        return tx->retransmit();
+    }
+    /** Fold the retransmit deadline into `wait` (min_wait_ms). */
+    uint32_t next_wait_ms(uint32_t wait, uint32_t now) const {
+        return min_wait_ms(wait, now, rto_ms + XFER_RETRANSMIT_MS);
+    }
 };
 
 /** Receives `size` bytes of DATA in order and acknowledges them. */

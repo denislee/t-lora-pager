@@ -86,10 +86,9 @@ struct State {
      * The phone allocated the even xfer id in the RPC that announced them. */
     struct Outbound {
         uint16_t xfer;
-        std::unique_ptr<XferSender> tx;
+        SendJob send;        /* the sender and its retransmit clock */
         std::function<void(bool)> done;
         uint32_t last_ms;    /* steady_ms() at the start or the last ACK progress */
-        uint32_t rto_ms;     /* steady_ms() at the start, the last ACK, or the last retransmit */
         uint32_t stall_ms;   /* no-ACK-progress timeout checked by service_tick() */
     };
     std::vector<Outbound> outbound;
@@ -270,13 +269,11 @@ void outbound_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_
             continue;
         }
         State::Outbound &o = s.outbound[i];
-        o.rto_ms = steady_ms();
-        const uint32_t before = o.tx->acked();
-        o.tx->on_ack(payload, len);
-        if (o.tx->acked() != before) {
-            o.last_ms = steady_ms();
+        const uint32_t now = steady_ms();
+        if (o.send.on_ack(now, payload, len)) {
+            o.last_ms = now;
         }
-        const XferState st = o.tx->pump();
+        const XferState st = o.send.tx->pump();
         if (st == XferState::Done) {
             finish_outbound(i, true);
         } else if (st == XferState::Failed) {
@@ -464,20 +461,17 @@ void service_tick() {
     /* Outbound sends with no ACK for the retransmit window: rewind and resend. */
     for (size_t i = 0; i < s.outbound.size();) {
         State::Outbound &o = s.outbound[i];
-        if (static_cast<uint32_t>(now - o.rto_ms) >= XFER_RETRANSMIT_MS) {
-            o.rto_ms = now;
-            if (o.tx->retransmit()) {
-                LINK_LOG("send retransmit id=%u at=%u", static_cast<unsigned>(o.xfer),
-                         static_cast<unsigned>(o.tx->acked()));
-                const XferState st = o.tx->pump();
-                if (st == XferState::Done) {
-                    finish_outbound(i, true); /* erases index i; do not advance */
-                    continue;
-                }
-                if (st == XferState::Failed) {
-                    finish_outbound(i, false); /* erases index i; do not advance */
-                    continue;
-                }
+        if (o.send.rto_due(now) && o.send.retransmit(now)) {
+            LINK_LOG("send retransmit id=%u at=%u", static_cast<unsigned>(o.xfer),
+                     static_cast<unsigned>(o.send.tx->acked()));
+            const XferState st = o.send.tx->pump();
+            if (st == XferState::Done) {
+                finish_outbound(i, true); /* erases index i; do not advance */
+                continue;
+            }
+            if (st == XferState::Failed) {
+                finish_outbound(i, false); /* erases index i; do not advance */
+                continue;
             }
         }
         ++i;
@@ -547,7 +541,7 @@ uint32_t service_next_tick_ms(uint32_t cap) {
     const uint32_t now = steady_ms();
     /* The checks service_tick() makes; the stall ones are strict `>`. */
     for (const State::Outbound &o : s.outbound) {
-        wait = min_wait_ms(wait, now, o.rto_ms + XFER_RETRANSMIT_MS);
+        wait = o.send.next_wait_ms(wait, now);
         wait = min_wait_ms(wait, now, o.last_ms + o.stall_ms + 1);
     }
     for (const State::Inbound &in : s.inbound) {
@@ -629,8 +623,8 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
     o.done = std::move(done);
     o.stall_ms = stall_ms;
     o.last_ms = steady_ms();
-    o.rto_ms = o.last_ms;
-    o.tx.reset(new XferSender(
+    o.send.rto_ms = o.last_ms;
+    o.send.tx.reset(new XferSender(
         static_cast<uint32_t>(len), MAX_DATA_CHUNK,
         [data](uint32_t off, uint8_t *buf, size_t n) -> bool {
             std::memcpy(buf, data + off, n);
@@ -649,7 +643,7 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
              static_cast<unsigned>(len));
 
     const size_t i = s.outbound.size() - 1;
-    const XferState st = s.outbound[i].tx->pump();
+    const XferState st = s.outbound[i].send.tx->pump();
     if (st == XferState::Done) {
         finish_outbound(i, true);
     } else if (st == XferState::Failed) {
