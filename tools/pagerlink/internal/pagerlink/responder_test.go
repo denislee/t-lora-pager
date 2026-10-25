@@ -1,18 +1,15 @@
 package pagerlink
 
 // These tests drive a Client's responder role against a fake peer over a
-// net.Pipe. The fake speaks the real wire format (the package's own
-// Segmenter/Reassembler and the same u16 record framing) and, unlike the fake
-// pager in files_test.go, it can originate REQ messages — the direction the
-// responder exists for. It reuses makeSource from xfer_test.go.
+// net.Pipe. The fake speaks the real wire format (wire_test.go) and, unlike the
+// fake pager in files_test.go, it can originate REQ messages — the direction
+// the responder exists for. It reuses makeSource from xfer_test.go.
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"hash/crc32"
-	"io"
 	"net"
 	"testing"
 	"time"
@@ -22,57 +19,25 @@ import (
 // goroutine and hands the decoded messages to the test on a channel, and it can
 // send REQ/DATA/ACK of its own.
 type fakePeer struct {
-	t    *testing.T
-	conn net.Conn
-	seg  Segmenter
-	re   Reassembler
-	in   chan Message
+	wire
+	t  *testing.T
+	in chan Message
 }
 
 func newFakePeer(t *testing.T, conn net.Conn) *fakePeer {
-	p := &fakePeer{t: t, conn: conn, in: make(chan Message, 64)}
-	go p.read()
+	p := &fakePeer{wire: wire{conn: conn}, t: t, in: make(chan Message, 64)}
+	go func() {
+		defer close(p.in)
+		p.readLoop(func(m Message) { p.in <- m })
+	}()
 	return p
-}
-
-func (p *fakePeer) read() {
-	defer close(p.in)
-	var hdr [2]byte
-	for {
-		if _, err := io.ReadFull(p.conn, hdr[:]); err != nil {
-			return
-		}
-		pkt := make([]byte, int(binary.LittleEndian.Uint16(hdr[:])))
-		if _, err := io.ReadFull(p.conn, pkt); err != nil {
-			return
-		}
-		for _, ev := range p.re.Feed(pkt) {
-			if ev.Reset != "" {
-				continue
-			}
-			msg, err := Decode(ev.Message)
-			if err != nil {
-				continue
-			}
-			p.in <- msg
-		}
-	}
 }
 
 // send encodes one message and writes every packet as a record.
 func (p *fakePeer) send(t MsgType, id uint16, payload []byte) {
 	p.t.Helper()
-	raw, err := Message{Type: t, ID: id, Payload: payload}.Encode()
-	if err != nil {
+	if err := p.writeMsg(t, id, payload); err != nil {
 		p.t.Fatalf("fake peer encode: %v", err)
-	}
-	for _, pkt := range p.seg.Segment(raw, TCPPacketSize) {
-		rec := make([]byte, 2+len(pkt))
-		binary.LittleEndian.PutUint16(rec, uint16(len(pkt)))
-		copy(rec[2:], pkt)
-		if _, err := p.conn.Write(rec); err != nil {
-			return
-		}
 	}
 }
 

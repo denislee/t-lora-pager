@@ -1,19 +1,16 @@
 package pagerlink
 
 // These tests drive a Client against a fake pager over a net.Pipe. The fake
-// speaks the real wire format — the package's own Segmenter/Reassembler and the
-// same u16 little-endian record framing the Client uses — and serves the fs.*
+// speaks the real wire format (wire_test.go) and serves the fs.*
 // bulk operations the handlers_fs.cpp pager implements: fs.read (RES then DATA
 // driven by the client's ACKs) and fs.write.begin/commit/abort (a Receiver that
 // ACKs the client's DATA).
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"hash/crc32"
-	"io"
 	"net"
 	"sync"
 	"testing"
@@ -43,12 +40,9 @@ type fakeXfer struct {
 // and writes replies through one Segmenter, exactly as the firmware link task
 // does.
 type fakePager struct {
-	t    *testing.T
-	conn net.Conn
-	cfg  fakeConfig
-
-	seg Segmenter
-	re  Reassembler
+	wire
+	t   *testing.T
+	cfg fakeConfig
 
 	xfers  map[uint16]*fakeXfer
 	nextID uint16 // odd upload ids, the pager's parity
@@ -66,8 +60,8 @@ func newFakePager(t *testing.T, conn net.Conn, cfg fakeConfig) *fakePager {
 		cfg.crcOverride = map[string]uint32{}
 	}
 	f := &fakePager{
+		wire:   wire{conn: conn},
 		t:      t,
-		conn:   conn,
 		cfg:    cfg,
 		xfers:  make(map[uint16]*fakeXfer),
 		nextID: 1,
@@ -80,42 +74,13 @@ func newFakePager(t *testing.T, conn net.Conn, cfg fakeConfig) *fakePager {
 
 func (f *fakePager) serve() {
 	defer f.conn.Close()
-	var hdr [2]byte
-	for {
-		if _, err := io.ReadFull(f.conn, hdr[:]); err != nil {
-			return
-		}
-		pkt := make([]byte, int(binary.LittleEndian.Uint16(hdr[:])))
-		if _, err := io.ReadFull(f.conn, pkt); err != nil {
-			return
-		}
-		for _, ev := range f.re.Feed(pkt) {
-			if ev.Reset != "" {
-				continue
-			}
-			msg, err := Decode(ev.Message)
-			if err != nil {
-				continue
-			}
-			f.handle(msg)
-		}
-	}
+	f.readLoop(f.handle)
 }
 
 // write encodes one message and writes every packet as a record.
 func (f *fakePager) write(t MsgType, id uint16, payload []byte) {
-	raw, err := Message{Type: t, ID: id, Payload: payload}.Encode()
-	if err != nil {
+	if err := f.writeMsg(t, id, payload); err != nil {
 		f.t.Errorf("fake pager encode: %v", err)
-		return
-	}
-	for _, p := range f.seg.Segment(raw, TCPPacketSize) {
-		rec := make([]byte, 2+len(p))
-		binary.LittleEndian.PutUint16(rec, uint16(len(p)))
-		copy(rec[2:], p)
-		if _, err := f.conn.Write(rec); err != nil {
-			return
-		}
 	}
 }
 

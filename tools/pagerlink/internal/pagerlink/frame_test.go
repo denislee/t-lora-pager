@@ -1,12 +1,10 @@
 package pagerlink
 
 import (
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"hash/crc32"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -199,53 +197,28 @@ func TestReassembleVectors(t *testing.T) {
 func fakeServer(t *testing.T, conn net.Conn) {
 	t.Helper()
 	defer conn.Close()
-	var re Reassembler
-	var seg Segmenter
-	hdr := make([]byte, 2)
-	for {
-		if _, err := io.ReadFull(conn, hdr); err != nil {
+	w := &wire{conn: conn}
+	w.readLoop(func(msg Message) {
+		if msg.Type != Req {
 			return
 		}
-		pkt := make([]byte, int(binary.LittleEndian.Uint16(hdr)))
-		if _, err := io.ReadFull(conn, pkt); err != nil {
-			return
+		var req struct {
+			M string          `json:"m"`
+			P json.RawMessage `json:"p"`
 		}
-		for _, ev := range re.Feed(pkt) {
-			if ev.Reset != "" {
-				continue
-			}
-			msg, err := Decode(ev.Message)
-			if err != nil || msg.Type != Req {
-				continue
-			}
-			var req struct {
-				M string          `json:"m"`
-				P json.RawMessage `json:"p"`
-			}
-			_ = json.Unmarshal(msg.Payload, &req)
+		_ = json.Unmarshal(msg.Payload, &req)
 
-			out := Message{Type: Err, ID: msg.ID, Payload: []byte(`{"code":"unsupported","msg":"x"}`)}
-			if req.M == "sys.ping" {
-				if len(req.P) == 0 {
-					req.P = json.RawMessage("{}")
-				}
-				out = Message{Type: Res, ID: msg.ID, Payload: req.P}
+		out := Message{Type: Err, ID: msg.ID, Payload: []byte(`{"code":"unsupported","msg":"x"}`)}
+		if req.M == "sys.ping" {
+			if len(req.P) == 0 {
+				req.P = json.RawMessage("{}")
 			}
-			raw, err := out.Encode()
-			if err != nil {
-				t.Errorf("server encode: %v", err)
-				return
-			}
-			for _, p := range seg.Segment(raw, TCPPacketSize) {
-				rec := make([]byte, 2+len(p))
-				binary.LittleEndian.PutUint16(rec, uint16(len(p)))
-				copy(rec[2:], p)
-				if _, err := conn.Write(rec); err != nil {
-					return
-				}
-			}
+			out = Message{Type: Res, ID: msg.ID, Payload: req.P}
 		}
-	}
+		if err := w.writeMsg(out.Type, out.ID, out.Payload); err != nil {
+			t.Errorf("server encode: %v", err)
+		}
+	})
 }
 
 func TestClientCallAndError(t *testing.T) {
