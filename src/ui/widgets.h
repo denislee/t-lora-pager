@@ -21,6 +21,10 @@ lv_obj_t *create_slider(lv_obj_t *parent, const char *txt, int32_t min, int32_t 
 lv_obj_t *create_button(lv_obj_t *parent, const char *icon, const char *txt, lv_event_cb_t cb);
 lv_obj_t *create_dropdown(lv_obj_t *parent, const char *txt, const char *options, uint8_t default_sel, lv_event_cb_t cb);
 
+/* Muted, centred, padded placeholder line for an empty lv_list
+ * ("No networks found", "(no results)"). Not focusable. */
+lv_obj_t *ui_list_add_empty_label(lv_obj_t *list, const char *text);
+
 /* lv_list button laid out as [icon (20 px) | text (grows, "..."-truncated) |
  * meta]. `meta` (may be NULL for none) is a muted trailing label in
  * `meta_font`. User data, events and group membership are the caller's. */

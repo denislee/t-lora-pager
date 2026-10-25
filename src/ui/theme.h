@@ -22,10 +22,7 @@ typedef enum { UI_STYLE_CLASSIC = 0, UI_STYLE_PIXEL_ISO = 1, UI_STYLE_HOTEL = 2,
 ui_style_t ui_style_get();            // lazily loaded from NVS on first call
 void ui_style_set(ui_style_t style);  // persist + rebuild theme (calls theme_init)
 bool ui_style_is_pixel();             // true only for Pixel Iso
-bool ui_style_is_hotel();             // true only for Hotel
-bool ui_style_is_beos();              // true only for BeOS
 bool ui_style_has_chrome();           // Hotel or BeOS (outlined / bevelled widgets), day or night
-bool ui_style_is_dark();              // the active palette is dark (Classic, Pixel Iso, or dark mode on)
 bool ui_dark_mode_get();              // dark-mode preference, lazily loaded from NVS
 void ui_dark_mode_set(bool dark);     // persist + rebuild theme (calls theme_init)
 /* Every colour token and per-style metric of one style in one mode. The table
@@ -84,7 +81,6 @@ int32_t ui_radius();
 #define UI_ISO_DEPTH_Y   2
 void ui_block(lv_obj_t *obj, lv_color_t face);  // raised block for Pixel Iso / Hotel / BeOS; no-op in Classic
 void ui_apply_backdrop(lv_obj_t *obj);           // screen bg; Pixel Iso / Hotel tile a patterned backdrop
-void ui_beos_tab(lv_obj_t *label);               // BeOS yellow window tab on a label; no-op in other styles
 typedef enum { UI_TITLE_NONE = 0, UI_TITLE_BAR, UI_TITLE_TAB } ui_title_chrome_t;
 // Title chrome per style: Hotel paints `bar` (may be the label itself) as the
 // blue title bar, BeOS turns `label` into its window tab, Classic / Pixel Iso

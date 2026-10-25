@@ -62,6 +62,10 @@ lv_obj_t *ui_modal_btn_create(lv_obj_t *parent, const char *text,
  * `cb(false, ud)` on No; the dialog is closed before `cb` runs. */
 typedef void (*ui_confirm_cb)(bool yes, void *ud);
 void ui_confirm(const char *title, const char *msg, ui_confirm_cb cb, void *ud);
+/* Same, with custom labels laid out {no_txt, yes_txt} (e.g. "Cancel" left,
+ * "Save" right); `cb(true, ud)` on yes_txt. */
+void ui_confirm(const char *title, const char *msg, const char *no_txt,
+                const char *yes_txt, ui_confirm_cb cb, void *ud);
 
 /* Unified loading / progress popup. Every long-running screen (sync,
  * download, index scan, storage ops) should use this instead of hand-
@@ -138,9 +142,10 @@ void ui_text_prompt(const char *title, const char *subtitle,
                     ui_passphrase_result_cb cb, void *ud);
 
 /* Device-level lock enforcement. If notes crypto is enabled and the session
- * is locked, puts the unlock modal on top of the UI and keeps it there — any
- * cancel immediately re-opens the modal — until the correct passphrase is
- * entered. No-op when crypto is disabled or the session is already unlocked. */
+ * is locked, puts the unlock modal on top of the UI until the correct
+ * passphrase is entered — it has no title and no OK/Cancel buttons, so typing
+ * the passphrase is the only way past it. No-op when crypto is disabled or the
+ * session is already unlocked. */
 void ui_device_lock_enforce();
 
 /* True while any of the ui_passphrase_* / ui_text_prompt / ui_device_lock_enforce

@@ -26,13 +26,16 @@ struct WifiCtx {
     bool connect_in_flight = false;
     std::string pending_ssid;
     std::string pending_password;   // cached for save-on-success
-    uint8_t pending_authmode = 0;
     uint32_t connect_deadline_ms = 0;
-    // Snapshot of the SSIDs currently rendered in the list, in display order.
-    // Clicks look up SSIDs here instead of re-querying the scan driver, so
-    // synthesised entries (e.g. the connected network shown during a scan)
-    // still resolve correctly.
-    std::vector<std::string> displayed_ssids;
+    // Snapshot of the networks currently rendered in the list, in display
+    // order. Clicks look them up here instead of re-querying the scan driver
+    // (an instance-mutex pull), so synthesised entries (e.g. the connected
+    // network shown during a scan) still resolve correctly.
+    struct Shown {
+        std::string ssid;
+        uint8_t authmode;
+    };
+    std::vector<Shown> displayed;
 };
 
 static WifiCtx *g_ctx = nullptr;
@@ -45,11 +48,13 @@ static void set_status(const char *msg)
 
 static void populate_list(const std::vector<wifi_scan_params_t> &nets);
 
-static void refresh_scan_results()
+// Re-render the list from the driver's latest scan; returns the network count.
+static size_t refresh_scan_results()
 {
     std::vector<wifi_scan_params_t> nets;
     hw_get_wifi_scan_result(nets);
     populate_list(nets);
+    return nets.size();
 }
 
 // Populate the list with just the currently-connected network (if any).
@@ -144,23 +149,13 @@ static void net_clicked_cb(lv_event_t *e)
     lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
     if (!g_ctx || !btn) return;
     intptr_t idx = (intptr_t)lv_obj_get_user_data(btn);
-    if (idx < 0 || (size_t)idx >= g_ctx->displayed_ssids.size()) return;
-    std::string ssid = g_ctx->displayed_ssids[idx];
-
-    /* Look up the authmode from the latest scan snapshot. For entries
-     * synthesised before the scan completes (e.g. the connected-network
-     * placeholder) the scan list may not have the SSID yet; treat as
-     * unknown/locked so the connect path still works. */
-    uint8_t authmode = 1;
-    {
-        std::vector<wifi_scan_params_t> nets;
-        hw_get_wifi_scan_result(nets);
-        for (const auto &n : nets) {
-            if (n.ssid == ssid) { authmode = n.authmode; break; }
-        }
-    }
+    if (idx < 0 || (size_t)idx >= g_ctx->displayed.size()) return;
+    /* Entries synthesised before the scan completes (the connected-network
+     * placeholder) carry authmode 1 (unknown/locked), so the connect path
+     * still works. */
+    std::string ssid = g_ctx->displayed[idx].ssid;
+    uint8_t authmode = g_ctx->displayed[idx].authmode;
     g_ctx->pending_ssid = ssid;
-    g_ctx->pending_authmode = authmode;
 
     /* Tapping the currently-connected network disconnects instead of
      * re-associating. Gives users a way to drop a connection without
@@ -220,15 +215,10 @@ static void populate_list(const std::vector<wifi_scan_params_t> &nets)
 {
     if (!g_ctx || !g_ctx->list) return;
     lv_obj_clean(g_ctx->list);
-    g_ctx->displayed_ssids.clear();
+    g_ctx->displayed.clear();
 
     if (nets.empty()) {
-        lv_obj_t *empty = lv_label_create(g_ctx->list);
-        lv_label_set_text(empty, "No networks found");
-        lv_obj_set_style_text_color(empty, UI_COLOR_MUTED, 0);
-        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_width(empty, LV_PCT(100));
-        lv_obj_set_style_pad_all(empty, 16, 0);
+        ui_list_add_empty_label(g_ctx->list, "No networks found");
         return;
     }
 
@@ -253,9 +243,9 @@ static void populate_list(const std::vector<wifi_scan_params_t> &nets)
                  fav ? LV_SYMBOL_OK " " : "",
                  authmode_label(n.authmode), n.ssid.c_str(), (int)n.rssi);
         lv_obj_t *btn = lv_list_add_btn(g_ctx->list, LV_SYMBOL_WIFI, label);
-        // user_data holds the display index into g_ctx->displayed_ssids.
-        lv_obj_set_user_data(btn, (void *)(intptr_t)g_ctx->displayed_ssids.size());
-        g_ctx->displayed_ssids.push_back(n.ssid);
+        // user_data holds the display index into g_ctx->displayed.
+        lv_obj_set_user_data(btn, (void *)(intptr_t)g_ctx->displayed.size());
+        g_ctx->displayed.push_back({n.ssid, n.authmode});
         lv_obj_add_event_cb(btn, net_clicked_cb, LV_EVENT_CLICKED, nullptr);
         lv_group_add_obj(g_ctx->ov.group, btn);
     }
@@ -272,11 +262,9 @@ static void poll_cb(lv_timer_t *t)
 
     if (g_ctx->scan_in_flight && !hw_get_wifi_scanning()) {
         g_ctx->scan_in_flight = false;
-        refresh_scan_results();
-        std::vector<wifi_scan_params_t> nets;
-        hw_get_wifi_scan_result(nets);
+        size_t found = refresh_scan_results();
         char buf[64];
-        snprintf(buf, sizeof(buf), "Found %u network(s).", (unsigned)nets.size());
+        snprintf(buf, sizeof(buf), "Found %u network(s).", (unsigned)found);
         set_status(buf);
     }
 

@@ -41,12 +41,12 @@ bool ui_style_is_pixel()
     return ui_style_get() == UI_STYLE_PIXEL_ISO;
 }
 
-bool ui_style_is_hotel()
+static bool ui_style_is_hotel()
 {
     return ui_style_get() == UI_STYLE_HOTEL;
 }
 
-bool ui_style_is_beos()
+static bool ui_style_is_beos()
 {
     return ui_style_get() == UI_STYLE_BEOS;
 }
@@ -78,7 +78,7 @@ void ui_dark_mode_set(bool dark)
     theme_init();
 }
 
-bool ui_style_is_dark()
+static bool ui_style_is_dark()
 {
     return !ui_style_has_chrome() || ui_dark_mode_get();
 }
@@ -698,7 +698,7 @@ static void new_theme_apply_cb(lv_theme_t * th, lv_obj_t * obj)
     if (st.track && lv_obj_check_type(obj, &lv_switch_class)) {
         lv_obj_add_style(obj, st.track, LV_PART_MAIN);
         lv_obj_add_style(obj, st.switch_on,
-                         (lv_style_selector_t)(LV_PART_INDICATOR | LV_STATE_CHECKED));
+                         (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
         lv_obj_add_style(obj, st.knob, LV_PART_KNOB);
     }
 
@@ -720,9 +720,9 @@ static void new_theme_apply_cb(lv_theme_t * th, lv_obj_t * obj)
     }
     if (st.list_select && lv_obj_check_type(obj, &lv_dropdownlist_class)) {
         lv_obj_add_style(obj, st.list_select,
-                         (lv_style_selector_t)(LV_PART_SELECTED | LV_STATE_CHECKED));
+                         (lv_style_selector_t)LV_PART_SELECTED | LV_STATE_CHECKED);
         lv_obj_add_style(obj, st.list_select,
-                         (lv_style_selector_t)(LV_PART_SELECTED | LV_STATE_PRESSED));
+                         (lv_style_selector_t)LV_PART_SELECTED | LV_STATE_PRESSED);
     }
 }
 
@@ -765,7 +765,10 @@ bool theme_init()
 
 // Generic raised-block helper. Classic is a no-op (flat chrome); Pixel Iso
 // extrudes an iso tile; Hotel draws the black-outlined, top-lit Habbo button;
-// BeOS draws the grey bevelled R5 button.
+// BeOS draws the grey bevelled R5 button. Focus looks the same whether it came
+// from the encoder (FOCUSED) or the keyboard (FOCUS_KEY).
+static const lv_style_selector_t kFocusStates[] = {LV_STATE_FOCUSED, LV_STATE_FOCUS_KEY};
+
 void ui_block(lv_obj_t *obj, lv_color_t face)
 {
     if (ui_style_is_pixel()) {
@@ -787,31 +790,19 @@ void ui_block(lv_obj_t *obj, lv_color_t face)
         lv_obj_set_style_shadow_color(obj, ui_palette().depth, 0);
         lv_obj_set_style_shadow_opa(obj, LV_OPA_COVER, 0);
 
-        lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_FULL, LV_STATE_FOCUSED);
-        lv_obj_set_style_border_color(obj, ui_color_accent(), LV_STATE_FOCUSED);
-        lv_obj_set_style_border_opa(obj, LV_OPA_COVER, LV_STATE_FOCUSED);
-        lv_obj_set_style_border_width(obj, 2, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUSED);
-        lv_obj_set_style_translate_x(obj, -1, LV_STATE_FOCUSED);
-        lv_obj_set_style_translate_y(obj, -1, LV_STATE_FOCUSED);
-        lv_obj_set_style_shadow_offset_x(obj, UI_ISO_DEPTH_X + 1, LV_STATE_FOCUSED);
-        lv_obj_set_style_shadow_offset_y(obj, UI_ISO_DEPTH_Y + 1, LV_STATE_FOCUSED);
-        lv_obj_set_style_shadow_color(obj,
-                                      lv_color_darken(ui_color_accent(), LV_OPA_50),
-                                      LV_STATE_FOCUSED);
-
-        lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_FULL, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_color(obj, ui_color_accent(), LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_opa(obj, LV_OPA_COVER, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_width(obj, 2, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_translate_x(obj, -1, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_translate_y(obj, -1, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_shadow_offset_x(obj, UI_ISO_DEPTH_X + 1, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_shadow_offset_y(obj, UI_ISO_DEPTH_Y + 1, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_shadow_color(obj,
-                                      lv_color_darken(ui_color_accent(), LV_OPA_50),
-                                      LV_STATE_FOCUS_KEY);
+        for (lv_style_selector_t sel : kFocusStates) {
+            lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_FULL, sel);
+            lv_obj_set_style_border_color(obj, ui_color_accent(), sel);
+            lv_obj_set_style_border_opa(obj, LV_OPA_COVER, sel);
+            lv_obj_set_style_border_width(obj, 2, sel);
+            lv_obj_set_style_outline_width(obj, 0, sel);
+            lv_obj_set_style_translate_x(obj, -1, sel);
+            lv_obj_set_style_translate_y(obj, -1, sel);
+            lv_obj_set_style_shadow_offset_x(obj, UI_ISO_DEPTH_X + 1, sel);
+            lv_obj_set_style_shadow_offset_y(obj, UI_ISO_DEPTH_Y + 1, sel);
+            lv_obj_set_style_shadow_color(obj,
+                                          lv_color_darken(ui_color_accent(), LV_OPA_50), sel);
+        }
 
         lv_obj_set_style_translate_x(obj, UI_ISO_DEPTH_X, LV_STATE_PRESSED);
         lv_obj_set_style_translate_y(obj, UI_ISO_DEPTH_Y, LV_STATE_PRESSED);
@@ -843,13 +834,11 @@ void ui_block(lv_obj_t *obj, lv_color_t face)
         lv_obj_set_style_shadow_color(obj, lv_color_black(), 0);
         lv_obj_set_style_shadow_opa(obj, LV_OPA_50, 0);
 
-        lv_obj_set_style_border_width(obj, 2, LV_STATE_FOCUSED);
-        lv_obj_set_style_border_color(obj, ui_palette().focus, LV_STATE_FOCUSED);
-        lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUSED);
-
-        lv_obj_set_style_border_width(obj, 2, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_border_color(obj, ui_palette().focus, LV_STATE_FOCUS_KEY);
-        lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUS_KEY);
+        for (lv_style_selector_t sel : kFocusStates) {
+            lv_obj_set_style_border_width(obj, 2, sel);
+            lv_obj_set_style_border_color(obj, ui_palette().focus, sel);
+            lv_obj_set_style_outline_width(obj, 0, sel);
+        }
 
         lv_obj_set_style_translate_x(obj, 1, LV_STATE_PRESSED);
         lv_obj_set_style_translate_y(obj, 1, LV_STATE_PRESSED);
@@ -880,19 +869,14 @@ void ui_block(lv_obj_t *obj, lv_color_t face)
     lv_obj_set_style_shadow_color(obj, lv_color_black(), 0);
     lv_obj_set_style_shadow_opa(obj, LV_OPA_60, 0);
 
-    lv_obj_set_style_border_color(obj, ui_color_accent(), LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_color(obj, ui_color_field(), LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_grad_color(obj, ui_palette().select, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUSED);
-    lv_obj_set_style_translate_y(obj, -1, LV_STATE_FOCUSED);
-    lv_obj_set_style_shadow_offset_y(obj, 4, LV_STATE_FOCUSED);
-
-    lv_obj_set_style_border_color(obj, ui_color_accent(), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_bg_color(obj, ui_color_field(), LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_bg_grad_color(obj, ui_palette().select, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_outline_width(obj, 0, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_translate_y(obj, -1, LV_STATE_FOCUS_KEY);
-    lv_obj_set_style_shadow_offset_y(obj, 4, LV_STATE_FOCUS_KEY);
+    for (lv_style_selector_t sel : kFocusStates) {
+        lv_obj_set_style_border_color(obj, ui_color_accent(), sel);
+        lv_obj_set_style_bg_color(obj, ui_color_field(), sel);
+        lv_obj_set_style_bg_grad_color(obj, ui_palette().select, sel);
+        lv_obj_set_style_outline_width(obj, 0, sel);
+        lv_obj_set_style_translate_y(obj, -1, sel);
+        lv_obj_set_style_shadow_offset_y(obj, 4, sel);
+    }
 
     lv_obj_set_style_translate_y(obj, 2, LV_STATE_PRESSED);
     lv_obj_set_style_shadow_opa(obj, LV_OPA_TRANSP, LV_STATE_PRESSED);
@@ -900,35 +884,40 @@ void ui_block(lv_obj_t *obj, lv_color_t face)
     lv_obj_set_style_bg_grad_color(obj, face, LV_STATE_PRESSED);
 }
 
+// 32x16 diamond lattice (2-across-1-down lines) in `line` over `fill`, and the
+// RGB565 image descriptor that tiles it.
+static void build_lattice(uint16_t (&buf)[32 * 16], lv_image_dsc_t &dsc,
+                          lv_color_t fill, lv_color_t line)
+{
+    for (int i = 0; i < 32 * 16; i++) buf[i] = lv_color_to_u16(fill);
+    for (int x = 0; x < 32; x++) {
+        buf[(x / 2) * 32 + x] = lv_color_to_u16(line);
+        buf[(15 - x / 2) * 32 + x] = lv_color_to_u16(line);
+    }
+    dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+    dsc.header.w = 32;
+    dsc.header.h = 16;
+    dsc.header.stride = 32 * 2;
+    dsc.data_size = sizeof(buf);
+    dsc.data = (const uint8_t *)buf;
+}
+
+// Pixel Iso backdrop grid, built once (Pixel Iso has a single palette).
 static uint16_t s_iso_grid_buf[32 * 16];
-static lv_image_dsc_t s_iso_grid;
+static lv_image_dsc_t s_iso_grid;   // zero-initialised; build_lattice fills it
 static bool s_iso_grid_built = false;
 
 static void build_iso_grid()
 {
     if (s_iso_grid_built) return;
-    // 2-across-1-down lines tile into a diamond lattice at 32x16.
-    for (int i = 0; i < 32 * 16; i++) {
-        s_iso_grid_buf[i] = lv_color_to_u16(ui_color_bg());
-    }
-    for (int x = 0; x < 32; x++) {
-        s_iso_grid_buf[(x / 2) * 32 + x] = lv_color_to_u16(ui_palette().grid);
-        s_iso_grid_buf[(15 - x / 2) * 32 + x] = lv_color_to_u16(ui_palette().grid);
-    }
-    // s_iso_grid is a zero-initialised static; the fields set below define it.
-    s_iso_grid.header.magic = LV_IMAGE_HEADER_MAGIC;
-    s_iso_grid.header.cf = LV_COLOR_FORMAT_RGB565;
-    s_iso_grid.header.w = 32;
-    s_iso_grid.header.h = 16;
-    s_iso_grid.header.stride = 32 * 2;
-    s_iso_grid.data_size = sizeof(s_iso_grid_buf);
-    s_iso_grid.data = (const uint8_t *)s_iso_grid_buf;
+    build_lattice(s_iso_grid_buf, s_iso_grid, ui_color_bg(), ui_palette().grid);
     s_iso_grid_built = true;
 }
 
-// Hotel room floor — same 32x16 diamond lattice as the iso grid, but filled
-// with the Habbo olive and its darker grout line, built lazily on first use
-// and rebuilt when dark mode flips the floor between day and night.
+// Hotel room floor — same lattice as the iso grid, but filled with the Habbo
+// olive and its darker grout line, built lazily on first use and rebuilt when
+// dark mode flips the floor between day and night.
 static uint16_t s_floor_buf[32 * 16];
 static lv_image_dsc_t s_floor;
 static int8_t s_floor_dark = -1;   // dark-mode state the buffer was built for
@@ -937,20 +926,7 @@ static void build_floor_grid()
 {
     int8_t dark = ui_dark_mode_get() ? 1 : 0;
     if (s_floor_dark == dark) return;
-    for (int i = 0; i < 32 * 16; i++) {
-        s_floor_buf[i] = lv_color_to_u16(ui_palette().floor);
-    }
-    for (int x = 0; x < 32; x++) {
-        s_floor_buf[(x / 2) * 32 + x] = lv_color_to_u16(ui_palette().floor_line);
-        s_floor_buf[(15 - x / 2) * 32 + x] = lv_color_to_u16(ui_palette().floor_line);
-    }
-    s_floor.header.magic = LV_IMAGE_HEADER_MAGIC;
-    s_floor.header.cf = LV_COLOR_FORMAT_RGB565;
-    s_floor.header.w = 32;
-    s_floor.header.h = 16;
-    s_floor.header.stride = 32 * 2;
-    s_floor.data_size = sizeof(s_floor_buf);
-    s_floor.data = (const uint8_t *)s_floor_buf;
+    build_lattice(s_floor_buf, s_floor, ui_palette().floor, ui_palette().floor_line);
     // A rebuild rewrites pixels behind an already-used descriptor.
     if (s_floor_dark >= 0) lv_image_cache_drop(&s_floor);
     s_floor_dark = dark;
@@ -977,7 +953,7 @@ void ui_apply_backdrop(lv_obj_t *obj)
 
 // BeOS window tab — the yellow R5 title tab, keylined along its top, left and
 // right edges so the bottom merges into the window below it.
-void ui_beos_tab(lv_obj_t *label)
+static void ui_beos_tab(lv_obj_t *label)
 {
     if (!ui_style_is_beos()) return;
     lv_obj_set_style_bg_color(label, ui_palette().tab, 0);

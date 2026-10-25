@@ -16,10 +16,8 @@ namespace {
 
 struct PickerCtx {
     ui_overlay_t ov        = {};
-    lv_obj_t   *list       = nullptr;
     ui_list_picker_cb cb = nullptr;
     void *ud = nullptr;
-    bool fired = false;
 };
 
 static std::unique_ptr<PickerCtx> g_ctx;
@@ -33,13 +31,11 @@ static void tear_down(int picked_index)
 
     ui_list_picker_cb cb = ctx->cb;
     void *ud = ctx->ud;
-    bool will_fire = !ctx->fired && cb;
-    ctx->fired = true;
 
     ui_overlay_close(&ctx->ov);
     ctx.reset();
 
-    if (will_fire) cb(picked_index, ud);
+    if (cb) cb(picked_index, ud);
 }
 
 static void close_cb(lv_event_t *) { tear_down(-1); }
@@ -79,24 +75,19 @@ void ui_list_picker_open(const char *title,
         lv_obj_set_width(t, lv_pct(100));
     }
 
-    ctx->list = lv_list_create(overlay);
-    lv_obj_set_width(ctx->list, lv_pct(100));
-    lv_obj_set_flex_grow(ctx->list, 1);
-    lv_obj_set_style_radius(ctx->list, UI_RADIUS, 0);
+    lv_obj_t *list = lv_list_create(overlay);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_flex_grow(list, 1);
+    lv_obj_set_style_radius(list, UI_RADIUS, 0);
 
     if (items.empty()) {
-        lv_obj_t *empty = lv_label_create(ctx->list);
-        lv_label_set_text(empty, "(no results)");
-        lv_obj_set_style_text_color(empty, UI_COLOR_MUTED, 0);
-        lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_width(empty, lv_pct(100));
-        lv_obj_set_style_pad_all(empty, 16, 0);
+        ui_list_add_empty_label(list, "(no results)");
         return;
     }
 
     lv_obj_t *first = nullptr;
     for (size_t i = 0; i < items.size(); ++i) {
-        lv_obj_t *btn = lv_list_add_btn(ctx->list, LV_SYMBOL_RIGHT, items[i].c_str());
+        lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_RIGHT, items[i].c_str());
         lv_obj_set_user_data(btn, (void *)(intptr_t)i);
         lv_obj_add_event_cb(btn, item_clicked_cb, LV_EVENT_CLICKED, nullptr);
         lv_group_add_obj(ctx->ov.group, btn);

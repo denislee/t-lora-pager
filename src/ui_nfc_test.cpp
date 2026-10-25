@@ -15,14 +15,12 @@
  */
 #include "ui_define.h"
 #include "hal/peripherals.h"
-#include "core/input_focus.h"
 
 #include <cstdio>
 #include <cstring>
-#include <string>
 
-// Builds without the ST25R3916 reader only show a "no NFC" popup, so the
-// whole self-test machinery is compiled out there.
+// Only reachable from the Connectivity "NFC Test" row, which exists only on
+// builds with the ST25R3916 reader; compiled out everywhere else.
 #if defined(USING_ST25R3916)
 namespace {
 
@@ -31,8 +29,6 @@ struct NfcTestCtx {
     lv_obj_t *state_label  = nullptr;
     lv_obj_t *count_label  = nullptr;
     lv_obj_t *last_label   = nullptr;
-    lv_obj_t *hint_label   = nullptr;
-    lv_obj_t *reset_btn    = nullptr;
     bool prev_nfc_enabled  = false;
 
     /* Counters (updated inside diag_hook; read by poll_cb). int is atomic on
@@ -47,8 +43,6 @@ struct NfcTestCtx {
      * to keep LVGL calls off the callback (which can fire under the NFC
      * state machine). Bounded char[] rather than std::string so we don't
      * allocate inside the hook. */
-    volatile uint32_t last_seq = 0;    /* bumped on every hook invocation */
-    uint32_t rendered_seq = 0;
     int      last_kind = -1;
     char     last_preview[48] = {0};
 
@@ -113,7 +107,6 @@ static void diag_hook(int kind, const char *text, unsigned len)
     }
     ctx->last_kind = kind;
     fill_preview(ctx->last_preview, sizeof(ctx->last_preview), kind, text, len);
-    ctx->last_seq++;
 }
 
 static void render(NfcTestCtx *ctx)
@@ -175,7 +168,6 @@ static void poll_cb(lv_timer_t *t)
     if (!ctx) return;
     /* Redraw unconditionally so the heartbeat/uptime visibly updates even
      * when no tag has been detected. Cheap — labels and a timer tick only. */
-    ctx->rendered_seq = ctx->last_seq;
     render(ctx);
 }
 
@@ -212,18 +204,13 @@ static void reset_event_cb(lv_event_t *e)
     ctx->parsed_other = 0;
     ctx->last_kind = -1;
     ctx->last_preview[0] = '\0';
-    ctx->last_seq++;
     hw_feedback();
 }
 
 } /* namespace */
-#endif /* USING_ST25R3916 */
 
 void ui_nfc_test_open()
 {
-#if !defined(USING_ST25R3916)
-    ui_msg_pop_up("NFC Test", "This build has no NFC hardware.");
-#else
     if (g_ctx) return;
 
     NfcTestCtx *ctx = new NfcTestCtx();
@@ -243,38 +230,27 @@ void ui_nfc_test_open()
     lv_obj_set_style_text_color(title, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_text_font(title, lv_theme_get_font_large(title), 0);
 
-    ctx->state_label = lv_label_create(overlay);
-    lv_label_set_text(ctx->state_label, "");
-    lv_obj_set_style_text_color(ctx->state_label, UI_COLOR_FG, 0);
-    lv_label_set_long_mode(ctx->state_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ctx->state_label, lv_pct(100));
+    // Full-width wrapping label in `color`.
+    auto add_label = [overlay](const char *text, lv_color_t color) {
+        lv_obj_t *l = lv_label_create(overlay);
+        lv_label_set_text(l, text);
+        lv_obj_set_style_text_color(l, color, 0);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(l, lv_pct(100));
+        return l;
+    };
+    ctx->state_label = add_label("", UI_COLOR_FG);
+    ctx->count_label = add_label("", UI_COLOR_FG);
+    ctx->last_label  = add_label("Last: (none)", UI_COLOR_FG);
+    add_label("Tap a tag to the back of the device.\n"
+              "\"Raw\" should bump on any tag; \"Text\"\n"
+              "shows a lilygo+ tag was recognised.", UI_COLOR_MUTED);
 
-    ctx->count_label = lv_label_create(overlay);
-    lv_label_set_text(ctx->count_label, "");
-    lv_obj_set_style_text_color(ctx->count_label, UI_COLOR_FG, 0);
-    lv_label_set_long_mode(ctx->count_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ctx->count_label, lv_pct(100));
-
-    ctx->last_label = lv_label_create(overlay);
-    lv_label_set_text(ctx->last_label, "Last: (none)");
-    lv_obj_set_style_text_color(ctx->last_label, UI_COLOR_FG, 0);
-    lv_label_set_long_mode(ctx->last_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ctx->last_label, lv_pct(100));
-
-    ctx->hint_label = lv_label_create(overlay);
-    lv_label_set_text(ctx->hint_label,
-        "Tap a tag to the back of the device.\n"
-        "\"Raw\" should bump on any tag; \"Text\"\n"
-        "shows a lilygo+ tag was recognised.");
-    lv_obj_set_style_text_color(ctx->hint_label, UI_COLOR_MUTED, 0);
-    lv_label_set_long_mode(ctx->hint_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ctx->hint_label, lv_pct(100));
-
-    ctx->reset_btn = ui_modal_btn_create(overlay, LV_SYMBOL_REFRESH " Reset counters",
-                                         reset_event_cb, nullptr);
-    lv_obj_set_width(ctx->reset_btn, lv_pct(100));
-    lv_group_add_obj(ctx->ov.group, ctx->reset_btn);
-    lv_group_focus_obj(ctx->reset_btn);
+    lv_obj_t *reset_btn = ui_modal_btn_create(overlay, LV_SYMBOL_REFRESH " Reset counters",
+                                              reset_event_cb, nullptr);
+    lv_obj_set_width(reset_btn, lv_pct(100));
+    lv_group_add_obj(ctx->ov.group, reset_btn);
+    lv_group_focus_obj(reset_btn);
 
     /* Install the hook after the labels exist so the first event paints
      * against a real overlay. */
@@ -285,5 +261,5 @@ void ui_nfc_test_open()
     /* 500 ms cadence: fast enough for the heartbeat to feel live, slow
      * enough not to churn the label tree. */
     ctx->poll_timer = lv_timer_create(poll_cb, 500, nullptr);
-#endif
 }
+#endif /* USING_ST25R3916 */

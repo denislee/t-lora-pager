@@ -26,9 +26,7 @@ constexpr Slot SLOTS[] = {
     { "gh", "notesync", "token_enc", "GitHub PAT"        },
 };
 
-/* Pending confirm state. Kept at file scope because the msgbox callback is
- * invoked asynchronously from LVGL and cannot carry heap-owned user_data
- * through create_msgbox's void* reliably on every path. Only one
+/* Pending confirm state, scrubbed on every exit from the dialog. Only one
  * provisioning dialog is ever in flight. */
 struct PendingWrite {
     const Slot *slot = nullptr;
@@ -64,13 +62,10 @@ static const Slot *find_slot(const char *tag, size_t tag_len)
     return nullptr;
 }
 
-static void confirm_event(lv_event_t *e)
+// ui_confirm has already closed the dialog.
+static void confirm_done(bool save, void *)
 {
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t *mbox = lv_obj_get_parent(lv_obj_get_parent(btn));
-    const char *label = lv_label_get_text(lv_obj_get_child(btn, 0));
-
-    if (label && strcmp(label, "Save") == 0 && g_pending.active && g_pending.slot) {
+    if (save && g_pending.active && g_pending.slot) {
         std::string err;
         bool ok = hal::secret_store(g_pending.slot->ns, g_pending.slot->key,
                                     g_pending.value.c_str(), &err);
@@ -80,8 +75,6 @@ static void confirm_event(lv_event_t *e)
         g_pending.active = false;
         const Slot *slot = g_pending.slot;
         g_pending.slot = nullptr;
-
-        destroy_msgbox(mbox);
 
         if (ok) {
             std::string done = std::string(slot->display) + " saved.";
@@ -94,11 +87,10 @@ static void confirm_event(lv_event_t *e)
         return;
     }
 
-    /* Cancel / anything else — wipe pending state and close. */
+    /* Cancel — wipe pending state. */
     hal::secret_scrub(g_pending.value);
     g_pending.active = false;
     g_pending.slot = nullptr;
-    destroy_msgbox(mbox);
 }
 
 static void show_confirm(const Slot *slot, const std::string &value)
@@ -119,9 +111,7 @@ static void show_confirm(const Slot *slot, const std::string &value)
         msg += "\n\nNotes session is locked.\nUnlock before saving.";
     }
 
-    static const char *btns[] = {"Cancel", "Save", ""};
-    create_msgbox(lv_scr_act(), "NFC Provisioning",
-                  msg.c_str(), btns, confirm_event, nullptr);
+    ui_confirm("NFC Provisioning", msg.c_str(), "Cancel", "Save", confirm_done, nullptr);
 }
 
 } /* namespace */

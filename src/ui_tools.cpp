@@ -27,7 +27,6 @@ const char *ui_battery_icon(int percent, bool is_charging)
 void destroy_msgbox(lv_obj_t *msgbox)
 {
     lv_msgbox_close(msgbox);
-    // lv_group_focus_freeze(msg_group, false);
     set_default_group(prev_group);
 }
 
@@ -156,14 +155,15 @@ struct ConfirmCtx {
     ui_confirm_cb cb;
     void *ud;
     lv_obj_t *msgbox;
+    bool yes_first;   // footer order: {yes, no} or {no, yes}
 };
 } // namespace
 
 static void confirm_btn_cb(lv_event_t *e)
 {
     ConfirmCtx *ctx = (ConfirmCtx *)lv_event_get_user_data(e);
-    // Footer buttons are added in {"Yes", "No"} order.
-    bool yes = lv_obj_get_index((lv_obj_t *)lv_event_get_target(e)) == 0;
+    bool first = lv_obj_get_index((lv_obj_t *)lv_event_get_target(e)) == 0;
+    bool yes = first == ctx->yes_first;
     ConfirmCtx c = *ctx;
     delete ctx;
     destroy_msgbox(c.msgbox);
@@ -173,7 +173,15 @@ static void confirm_btn_cb(lv_event_t *e)
 void ui_confirm(const char *title, const char *msg, ui_confirm_cb cb, void *ud)
 {
     static const char *btns[] = {"Yes", "No", ""};
-    ConfirmCtx *ctx = new ConfirmCtx{cb, ud, NULL};
+    ConfirmCtx *ctx = new ConfirmCtx{cb, ud, NULL, true};
+    ctx->msgbox = create_msgbox(NULL, title, msg, btns, confirm_btn_cb, ctx);
+}
+
+void ui_confirm(const char *title, const char *msg, const char *no_txt,
+                const char *yes_txt, ui_confirm_cb cb, void *ud)
+{
+    const char *btns[] = {no_txt, yes_txt, ""};   // create_msgbox copies the labels
+    ConfirmCtx *ctx = new ConfirmCtx{cb, ud, NULL, false};
     ctx->msgbox = create_msgbox(NULL, title, msg, btns, confirm_btn_cb, ctx);
 }
 
@@ -594,6 +602,17 @@ bool ui_scroll_key_clamped(lv_obj_t *obj, uint32_t key, int32_t step,
         return true;
     }
     return false;
+}
+
+lv_obj_t *ui_list_add_empty_label(lv_obj_t *list, const char *text)
+{
+    lv_obj_t *empty = lv_label_create(list);
+    lv_label_set_text(empty, text);
+    lv_obj_set_style_text_color(empty, UI_COLOR_MUTED, 0);
+    lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(empty, LV_PCT(100));
+    lv_obj_set_style_pad_all(empty, 16, 0);
+    return empty;
 }
 
 lv_obj_t *ui_list_add_meta_row(lv_obj_t *list, const char *icon, const char *text,
@@ -1026,12 +1045,36 @@ static const lv_font_t *pick_font(uint8_t idx, uint8_t size)
     }
 }
 
-const lv_font_t *get_editor_font()
+// Inter + emoji fallback ladder (Telegram, font index 4).
+static const lv_font_t *inter_emoji_for(uint8_t size)
 {
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.editor_font_index, settings.editor_font_size);
+    init_inter_emoji_fonts();
+    if (size <= 14) return &s_inter_emoji_14;
+    if (size <= 16) return &s_inter_emoji_16;
+    if (size <= 18) return &s_inter_emoji_18;
+    return &s_inter_emoji_20;
 }
+
+// Per-context font getter: get_<ctx>_font() picks the face and size stored in
+// user_setting_params_t::<ctx>_font_index / <ctx>_font_size.
+#define SETTINGS_FONT_GETTER(ctx)                                        \
+    const lv_font_t *get_##ctx##_font()                                  \
+    {                                                                    \
+        user_setting_params_t settings;                                  \
+        hw_get_user_setting(settings);                                   \
+        return pick_font(settings.ctx##_font_index, settings.ctx##_font_size); \
+    }
+
+SETTINGS_FONT_GETTER(editor)
+SETTINGS_FONT_GETTER(journal)
+SETTINGS_FONT_GETTER(header)
+SETTINGS_FONT_GETTER(home)
+SETTINGS_FONT_GETTER(system)
+SETTINGS_FONT_GETTER(weather)
+SETTINGS_FONT_GETTER(ssh)
+SETTINGS_FONT_GETTER(chat)
+
+#undef SETTINGS_FONT_GETTER
 
 const lv_font_t *get_small_font()
 {
@@ -1052,68 +1095,12 @@ const lv_font_t *get_small_font()
     return pick_font(idx, size);
 }
 
-const lv_font_t *get_journal_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.journal_font_index, settings.journal_font_size);
-}
-
-const lv_font_t *get_header_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.header_font_index, settings.header_font_size);
-}
-
-const lv_font_t *get_home_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.home_font_index, settings.home_font_size);
-}
-
-const lv_font_t *get_system_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.system_font_index, settings.system_font_size);
-}
-
-const lv_font_t *get_weather_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.weather_font_index, settings.weather_font_size);
-}
-
 const lv_font_t *get_telegram_font()
 {
     user_setting_params_t settings;
     hw_get_user_setting(settings);
-    if (settings.telegram_font_index == 4) {
-        init_inter_emoji_fonts();
-        uint8_t size = settings.telegram_font_size;
-        if (size <= 14) return &s_inter_emoji_14;
-        if (size <= 16) return &s_inter_emoji_16;
-        if (size <= 18) return &s_inter_emoji_18;
-        return &s_inter_emoji_20;
-    }
+    if (settings.telegram_font_index == 4) return inter_emoji_for(settings.telegram_font_size);
     return pick_font(settings.telegram_font_index, settings.telegram_font_size);
-}
-
-const lv_font_t *get_ssh_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.ssh_font_index, settings.ssh_font_size);
-}
-
-const lv_font_t *get_chat_font()
-{
-    user_setting_params_t settings;
-    hw_get_user_setting(settings);
-    return pick_font(settings.chat_font_index, settings.chat_font_size);
 }
 
 const lv_font_t *get_telegram_list_font()
@@ -1123,12 +1110,6 @@ const lv_font_t *get_telegram_list_font()
     // Chat list items render with a noticeably larger font than the body
     // text — the list is the main nav, names need to be thumb-legible.
     uint8_t size = settings.telegram_font_size + 6;
-    if (settings.telegram_font_index == 4) {
-        init_inter_emoji_fonts();
-        if (size <= 14) return &s_inter_emoji_14;
-        if (size <= 16) return &s_inter_emoji_16;
-        if (size <= 18) return &s_inter_emoji_18;
-        return &s_inter_emoji_20;
-    }
+    if (settings.telegram_font_index == 4) return inter_emoji_for(size);
     return pick_font(settings.telegram_font_index, size);
 }
