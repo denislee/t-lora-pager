@@ -243,25 +243,22 @@ static void build_device_probe(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_pad_all(sub_page, 4, 0);
     lv_obj_set_style_pad_row(sub_page, 0, 0);
 
-    uint8_t devices = hw_get_devices_nums();
+    uint16_t count = 0;
+    const hw_device_t *devices = hw_get_devices(count);
     uint32_t devices_mask = hw_get_device_online();
-    for (int i = 0; i < devices; ++i) {
-        const char *device_name = hw_get_devices_name(i);
-        if (lv_strcmp(device_name, "") != 0) {
-            bool online = (devices_mask & 0x01);
+    for (uint16_t i = 0; i < count; ++i) {
+        bool online = (devices_mask & devices[i].online_bit) != 0;
 
-            lv_obj_t *status = settings_kv_row(sub_page, device_name,
-                                               online ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE, 5);
-            lv_obj_set_style_text_color(status,
-                lv_palette_main(online ? LV_PALETTE_GREEN : LV_PALETTE_RED), 0);
-            // Here the key (device name) is the primary text: full colour,
-            // truncated rather than the one-glyph status.
-            lv_obj_t *name = lv_obj_get_child(lv_obj_get_parent(status), 0);
-            lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
-            lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-            lv_obj_set_style_max_width(name, LV_PCT(65), 0);
-        }
-        devices_mask >>= 1;
+        lv_obj_t *status = settings_kv_row(sub_page, devices[i].name,
+                                           online ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE, 5);
+        lv_obj_set_style_text_color(status,
+            lv_palette_main(online ? LV_PALETTE_GREEN : LV_PALETTE_RED), 0);
+        // Here the key (device name) is the primary text: full colour,
+        // truncated rather than the one-glyph status.
+        lv_obj_t *name = lv_obj_get_child(lv_obj_get_parent(status), 0);
+        lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_max_width(name, LV_PCT(65), 0);
     }
 }
 

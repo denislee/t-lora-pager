@@ -231,95 +231,46 @@ device_const_var_t dev_conts_var = {
 };
 
 
-static const char *hw_devices[] = {
-    USING_RADIO_NAME,
-
+// Settings › Device probe rows: each device's HW_*_ONLINE bit and label, in
+// bit order. Only devices this build can have are listed (DC2.4.25). No GPS
+// row: setup() always passes NO_HW_GPS, so HW_GPS_ONLINE is never set — the
+// GPS rail is powered on demand by the time sync (DC2.0.7b).
+static const hw_device_t hw_devices[] = {
+    { HW_RADIO_ONLINE,    USING_RADIO_NAME },
 #ifdef USING_INPUT_DEV_TOUCHPAD
-    "Touch Panel",
-#else
-    "",
+    { HW_TOUCH_ONLINE,    "Touch Panel" },
 #endif
-    "Haptic Drive",
-    "Power management",
-    "Real-time clock",
-    "PSRAM",
-    "GPS",
+    { HW_DRV_ONLINE,      "Haptic Drive" },
+    { HW_PMU_ONLINE,      "Power management" },
+    { HW_RTC_ONLINE,      "Real-time clock" },
+    { HW_PSRAM_ONLINE,    "PSRAM" },
 #ifdef HAS_SD_CARD_SOCKET
-    "SD card",
-#else
-    "",
+    { HW_SD_ONLINE,       "SD card" },
 #endif
 #ifdef USING_ST25R3916
-    "NFC",
-#else
-    "",
+    { HW_NFC_ONLINE,      "NFC" },
 #endif
-
 #ifdef USING_BHI260_SENSOR
-    "BHI260AP 6-Axis Sensor",
-#else
-    "",
+    { HW_BHI260AP_ONLINE, "BHI260AP 6-Axis Sensor" },
 #endif
 #ifdef USING_INPUT_DEV_KEYBOARD
-    "Keyboard",
-#else
-    "",
+    { HW_KEYBOARD_ONLINE, "Keyboard" },
 #endif
-
 #ifdef USING_BQ_GAUGE
-    "Gauge",
-#else
-    "",
+    { HW_GAUGE_ONLINE,    "Gauge" },
 #endif
-
 #ifdef USING_XL9555_EXPANDS
-    "Expands Control",
-#else
-    "",
+    { HW_EXPAND_ONLINE,   "Expands Control" },
 #endif
-
 #ifdef USING_AUDIO_CODEC
-    "Audio codec",
-#else
-    "",
+    { HW_CODEC_ONLINE,    "Audio codec" },
 #endif
-
 #ifdef USING_EXTERN_NRF2401
-    "NRF2401 Sub 1G",
-#else
-    "",
+    { HW_NRF24_ONLINE,    "nRF24L01 2.4 GHz" },
 #endif
-
-#ifdef USING_SI473X_RADIO
-    "SI4735 Radio",
-#else
-    "",
-#endif
-
-#ifdef USING_BME280
-    "BME280 Pressure & Temperature",
-#else
-    "",
-#endif
-
-#ifdef USING_MAG_QMC5883
-    "QMC5883P Magnetometer",
-#else
-    "",
-#endif
-
 #ifdef USING_BMA423_SENSOR
-    "BMA423 Accelerometer",
-#else
-    "",
+    { HW_BMA423_ONLINE,   "BMA423 Accelerometer" },
 #endif
-
-#ifdef USING_QMI8658_SENSOR
-    "QMI8658 6-Axis Sensor",
-#else
-    "",
-#endif
-
 };
 
 
@@ -604,17 +555,10 @@ void hw_set_haptic_enable(bool en) {
 #endif
 }
 
-uint16_t hw_get_devices_nums()
+const hw_device_t *hw_get_devices(uint16_t &count)
 {
-    return sizeof(hw_devices) / sizeof(hw_devices[0]);
-}
-
-const char *hw_get_devices_name(int index)
-{
-    if (index >= hw_get_devices_nums()) {
-        return "NULL";
-    }
-    return hw_devices[index];
+    count = sizeof(hw_devices) / sizeof(hw_devices[0]);
+    return hw_devices;
 }
 
 bool hw_get_mac(uint8_t *mac)

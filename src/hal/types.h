@@ -84,11 +84,7 @@ typedef enum {
 #define HW_EXPAND_ONLINE            (_BV(12))
 #define HW_CODEC_ONLINE             (_BV(13))
 #define HW_NRF24_ONLINE             (_BV(14))
-#define HW_SI473X_ONLINE            (_BV(15))
-#define HW_BME280_ONLINE            (_BV(16))
-#define HW_QMC5883P_ONLINE          (_BV(17))
 #define HW_BMA423_ONLINE            (_BV(18))
-#define HW_QMI8658_ONLINE           (_BV(19))
 
 #else
 #include <WiFi.h>
@@ -172,6 +168,12 @@ typedef struct {
 typedef struct {
     const char *filename;
 } audio_params_t;
+
+// One Settings device-probe row (hw_get_devices()).
+typedef struct {
+    uint32_t    online_bit;  // HW_*_ONLINE
+    const char *name;
+} hw_device_t;
 
 typedef struct {
     float roll;

@@ -12,8 +12,10 @@ void hw_init();
 // bring-up (~0.5–1 s when enabled) doesn't block the first rendered frame.
 void hw_connectivity_init();
 
-uint16_t hw_get_devices_nums();
-const char *hw_get_devices_name(int index);
+// The devices this build can have, for the Settings device-probe page.
+// `count` receives the number of entries; test each one's online_bit
+// against hw_get_device_online().
+const hw_device_t *hw_get_devices(uint16_t &count);
 bool hw_get_mac(uint8_t *mac);
 uint32_t hw_get_device_online();
 const char *hw_get_firmware_hash_string();

@@ -46,9 +46,6 @@
 #ifndef USING_ST25R3916
 #define USING_ST25R3916
 #endif
-#ifndef HAS_USB_RF_SWITCH
-#define HAS_USB_RF_SWITCH
-#endif
 
 #define MAIN_FONT   &lv_font_montserrat_22
 
