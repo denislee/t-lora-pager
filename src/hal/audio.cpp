@@ -167,13 +167,9 @@ static void playerTask(void *args)
         if (xQueueReceive(playerQueue, &params, portMAX_DELAY) != pdPASS) {
             continue;
         }
-        if (params.event == APP_EVENT_PLAY) {
-            log_d("Event: filename:%s", params.filename);
-            hw_sd_play(params.filename);
-        }
+        log_d("Play: filename:%s", params.filename);
+        hw_sd_play(params.filename);
     }
-    playerTaskHandler = NULL;
-    vTaskDelete(NULL);
 }
 #endif // ARDUINO
 
@@ -522,7 +518,6 @@ void hw_set_sd_music_play(const char *filename)
     log_d("hw_set_sd_music_play: %s", filename);
 #ifdef ARDUINO
     audio_params_t params = {
-        .event = APP_EVENT_PLAY,
         .filename = filename,
     };
     xEventGroupClearBits(playerEvent, PLAYER_PLAY | PLAYER_END | PLAYER_STOPPED);
@@ -557,6 +552,7 @@ bool hw_player_running()
 {
 #ifdef ARDUINO
     return xEventGroupGetBits(playerEvent) & PLAYER_RUNNING;
+#else
+    return false;  // DC2.0.7a: the emulator never plays anything
 #endif
-    return true;
 }

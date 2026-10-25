@@ -13,7 +13,6 @@
 #include <esp_sntp.h>
 #include "hal_interface.h"
 #include "hal/notes_crypto.h"
-#include "event_define.h"
 #include "core/system_hooks.h"
 #include "core/input_focus.h"
 #include "core/kb_lock.h"

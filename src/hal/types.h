@@ -12,7 +12,6 @@
 #include <time.h>
 #include <string>
 #include <vector>
-#include "../event_define.h"
 
 typedef enum {
     MEDIA_VOLUME_UP,
@@ -171,7 +170,6 @@ typedef struct {
 } user_setting_params_t;
 
 typedef struct {
-    enum app_event event;
     const char *filename;
 } audio_params_t;
 
