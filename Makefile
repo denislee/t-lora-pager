@@ -1,4 +1,5 @@
-PIO ?= $(HOME)/.platformio/penv/bin/pio
+# Prefer the PlatformIO installer's venv; fall back to a system/pipx `pio` on PATH.
+PIO ?= $(firstword $(wildcard $(HOME)/.platformio/penv/bin/pio) $(shell command -v pio 2>/dev/null))
 ENV ?= tlora_pager
 PORT ?=
 
@@ -69,4 +70,4 @@ help:
 	@echo "Variables:"
 	@echo "  ENV=<env>           - PlatformIO env (default: tlora_pager)"
 	@echo "  PORT=/dev/ttyACM0   - override serial port"
-	@echo "  PIO=<path>          - override pio binary (default: ~/.platformio/penv/bin/pio)"
+	@echo "  PIO=<path>          - override pio binary (default: ~/.platformio/penv/bin/pio, else pio on PATH)"
