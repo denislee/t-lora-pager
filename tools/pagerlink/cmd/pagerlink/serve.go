@@ -45,6 +45,14 @@ type mockPhone struct {
 	job     int
 	audio   map[uint16]*audioXfer // chat.audio.begin xfer -> in-flight upload
 	replies map[string]json.RawMessage
+
+	tg *tgBridge // the stub tg-bridge behind tg.* (tgbridge.go)
+}
+
+// newMockPhone returns a mock phone on c with an empty upload table and a
+// freshly seeded Telegram stub. Nothing is registered until register().
+func newMockPhone(c *pagerlink.Client) *mockPhone {
+	return &mockPhone{c: c, audio: make(map[uint16]*audioXfer), tg: newTgBridge()}
 }
 
 // noteFile is one entry of a notes.sync manifest. Vol is the volume to read
@@ -66,7 +74,8 @@ func cmdServe(c *pagerlink.Client, addr string, timeout time.Duration, args []st
 		return 2
 	}
 
-	srv := &mockPhone{c: c, notesOut: *notesOut, audio: make(map[uint16]*audioXfer)}
+	srv := newMockPhone(c)
+	srv.notesOut = *notesOut
 	if *responses != "" {
 		if err := srv.loadResponses(*responses); err != nil {
 			fmt.Fprintf(os.Stderr, "pagerlink serve: %v\n", err)
@@ -99,15 +108,7 @@ func (s *mockPhone) register() {
 	s.handle("loc.get", func(json.RawMessage) (any, *pagerlink.RPCError) {
 		return json.RawMessage(`{"lat":-23.55,"lon":-46.63,"acc_m":30,"city":"Sao Paulo"}`), nil
 	})
-	s.handle("weather.get", func(params json.RawMessage) (any, *pagerlink.RPCError) {
-		var p struct {
-			Key string `json:"key"`
-		}
-		if err := json.Unmarshal(params, &p); err != nil || p.Key == "" {
-			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "key required"}
-		}
-		return mockForecast(p.Key, time.Now()), nil
-	})
+	s.handle("weather.get", weatherGet(time.Now))
 	s.handle("chat.ask", s.chatAsk)
 	s.handle("chat.audio.begin", s.chatAudioBegin)
 	s.handle("notes.sync", s.notesSync)
@@ -118,10 +119,23 @@ func (s *mockPhone) register() {
 	s.handle("tg.send", s.tgSend)
 
 	for method, result := range s.replies {
-		m, r := method, result
-		s.handle(m, func(json.RawMessage) (any, *pagerlink.RPCError) {
-			return r, nil
+		s.handle(method, func(json.RawMessage) (any, *pagerlink.RPCError) {
+			return result, nil
 		})
+	}
+}
+
+// weatherGet is the phone-side weather.get handler: it requires a non-empty key
+// and answers with the in-range mock forecast for it, timestamped now().
+func weatherGet(now func() time.Time) pagerlink.Handler {
+	return func(params json.RawMessage) (any, *pagerlink.RPCError) {
+		var p struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(params, &p); err != nil || p.Key == "" {
+			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "key required"}
+		}
+		return mockForecast(p.Key, now()), nil
 	}
 }
 

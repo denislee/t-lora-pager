@@ -22,20 +22,7 @@ import (
 func weatherPushSteps(c *pagerlink.Client, timeout time.Duration) bool {
 	pass := true
 	const key = "smoke-wx"
-
-	// readCache fetches the forecast the pager stored under key and decodes it
-	// back into a forecastPayload.
-	readCache := func() (forecastPayload, error) {
-		var got forecastPayload
-		res, err := c.Call("test.weather.cache", map[string]any{"key": key}, timeout)
-		if err != nil {
-			return got, err
-		}
-		if err := json.Unmarshal(res, &got); err != nil {
-			return got, err
-		}
-		return got, nil
-	}
+	readCache := func() (forecastPayload, error) { return readWeatherCache(c, timeout, key) }
 
 	// r. A valid push must be stored, and the read-back must match it exactly:
 	//    same key, timestamp, hourly cells and daily cells.
@@ -99,71 +86,25 @@ func weatherPushSteps(c *pagerlink.Client, timeout time.Duration) bool {
 func weatherGetSteps(c *pagerlink.Client, timeout time.Duration) bool {
 	pass := true
 	const key = "smoke-wx-get"
-
-	// readCache fetches the forecast the pager stored under key and decodes it
-	// back into a forecastPayload.
-	readCache := func() (forecastPayload, error) {
-		var got forecastPayload
-		res, err := c.Call("test.weather.cache", map[string]any{"key": key}, timeout)
-		if err != nil {
-			return got, err
-		}
-		if err := json.Unmarshal(res, &got); err != nil {
-			return got, err
-		}
-		return got, nil
-	}
+	readCache := func() (forecastPayload, error) { return readWeatherCache(c, timeout, key) }
 
 	// fetch drives one test.weather.fetch step and returns the evt.test.result
-	// the pager emits, waiting up to 20 s for it. ok is false when the call
-	// itself fails or no result arrives.
+	// the pager emits, waiting up to 20 s for it.
 	fetch := func() (testResult, bool) {
-		if _, err := c.Call("test.weather.fetch", map[string]any{"key": key}, timeout); err != nil {
-			fmt.Printf("       test.weather.fetch: %v\n", err)
-			return testResult{}, false
-		}
-		n, ok := waitResult(c, 20*time.Second)
-		if !ok {
-			fmt.Printf("       no evt.test.result within 20s\n")
-			return testResult{}, false
-		}
-		var r testResult
-		if err := json.Unmarshal(n.Params, &r); err != nil {
-			fmt.Printf("       evt.test.result params %q: %v\n", n.Params, err)
-			return testResult{}, false
-		}
-		return r, true
+		return testStep(c, timeout, "test.weather.fetch", map[string]any{"key": key}, 20*time.Second)
 	}
 
-	// now is the timestamp the standard handler builds its forecast with; it is
-	// reset to time.Now() when the handler is restored at the end.
+	// The standard phone-side handler, pinned to one timestamp so the cached
+	// copy can be compared with mockForecast(key, now).
 	now := time.Now()
-
-	// getHandler is the phone-side weather.get handler the pager's phone step
-	// calls: it requires a non-empty key and answers with an in-range forecast
-	// for it, built at now.
-	getHandler := func(params json.RawMessage) (any, *pagerlink.RPCError) {
-		var p struct {
-			Key string `json:"key"`
-		}
-		if err := json.Unmarshal(params, &p); err != nil {
-			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: err.Error()}
-		}
-		if p.Key == "" {
-			return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "key required"}
-		}
-		return mockForecast(p.Key, now), nil
-	}
 
 	// t. A valid get must answer with a full 8h/7d forecast for a Sao Paulo
 	//    location, and the pager must cache it byte-for-byte.
-	c.Handle("weather.get", getHandler)
+	c.Handle("weather.get", weatherGet(func() time.Time { return now }))
 	r, ok := fetch()
 	want := mockForecast(key, now)
 	var got forecastPayload
-	if ok && !(r.Step == "weather" && r.OK && r.HourlyCount == 8 && r.DailyCount == 7 && r.City == "Sao Paulo") {
-		ok = false
-	}
+	ok = ok && r.Step == "weather" && r.OK && r.HourlyCount == 8 && r.DailyCount == 7 && r.City == "Sao Paulo"
 	if ok {
 		var err error
 		got, err = readCache()
@@ -176,10 +117,9 @@ func weatherGetSteps(c *pagerlink.Client, timeout time.Duration) bool {
 		}
 	}
 	if !ok {
-		fmt.Printf("       evt.test.result %+v\n", r)
 		fmt.Printf("       got  %+v\n", got)
 	}
-	pass = report(ok, "pager->phone weather.get (phone step): 8h/7d, city Sao Paulo, cached") && pass
+	pass = check(r, ok, true, "pager->phone weather.get (phone step): 8h/7d, city Sao Paulo, cached") && pass
 	before := got
 
 	// u. A reply for another key must be refused, and the cached copy must be
@@ -190,9 +130,7 @@ func weatherGetSteps(c *pagerlink.Client, timeout time.Duration) bool {
 		return other, nil
 	})
 	r, ok = fetch()
-	if ok && !(r.Step == "weather" && !r.OK) {
-		ok = false
-	}
+	ok = ok && r.Step == "weather" && !r.OK
 	var after forecastPayload
 	if ok {
 		var err error
@@ -206,14 +144,24 @@ func weatherGetSteps(c *pagerlink.Client, timeout time.Duration) bool {
 		}
 	}
 	if !ok {
-		fmt.Printf("       evt.test.result %+v\n", r)
 		fmt.Printf("       after %+v\n", after)
 	}
-	pass = report(ok, "pager->phone weather.get reply for another key -> refused, cache unchanged") && pass
+	pass = check(r, ok, true, "pager->phone weather.get reply for another key -> refused, cache unchanged") && pass
 
 	// Restore the standard handler for the rest of the smoke test.
-	now = time.Now()
-	c.Handle("weather.get", getHandler)
+	c.Handle("weather.get", weatherGet(time.Now))
 
 	return pass
+}
+
+// readWeatherCache fetches the forecast the pager stored under key through the
+// emulator-only test.weather.cache hook and decodes it into a forecastPayload.
+func readWeatherCache(c *pagerlink.Client, timeout time.Duration, key string) (forecastPayload, error) {
+	var got forecastPayload
+	res, err := c.Call("test.weather.cache", map[string]any{"key": key}, timeout)
+	if err != nil {
+		return got, err
+	}
+	err = json.Unmarshal(res, &got)
+	return got, err
 }

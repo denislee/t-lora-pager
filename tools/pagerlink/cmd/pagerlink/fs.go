@@ -14,6 +14,7 @@ import (
 	"hash/crc32"
 	"math/rand"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -98,24 +99,6 @@ func rpcCode(err error) string {
 		return re.Code
 	}
 	return ""
-}
-
-func containsName(names []string, want string) bool {
-	for _, n := range names {
-		if n == want {
-			return true
-		}
-	}
-	return false
-}
-
-func hasSuffixName(names []string, suffix string) bool {
-	for _, n := range names {
-		if strings.HasSuffix(n, suffix) {
-			return true
-		}
-	}
-	return false
 }
 
 // cmdLS lists a directory, one entry per line: "d name" for a directory and
@@ -280,7 +263,8 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 	if lerr != nil {
 		fmt.Printf("       fs.list: %v\n", lerr)
 	}
-	ok := lerr == nil && containsName(names, "big.bin") && !hasSuffixName(names, ".part")
+	isPart := func(n string) bool { return strings.HasSuffix(n, ".part") }
+	ok := lerr == nil && slices.Contains(names, "big.bin") && !slices.ContainsFunc(names, isPart)
 	pass = report(ok, "fs.list shows big.bin and no .part") && pass
 
 	// e. A second write without overwrite must be refused.
@@ -310,7 +294,8 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 		"fs.write bad CRC -> invalid_argument, no .part") && pass
 
 	// i. The pager announces filesystem changes on evt.fs.changed.
-	pass = report(smokeEvent(c, 3*time.Second), "evt.fs.changed received") && pass
+	_, ok = waitEvent(c, "evt.fs.changed", 3*time.Second)
+	pass = report(ok, "evt.fs.changed received") && pass
 
 	// j. A dropped upload must leave neither the file nor a .part behind. This
 	// closes the link and reconnects, so c may change.
@@ -342,7 +327,7 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 		case lerr != nil:
 			fmt.Printf("       fs.list: %v\n", lerr)
 			jerr = lerr
-		case containsName(names, "drop.bin") || containsName(names, "drop.bin.part"):
+		case slices.Contains(names, "drop.bin") || slices.Contains(names, "drop.bin.part"):
 			jerr = errors.New("drop.bin or drop.bin.part still listed")
 		}
 	}
@@ -420,26 +405,11 @@ func smokeBadCRC(c *pagerlink.Client, timeout time.Duration, dir string) bool {
 		fmt.Printf("       fs.list: %v\n", err)
 		return false
 	}
-	if containsName(names, "bad.bin.part") {
+	if slices.Contains(names, "bad.bin.part") {
 		fmt.Printf("       fs.list still shows bad.bin.part\n")
 		return false
 	}
 	return true
-}
-
-// smokeEvent waits up to within for an evt.fs.changed notification.
-func smokeEvent(c *pagerlink.Client, within time.Duration) bool {
-	deadline := time.After(within)
-	for {
-		select {
-		case n := <-c.Events():
-			if n.Name == "evt.fs.changed" {
-				return true
-			}
-		case <-deadline:
-			return false
-		}
-	}
 }
 
 // redial retries Dial until it succeeds or within elapses. The emulator serves

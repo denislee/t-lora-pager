@@ -13,9 +13,7 @@
 // the pager offered (PROTOCOL.md §4), the same mechanism fs.read uses; a body
 // that big with no xfer is refused.
 //
-// Bridge state lives in a package-level registry keyed by *mockPhone rather
-// than on the mockPhone struct, so serve.go remains untouched beyond the four
-// registration lines.
+// Bridge state lives on the mockPhone (its tg field, seeded by newMockPhone).
 package main
 
 import (
@@ -39,13 +37,14 @@ type tgMedia struct {
 	H    int    `json:"h"`
 }
 
-// tgMsg is one message. Media is nil for a plain text message.
+// tgMsg is one message, and also the trimmed record tg.messages returns. Media
+// is nil for a plain text message and then omitted from the wire entirely.
 type tgMsg struct {
-	ID    int
-	Text  string
-	From  string
-	Out   bool
-	Media *tgMedia
+	ID    int      `json:"id"`
+	Text  string   `json:"text"`
+	From  string   `json:"from"`
+	Out   bool     `json:"out"`
+	Media *tgMedia `json:"media,omitempty"`
 }
 
 // tgChat is one chat. Msgs are oldest first, matching the bridge's store; the
@@ -58,6 +57,17 @@ type tgChat struct {
 	LastRead int
 }
 
+// newest returns the chat's newest `limit` messages, newest first: the slice
+// tg.messages answers with.
+func (c *tgChat) newest(limit int) []tgMsg {
+	n := min(max(limit, 0), len(c.Msgs))
+	out := make([]tgMsg, 0, n)
+	for i := len(c.Msgs) - 1; i >= len(c.Msgs)-n; i-- {
+		out = append(out, c.Msgs[i])
+	}
+	return out
+}
+
 // tgBridge is the per-phone stub store. bulk counts replies that were streamed
 // as DATA instead of answered inline, for the smoke test to observe.
 type tgBridge struct {
@@ -65,16 +75,6 @@ type tgBridge struct {
 	chats  []*tgChat
 	nextID int
 	bulk   int // replies sent as DATA
-}
-
-// tgBridges maps each mockPhone to its stub bridge. Keeping this off the
-// mockPhone struct leaves serve.go's type unchanged.
-var tgBridges sync.Map // map[*mockPhone]*tgBridge
-
-// bridge returns s's stub bridge, creating the seeded store on first use.
-func (s *mockPhone) bridge() *tgBridge {
-	v, _ := tgBridges.LoadOrStore(s, newTgBridge())
-	return v.(*tgBridge)
 }
 
 // newTgBridge seeds the stub: Alice (2 unread, a text / photo / text history),
@@ -181,6 +181,23 @@ func tgXfer(m map[string]any) (uint16, *pagerlink.RPCError) {
 	return uint16(v), nil
 }
 
+// tgLimitXfer reads the paged-reply fields tg.chats and tg.messages share: a
+// required limit in 1..100 and the optional bulk-reply xfer.
+func tgLimitXfer(m map[string]any) (int, uint16, *pagerlink.RPCError) {
+	limit, perr := tgInt(m, "limit")
+	if perr != nil {
+		return 0, 0, perr
+	}
+	if limit < 1 || limit > 100 {
+		return 0, 0, &pagerlink.RPCError{Code: "invalid_argument", Msg: "limit must be 1..100"}
+	}
+	xfer, perr := tgXfer(m)
+	if perr != nil {
+		return 0, 0, perr
+	}
+	return int(limit), xfer, nil
+}
+
 // find returns the chat with id. The caller must hold b.mu. A missing chat is
 // the bridge's 404, surfaced as http_error with the decimal status as its msg.
 func (b *tgBridge) find(id int64) (*tgChat, *pagerlink.RPCError) {
@@ -199,16 +216,6 @@ type tgChatOut struct {
 	Unread int    `json:"unread"`
 }
 
-// tgMsgOut is the trimmed message record tg.messages returns. Media is omitted
-// entirely for text messages.
-type tgMsgOut struct {
-	ID    int      `json:"id"`
-	Text  string   `json:"text"`
-	From  string   `json:"from"`
-	Out   bool     `json:"out"`
-	Media *tgMedia `json:"media,omitempty"`
-}
-
 // tgChats answers tg.chats: the first `limit` chats as a JSON array of
 // {id,title,unread}.
 func (s *mockPhone) tgChats(params json.RawMessage) (any, *pagerlink.RPCError) {
@@ -216,24 +223,14 @@ func (s *mockPhone) tgChats(params json.RawMessage) (any, *pagerlink.RPCError) {
 	if perr != nil {
 		return nil, perr
 	}
-	limit, perr := tgInt(m, "limit")
-	if perr != nil {
-		return nil, perr
-	}
-	if limit < 1 || limit > 100 {
-		return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "limit must be 1..100"}
-	}
-	xfer, perr := tgXfer(m)
+	limit, xfer, perr := tgLimitXfer(m)
 	if perr != nil {
 		return nil, perr
 	}
 
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
-	n := int(limit)
-	if n > len(b.chats) {
-		n = len(b.chats)
-	}
+	n := min(limit, len(b.chats))
 	out := make([]tgChatOut, 0, n)
 	for _, c := range b.chats[:n] {
 		out = append(out, tgChatOut{ID: c.ID, Title: c.Title, Unread: c.Unread})
@@ -253,39 +250,23 @@ func (s *mockPhone) tgMessages(params json.RawMessage) (any, *pagerlink.RPCError
 	if perr != nil {
 		return nil, perr
 	}
-	limit, perr := tgInt(m, "limit")
+	limit, xfer, perr := tgLimitXfer(m)
 	if perr != nil {
 		return nil, perr
-	}
-	if limit < 1 || limit > 100 {
-		return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "limit must be 1..100"}
 	}
 	chatID, perr := tgInt(m, "chat_id")
 	if perr != nil {
 		return nil, perr
 	}
-	xfer, perr := tgXfer(m)
-	if perr != nil {
-		return nil, perr
-	}
 
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
 	chat, perr := b.find(chatID)
 	if perr != nil {
 		b.mu.Unlock()
 		return nil, perr
 	}
-	n := int(limit)
-	if n > len(chat.Msgs) {
-		n = len(chat.Msgs)
-	}
-	out := make([]tgMsgOut, 0, n)
-	for i := len(chat.Msgs) - 1; i >= len(chat.Msgs)-n && i >= 0; i-- {
-		msg := chat.Msgs[i]
-		out = append(out, tgMsgOut{ID: msg.ID, Text: msg.Text, From: msg.From, Out: msg.Out, Media: msg.Media})
-	}
-	body, err := json.Marshal(out)
+	body, err := json.Marshal(chat.newest(limit))
 	b.mu.Unlock()
 	if err != nil {
 		return nil, &pagerlink.RPCError{Code: "internal", Msg: err.Error()}
@@ -311,7 +292,7 @@ func (s *mockPhone) tgRead(params json.RawMessage) (any, *pagerlink.RPCError) {
 		return nil, perr
 	}
 
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
 	chat, perr := b.find(chatID)
 	if perr != nil {
@@ -342,7 +323,7 @@ func (s *mockPhone) tgSend(params json.RawMessage) (any, *pagerlink.RPCError) {
 		return nil, perr
 	}
 
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
 	chat, perr := b.find(chatID)
 	if perr != nil {
@@ -367,7 +348,7 @@ func (s *mockPhone) tgReply(body []byte, xfer uint16) (any, *pagerlink.RPCError)
 	if xfer == 0 {
 		return nil, &pagerlink.RPCError{Code: "invalid_argument", Msg: "reply over 4096 B needs xfer"}
 	}
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
 	b.bulk++
 	b.mu.Unlock()
@@ -382,7 +363,7 @@ func (s *mockPhone) tgReply(body []byte, xfer uint16) (any, *pagerlink.RPCError)
 // tgAddIncoming appends an inbound message from Carol and bumps the chat's
 // unread count — the smoke test's way of simulating a new arrival.
 func (s *mockPhone) tgAddIncoming(chatID int64, text string) {
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	chat, _ := b.find(chatID)
@@ -394,72 +375,47 @@ func (s *mockPhone) tgAddIncoming(chatID int64, text string) {
 	chat.Unread++
 }
 
-// tgUnread returns the chat's unread count (0 when the chat is unknown).
-func (s *mockPhone) tgUnread(chatID int64) int {
-	b := s.bridge()
+// tgChatSnapshot returns a copy of the chat (its own Msgs slice), or the zero
+// value when the chat is unknown — the smoke test's read-back of unread count,
+// read marker and newest message.
+func (s *mockPhone) tgChatSnapshot(chatID int64) tgChat {
+	b := s.tg
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if chat, _ := b.find(chatID); chat != nil {
-		return chat.Unread
+	chat, _ := b.find(chatID)
+	if chat == nil {
+		return tgChat{}
 	}
-	return 0
+	snap := *chat
+	snap.Msgs = append([]tgMsg(nil), chat.Msgs...)
+	return snap
 }
 
-// tgLastRead returns the chat's last-read high-water (0 when unknown).
-func (s *mockPhone) tgLastRead(chatID int64) int {
-	b := s.bridge()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if chat, _ := b.find(chatID); chat != nil {
-		return chat.LastRead
+// lastMsg returns the chat's newest message, or the zero value when empty.
+func (c tgChat) lastMsg() tgMsg {
+	if len(c.Msgs) == 0 {
+		return tgMsg{}
 	}
-	return 0
-}
-
-// tgLastMsg returns the chat's newest message, or the zero value when the chat
-// is unknown or empty.
-func (s *mockPhone) tgLastMsg(chatID int64) tgMsg {
-	b := s.bridge()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if chat, _ := b.find(chatID); chat != nil && len(chat.Msgs) > 0 {
-		return chat.Msgs[len(chat.Msgs)-1]
-	}
-	return tgMsg{}
+	return c.Msgs[len(c.Msgs)-1]
 }
 
 // tgBulk returns how many replies were streamed as DATA rather than inline.
 func (s *mockPhone) tgBulk() int {
-	b := s.bridge()
+	b := s.tg
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.bulk
 }
 
 // tgExpect reports what tg.messages with `limit` would return for the chat:
-// the message count, the total text bytes, and the newest id. It mirrors the
+// the message count, the total text bytes, and the newest id. It reuses the
 // handler's newest-first trimming without touching the wire.
 func (s *mockPhone) tgExpect(chatID int64, limit int) (count int, textBytes int, newestID int) {
-	b := s.bridge()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	chat, _ := b.find(chatID)
-	if chat == nil {
-		return 0, 0, 0
+	snap := s.tgChatSnapshot(chatID)
+	msgs := snap.newest(limit)
+	for _, m := range msgs {
+		textBytes += len(m.Text)
+		newestID = max(newestID, m.ID)
 	}
-	n := limit
-	if n > len(chat.Msgs) {
-		n = len(chat.Msgs)
-	}
-	if n < 0 {
-		n = 0
-	}
-	for i := len(chat.Msgs) - 1; i >= len(chat.Msgs)-n && i >= 0; i-- {
-		count++
-		textBytes += len(chat.Msgs[i].Text)
-		if chat.Msgs[i].ID > newestID {
-			newestID = chat.Msgs[i].ID
-		}
-	}
-	return count, textBytes, newestID
+	return len(msgs), textBytes, newestID
 }

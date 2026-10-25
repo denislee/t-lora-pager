@@ -29,3 +29,22 @@ func TestTgParamsBridgeOptional(t *testing.T) {
 		}
 	}
 }
+
+// tg.messages answers newest first, trimmed to limit, with media only on the
+// messages that carry one (the exact bytes ui_telegram.cpp parses).
+func TestTgMessagesWireShape(t *testing.T) {
+	s := newMockPhone(nil)
+	res, perr := s.tgMessages(json.RawMessage(`{"chat_id":101,"limit":2}`))
+	if perr != nil {
+		t.Fatalf("tgMessages: %v", perr)
+	}
+	got := string(res.(map[string]json.RawMessage)["body"])
+	want := `[{"id":3,"text":"are you there?","from":"Alice","out":false},` +
+		`{"id":2,"text":"","from":"Alice","out":false,"media":{"type":"photo","w":800,"h":600}}]`
+	if got != want {
+		t.Fatalf("body = %s\nwant   %s", got, want)
+	}
+	if n, b, newest := s.tgExpect(101, 2); n != 2 || b != len("are you there?") || newest != 3 {
+		t.Fatalf("tgExpect = %d,%d,%d, want 2,%d,3", n, b, newest, len("are you there?"))
+	}
+}
