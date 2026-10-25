@@ -11,10 +11,11 @@
  *   - Available virtual sensor count.
  *   - Per virtual sensor: configure() success + live event counter.
  *   - Live values: ax/ay/az (g), roll/pitch/yaw (deg), device-orientation
- *     byte, BMA423 direction enum.
+ *     byte (+ the orientation from hw_get_imu_params).
  *   - Computed face-down result.
- *   - Actions: "Re-init IMU" (unregister + register without reboot) and
- *     "Print to Serial" (dump full firmware sensor table over UART).
+ *   - Actions: "Re-init IMU" (unregister + register without reboot),
+ *     "Print to Serial" (dump full firmware sensor table over UART) and
+ *     "Try sensor.begin" (direct driver probe, result in a popup).
  *
  * A 200 ms lv_timer drives the live rows; reset_state() kills the timer
  * when the page is torn down.
@@ -23,6 +24,7 @@
 #include "settings_internal.h"
 #include "../hal/sensors.h"
 #include "../core/kb_lock.h"
+#include <stdarg.h>
 #include <string.h>
 
 #ifdef ARDUINO
@@ -168,6 +170,18 @@ bool set_if_changed(lv_obj_t *label, const char *txt)
     return true;
 }
 
+// printf-style set_if_changed.
+bool set_fmt(lv_obj_t *label, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+bool set_fmt(lv_obj_t *label, const char *fmt, ...)
+{
+    char buf[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return set_if_changed(label, buf);
+}
+
 void render_tick(lv_timer_t *)
 {
     // Only poll the IMU while this page is actually on screen. Without this the
@@ -175,20 +189,16 @@ void render_tick(lv_timer_t *)
     // subpages after visiting this one once. Fully torn down on Settings exit.
     if (!s_menu || lv_menu_get_cur_main_page(s_menu) != s_page) return;
 
-    char buf[96];
-
     imu_diag_t d;
     hw_get_imu_diag(d);
     imu_params_t p;
     hw_get_imu_params(p);
     bool fd = hw_is_face_down();
 
-    if (lbl.online) {
-        snprintf(buf, sizeof(buf), "BHI260=%s  BMA423=%s",
-                 d.bhi260_online ? "yes" : "no",
-                 d.bma423_online ? "yes" : "no");
-        set_if_changed(lbl.online, buf);
-    }
+    // Every label is built before this timer exists, and reset_state() kills
+    // the timer before it nulls them, so no null checks here.
+    set_fmt(lbl.online, "BHI260=%s  BMA423=%s",
+            d.bhi260_online ? "yes" : "no", d.bma423_online ? "yes" : "no");
 
 #ifdef ARDUINO
     // Raw devices_probe value + decode of the bits we care about. If the IMU
@@ -196,25 +206,18 @@ void render_tick(lv_timer_t *)
     // come up — useful for distinguishing "init failed" from "code path
     // never ran".
     uint32_t probe = hw_get_device_online();
-    if (lbl.probe_hex) {
-        snprintf(buf, sizeof(buf), "0x%08X", (unsigned)probe);
-        set_if_changed(lbl.probe_hex, buf);
-    }
-    if (lbl.probe_decode) {
-        snprintf(buf, sizeof(buf),
-                 "%s%s%s%s%s%s%s%s%s%s",
-                 (probe & HW_PMU_ONLINE)      ? "PMU "   : "",
-                 (probe & HW_RTC_ONLINE)      ? "RTC "   : "",
-                 (probe & HW_SD_ONLINE)       ? "SD "    : "",
-                 (probe & HW_NFC_ONLINE)      ? "NFC "   : "",
-                 (probe & HW_BHI260AP_ONLINE) ? "BHI "   : "",
-                 (probe & HW_KEYBOARD_ONLINE) ? "KB "    : "",
-                 (probe & HW_BMA423_ONLINE)   ? "BMA "   : "",
-                 (probe & HW_EXPAND_ONLINE)   ? "EXP "   : "",
-                 (probe & HW_CODEC_ONLINE)    ? "AUD "   : "",
-                 (probe & HW_GAUGE_ONLINE)    ? "GAU "   : "");
-        set_if_changed(lbl.probe_decode, buf);
-    }
+    set_fmt(lbl.probe_hex, "0x%08X", (unsigned)probe);
+    set_fmt(lbl.probe_decode, "%s%s%s%s%s%s%s%s%s%s",
+            (probe & HW_PMU_ONLINE)      ? "PMU "   : "",
+            (probe & HW_RTC_ONLINE)      ? "RTC "   : "",
+            (probe & HW_SD_ONLINE)       ? "SD "    : "",
+            (probe & HW_NFC_ONLINE)      ? "NFC "   : "",
+            (probe & HW_BHI260AP_ONLINE) ? "BHI "   : "",
+            (probe & HW_KEYBOARD_ONLINE) ? "KB "    : "",
+            (probe & HW_BMA423_ONLINE)   ? "BMA "   : "",
+            (probe & HW_EXPAND_ONLINE)   ? "EXP "   : "",
+            (probe & HW_CODEC_ONLINE)    ? "AUD "   : "",
+            (probe & HW_GAUGE_ONLINE)    ? "GAU "   : "");
 #endif
 
 #if defined(ARDUINO) && defined(USING_BHI260_SENSOR)
@@ -227,81 +230,32 @@ void render_tick(lv_timer_t *)
             core::ScopedI2cLock i2c;  // P7.45
             info = instance.sensor.getSensorInfo();
         }
-        if (lbl.fw_kernel) {
-            snprintf(buf, sizeof(buf), "%u", info.kernel_version);
-            set_if_changed(lbl.fw_kernel, buf);
-        }
-        if (lbl.fw_user) {
-            snprintf(buf, sizeof(buf), "%u", info.user_version);
-            set_if_changed(lbl.fw_user, buf);
-        }
-        if (lbl.fw_rom) {
-            snprintf(buf, sizeof(buf), "%u", info.rom_version);
-            set_if_changed(lbl.fw_rom, buf);
-        }
-        if (lbl.fw_product) {
-            snprintf(buf, sizeof(buf), "0x%02X", info.product_id);
-            set_if_changed(lbl.fw_product, buf);
-        }
-        if (lbl.fw_boot) {
-            snprintf(buf, sizeof(buf), "0x%02X", info.boot_status);
-            set_if_changed(lbl.fw_boot, buf);
-        }
-        if (lbl.fw_host) {
-            snprintf(buf, sizeof(buf), "0x%02X", info.host_status);
-            set_if_changed(lbl.fw_host, buf);
-        }
-        if (lbl.fw_feat) {
-            snprintf(buf, sizeof(buf), "0x%02X", info.feat_status);
-            set_if_changed(lbl.fw_feat, buf);
-        }
-        if (lbl.fw_err) {
-            // Pinned SensorLib has no getErrorText(); just show the raw byte.
-            // 0x00 = no error. Any non-zero value is bad — printInfo() on
-            // serial decodes it.
-            snprintf(buf, sizeof(buf), "0x%02X", info.sensor_error);
-            set_if_changed(lbl.fw_err, buf);
-        }
+        set_fmt(lbl.fw_kernel,  "%u", info.kernel_version);
+        set_fmt(lbl.fw_user,    "%u", info.user_version);
+        set_fmt(lbl.fw_rom,     "%u", info.rom_version);
+        set_fmt(lbl.fw_product, "0x%02X", info.product_id);
+        set_fmt(lbl.fw_boot,    "0x%02X", info.boot_status);
+        set_fmt(lbl.fw_host,    "0x%02X", info.host_status);
+        set_fmt(lbl.fw_feat,    "0x%02X", info.feat_status);
+        // Pinned SensorLib has no getErrorText(); just show the raw byte.
+        // 0x00 = no error. Any non-zero value is bad — printInfo() on
+        // serial decodes it.
+        set_fmt(lbl.fw_err,     "0x%02X", info.sensor_error);
     }
 #endif
 
-    if (lbl.count) {
-        snprintf(buf, sizeof(buf), "%u", (unsigned)d.sensor_count);
-        set_if_changed(lbl.count, buf);
-    }
-    if (lbl.accel) {
-        snprintf(buf, sizeof(buf), "cfg=%d  evt=%u",
-                 (int)d.accel_configured, (unsigned)d.accel_events);
-        set_if_changed(lbl.accel, buf);
-    }
-    if (lbl.grv) {
-        snprintf(buf, sizeof(buf), "cfg=%d  evt=%u",
-                 (int)d.grv_configured, (unsigned)d.grv_events);
-        set_if_changed(lbl.grv, buf);
-    }
-    if (lbl.dev_orient) {
-        snprintf(buf, sizeof(buf), "cfg=%d  evt=%u",
-                 (int)d.dev_orient_configured,
-                 (unsigned)d.dev_orient_events);
-        set_if_changed(lbl.dev_orient, buf);
-    }
-    if (lbl.accel_xyz) {
-        snprintf(buf, sizeof(buf), "%+.2f  %+.2f  %+.2f",
-                 (double)d.accel_g_x, (double)d.accel_g_y,
-                 (double)d.accel_g_z);
-        set_if_changed(lbl.accel_xyz, buf);
-    }
-    if (lbl.roll_pitch) {
-        snprintf(buf, sizeof(buf), "r=%+.0f  p=%+.0f  y=%+.0f",
-                 (double)p.roll, (double)p.pitch, (double)p.heading);
-        set_if_changed(lbl.roll_pitch, buf);
-    }
-    if (lbl.do_byte) {
-        snprintf(buf, sizeof(buf), "%u  (orient=%u)",
-                 (unsigned)d.dev_orient_value, (unsigned)p.orientation);
-        set_if_changed(lbl.do_byte, buf);
-    }
-    if (lbl.face_down && set_if_changed(lbl.face_down, fd ? "YES" : "no")) {
+    set_fmt(lbl.count, "%u", (unsigned)d.sensor_count);
+    set_fmt(lbl.accel, "cfg=%d  evt=%u", (int)d.accel_configured, (unsigned)d.accel_events);
+    set_fmt(lbl.grv, "cfg=%d  evt=%u", (int)d.grv_configured, (unsigned)d.grv_events);
+    set_fmt(lbl.dev_orient, "cfg=%d  evt=%u",
+            (int)d.dev_orient_configured, (unsigned)d.dev_orient_events);
+    set_fmt(lbl.accel_xyz, "%+.2f  %+.2f  %+.2f",
+            (double)d.accel_g_x, (double)d.accel_g_y, (double)d.accel_g_z);
+    set_fmt(lbl.roll_pitch, "r=%+.0f  p=%+.0f  y=%+.0f",
+            (double)p.roll, (double)p.pitch, (double)p.heading);
+    set_fmt(lbl.do_byte, "%u  (orient=%u)",
+            (unsigned)d.dev_orient_value, (unsigned)p.orientation);
+    if (set_if_changed(lbl.face_down, fd ? "YES" : "no")) {
         lv_obj_set_style_text_color(lbl.face_down,
                                     fd ? UI_COLOR_ACCENT : UI_COLOR_FG, 0);
     }
@@ -388,7 +342,6 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     settings_action_row(sub_page, "Print to Serial", "Dump", serial_dump_cb, 70);
     settings_action_row(sub_page, "Try sensor.begin", "Try", try_begin_cb, 70);
 
-    if (tick) lv_timer_del(tick);
     tick = lv_timer_create(render_tick, 200, NULL);
     render_tick(tick);  // paint immediately so the page isn't full of "..."
 }

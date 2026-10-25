@@ -261,12 +261,6 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_pad_all(sub_page, 6, 0);
     lv_obj_set_style_pad_row(sub_page, 6, 0);
 
-    // Fresh page build → drop any pointers left over from a previous visit
-    // so sync_set_status/refresh don't touch stale LVGL objects.
-    sync_stop_timer();
-    dt_setup.sync_status = nullptr;
-    dt_setup.tz_label    = nullptr;
-
     auto add_section_header = [&](const char *text) {
         lv_obj_t *l = lv_label_create(sub_page);
         lv_label_set_text(l, text);
@@ -293,6 +287,20 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
         lv_obj_set_flex_align(r, main, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(r, 6, 0);
         return r;
+    };
+
+    // Full-width button (or, with `grow`, one that shares its row) firing
+    // `cb` on click, registered with the subpage's focus group.
+    auto add_btn = [&](lv_obj_t *parent, const char *text, lv_event_cb_t cb,
+                       void *ud, bool grow) {
+        lv_obj_t *b = lv_btn_create(parent);
+        if (grow) lv_obj_set_flex_grow(b, 1);
+        else      lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_t *l = lv_label_create(b);
+        lv_label_set_text(l, text);
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, ud);
+        register_subpage_group_obj(sub_page, b);
     };
 
     struct tm timeinfo;
@@ -338,13 +346,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_text_font(colon, &lv_font_montserrat_24, 0);
     dt_setup.min  = create_sb(time_row, "Min", 0, 59, timeinfo.tm_min, 2);
 
-    lv_obj_t *save_btn = lv_btn_create(manual_card);
-    lv_obj_set_width(save_btn, LV_PCT(100));
-    lv_obj_t *save_label = lv_label_create(save_btn);
-    lv_label_set_text(save_label, LV_SYMBOL_OK "  Apply");
-    lv_obj_center(save_label);
-    lv_obj_add_event_cb(save_btn, save_datetime_cb, LV_EVENT_CLICKED, &dt_setup);
-    register_subpage_group_obj(sub_page, save_btn);
+    add_btn(manual_card, LV_SYMBOL_OK "  Apply", save_datetime_cb, &dt_setup, false);
 
     /* ============ Section 2: Timezone ============
      * Stored in NVS; "Use default" clears the override so the device falls
@@ -359,43 +361,18 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 
     lv_obj_t *tz_btn_row = add_row(tz_card, LV_FLEX_ALIGN_SPACE_BETWEEN);
 
-    lv_obj_t *tz_btn = lv_btn_create(tz_btn_row);
-    lv_obj_set_flex_grow(tz_btn, 1);
-    lv_obj_t *tz_btn_label = lv_label_create(tz_btn);
-    lv_label_set_text(tz_btn_label, LV_SYMBOL_LIST "  Pick");
-    lv_obj_center(tz_btn_label);
-    lv_obj_add_event_cb(tz_btn, set_tz_cb, LV_EVENT_CLICKED, nullptr);
-    register_subpage_group_obj(sub_page, tz_btn);
-
-    lv_obj_t *tz_clear_btn = lv_btn_create(tz_btn_row);
-    lv_obj_set_flex_grow(tz_clear_btn, 1);
-    lv_obj_t *tz_clear_label = lv_label_create(tz_clear_btn);
-    lv_label_set_text(tz_clear_label, LV_SYMBOL_CLOSE "  Default");
-    lv_obj_center(tz_clear_label);
-    lv_obj_add_event_cb(tz_clear_btn, clear_tz_cb, LV_EVENT_CLICKED, nullptr);
-    register_subpage_group_obj(sub_page, tz_clear_btn);
+    add_btn(tz_btn_row, LV_SYMBOL_LIST "  Pick", set_tz_cb, nullptr, true);
+    add_btn(tz_btn_row, LV_SYMBOL_CLOSE "  Default", clear_tz_cb, nullptr, true);
 
     /* ============ Section 3: Network sync ============ */
     add_section_header("Network sync");
     lv_obj_t *sync_card = add_card();
 
-    lv_obj_t *sync_btn = lv_btn_create(sync_card);
-    lv_obj_set_width(sync_btn, LV_PCT(100));
-    lv_obj_t *sync_label = lv_label_create(sync_btn);
-    lv_label_set_text(sync_label, LV_SYMBOL_WIFI "  Sync from Internet");
-    lv_obj_center(sync_label);
-    lv_obj_add_event_cb(sync_btn, sync_time_cb, LV_EVENT_CLICKED, nullptr);
-    register_subpage_group_obj(sub_page, sync_btn);
+    add_btn(sync_card, LV_SYMBOL_WIFI "  Sync from Internet", sync_time_cb, nullptr, false);
 
     // GPS sync sits in the same card so its status piggybacks on the
     // shared sync_status label below.
-    lv_obj_t *gps_btn = lv_btn_create(sync_card);
-    lv_obj_set_width(gps_btn, LV_PCT(100));
-    lv_obj_t *gps_label = lv_label_create(gps_btn);
-    lv_label_set_text(gps_label, LV_SYMBOL_GPS "  Sync from GPS");
-    lv_obj_center(gps_label);
-    lv_obj_add_event_cb(gps_btn, gps_sync_cb, LV_EVENT_CLICKED, nullptr);
-    register_subpage_group_obj(sub_page, gps_btn);
+    add_btn(sync_card, LV_SYMBOL_GPS "  Sync from GPS", gps_sync_cb, nullptr, false);
 
     // Status line grows in place below the button so the card doesn't jump.
     dt_setup.sync_status = lv_label_create(sync_card);

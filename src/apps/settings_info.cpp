@@ -3,12 +3,13 @@
  * @brief     Settings » System Info subpage. Extracted from ui_settings.cpp;
  *            see settings_internal.h for the cross-TU contract.
  *
- * Read-only info rows: MAC, WiFi SSID/IP/RSSI, battery, SD + internal
- * storage usage, LVGL version, Arduino core version, build date, firmware
- * hash, chip id. A 1 Hz lv_timer refreshes the live rows (RSSI, battery
- * voltage); the RTC clock row is updated every 5 s to avoid per-second I2C
- * traffic (P4.13b). Storage + SSID + IP are loaded once on first tick
- * (gated by `info_loaded`) because they're expensive.
+ * Read-only info rows: MAC, WiFi SSID/IP/RSSI, battery, RAM + PSRAM heap,
+ * SD + internal storage usage, LVGL version, Arduino core version, build
+ * date, firmware hash, chip id. A 1 Hz lv_timer refreshes the live rows
+ * (RSSI, battery voltage, heap — P7.49); the RTC clock row is updated every
+ * 5 s to avoid per-second I2C traffic (P4.13b), starting on the first tick.
+ * Storage + SSID + IP are loaded once on first tick (gated by `info_loaded`)
+ * because they're expensive.
  */
 #include "../ui_define.h"
 #include "settings_internal.h"
@@ -37,7 +38,9 @@ struct sys_label_t {
     // and unconditional lv_label_set_text* calls (which call lv_obj_invalidate
     // in LVGL 9 regardless of whether the text changed).
     // All reset to defaults by `sys_label = sys_label_t{}` in reset_state().
-    uint8_t   rtc_tick              = 0;      // increments each 1s tick; RTC read every 5
+    // Increments each 1 s tick; the RTC is read every 5th. Starts at 4 so the
+    // first tick already reads it instead of showing the placeholder for 5 s.
+    uint8_t   rtc_tick              = 4;
     std::string cached_datetime;              // last string written to datetime_label
     int       cached_rssi           = 1;      // 1 = sentinel (valid RSSI is always <= 0)
     int       cached_batt_mv        = -1;     // -1 = sentinel (valid voltage > 0)
@@ -101,7 +104,7 @@ void sys_timer_event_cb(lv_timer_t *)
     uint32_t int_min_kb     = hs.int_min_free / 1024;
     uint32_t int_largest_kb = hs.int_largest / 1024;
     uint32_t heap_key = (int_free_kb << 20) ^ (int_min_kb << 10) ^ int_largest_kb;
-    if (sys_label.heap_int_label && heap_key != sys_label.cached_heap_key) {
+    if (heap_key != sys_label.cached_heap_key) {
         sys_label.cached_heap_key = heap_key;
         lv_label_set_text_fmt(sys_label.heap_int_label, "%uK free, min %uK, blk %uK",
                               (unsigned)int_free_kb, (unsigned)int_min_kb,
@@ -111,7 +114,7 @@ void sys_timer_event_cb(lv_timer_t *)
     uint32_t psram_free_kb = hs.psram_free / 1024;
     uint32_t psram_min_kb  = hs.psram_min_free / 1024;
     uint32_t psram_key = (psram_free_kb << 16) ^ psram_min_kb;
-    if (sys_label.heap_psram_label && psram_key != sys_label.cached_psram_key) {
+    if (psram_key != sys_label.cached_psram_key) {
         sys_label.cached_psram_key = psram_key;
         lv_label_set_text_fmt(sys_label.heap_psram_label, "%uK free, min %uK",
                               (unsigned)psram_free_kb, (unsigned)psram_min_kb);
@@ -120,15 +123,11 @@ void sys_timer_event_cb(lv_timer_t *)
     if (!sys_label.info_loaded) {
         std::string wifi_ssid = "N/A";
         hw_get_wifi_ssid(wifi_ssid);
-        if (sys_label.wifi_ssid_label) lv_label_set_text(sys_label.wifi_ssid_label, wifi_ssid.c_str());
+        lv_label_set_text(sys_label.wifi_ssid_label, wifi_ssid.c_str());
 
         std::string ip_info = "N/A";
         hw_get_ip_address(ip_info);
-        if (sys_label.ip_info_label) lv_label_set_text(sys_label.ip_info_label, ip_info.c_str());
-
-        uint64_t total = 0, used = 0, free = 0;
-        hw_get_storage_info(total, used, free);
-        char buffer[64];
+        lv_label_set_text(sys_label.ip_info_label, ip_info.c_str());
 
         auto format_size = [](char *buf, size_t len, uint64_t bytes) {
             if (bytes > 1024ULL * 1024 * 1024) {
@@ -141,38 +140,28 @@ void sys_timer_event_cb(lv_timer_t *)
                 snprintf(buf, len, "%llu B", bytes);
             }
         };
+        // Total / used / free rows of one volume; "N/A" when it reports 0.
+        auto show_volume = [&](uint64_t total, uint64_t used, uint64_t free,
+                               lv_obj_t *total_lbl, lv_obj_t *used_lbl, lv_obj_t *free_lbl) {
+            const uint64_t vals[3] = {total, used, free};
+            lv_obj_t *const lbls[3] = {total_lbl, used_lbl, free_lbl};
+            for (int i = 0; i < 3; i++) {
+                char buffer[64];
+                if (total > 0) format_size(buffer, sizeof(buffer), vals[i]);
+                else           snprintf(buffer, sizeof(buffer), "N/A");
+                lv_label_set_text(lbls[i], buffer);
+            }
+        };
 
-        if (total > 0) {
-            format_size(buffer, sizeof(buffer), total);
-            if (sys_label.sd_size_label) lv_label_set_text(sys_label.sd_size_label, buffer);
-
-            format_size(buffer, sizeof(buffer), used);
-            if (sys_label.storage_used_label) lv_label_set_text(sys_label.storage_used_label, buffer);
-
-            format_size(buffer, sizeof(buffer), free);
-            if (sys_label.storage_free_label) lv_label_set_text(sys_label.storage_free_label, buffer);
-        } else {
-            if (sys_label.sd_size_label) lv_label_set_text(sys_label.sd_size_label, "N/A");
-            if (sys_label.storage_used_label) lv_label_set_text(sys_label.storage_used_label, "N/A");
-            if (sys_label.storage_free_label) lv_label_set_text(sys_label.storage_free_label, "N/A");
-        }
+        uint64_t total = 0, used = 0, free = 0;
+        hw_get_storage_info(total, used, free);
+        show_volume(total, used, free, sys_label.sd_size_label,
+                    sys_label.storage_used_label, sys_label.storage_free_label);
 
         uint64_t l_total = 0, l_used = 0, l_free = 0;
         hw_get_local_storage_info(l_total, l_used, l_free);
-        if (l_total > 0) {
-            format_size(buffer, sizeof(buffer), l_total);
-            if (sys_label.local_storage_total_label) lv_label_set_text(sys_label.local_storage_total_label, buffer);
-
-            format_size(buffer, sizeof(buffer), l_used);
-            if (sys_label.local_storage_used_label) lv_label_set_text(sys_label.local_storage_used_label, buffer);
-
-            format_size(buffer, sizeof(buffer), l_free);
-            if (sys_label.local_storage_free_label) lv_label_set_text(sys_label.local_storage_free_label, buffer);
-        } else {
-            if (sys_label.local_storage_total_label) lv_label_set_text(sys_label.local_storage_total_label, "N/A");
-            if (sys_label.local_storage_used_label) lv_label_set_text(sys_label.local_storage_used_label, "N/A");
-            if (sys_label.local_storage_free_label) lv_label_set_text(sys_label.local_storage_free_label, "N/A");
-        }
+        show_volume(l_total, l_used, l_free, sys_label.local_storage_total_label,
+                    sys_label.local_storage_used_label, sys_label.local_storage_free_label);
 
         sys_label.info_loaded = true;
     }
@@ -195,7 +184,6 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 {
     s_menu = menu;
     s_page = sub_page;
-    sys_label.info_loaded = false;
     lv_obj_add_flag(sub_page, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(sub_page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(sub_page, 4, 0);
@@ -248,10 +236,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     add_info_row("Hash", hw_get_firmware_hash_string());
     add_info_row("Chip", hw_get_chip_id_string());
 
-    // Defensive only: settings_page_changed_cb runs each builder once per
-    // Settings session and reset_state() kills the timer on exit, so a prior
-    // timer should never exist here.
-    if (info_timer) lv_timer_del(info_timer);
+    // Builders run once per Settings session and reset_state() kills the
+    // timer on exit, so no prior timer exists here.
     info_timer = lv_timer_create(sys_timer_event_cb, 1000, NULL);
 }
 
