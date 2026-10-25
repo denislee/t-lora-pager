@@ -48,7 +48,7 @@ Only `SX1262` (default) and `LR1121` build as-is. `CC1101` and `SX1280` have dri
 
 ## Selecting an alternate source tree
 
-`src_dir = src` is the default. To build a LilyGoLib example instead, comment that line and point `src_dir` at an example directory (browse `lib/LilyGoLib/examples/`); the commented `helloworld` line under `[platformio]` shows the `${platformio.libdeps_dir}/.../examples/...` form.
+`src_dir = src` is the default. To build a LilyGoLib example instead, comment that line and point `src_dir` at an example directory (browse `lib/LilyGoLib/examples/`); the commented `src_dir = lib/LilyGoLib/examples/helloworld` line under `[platformio]` shows the form.
 
 ## Architecture
 
@@ -56,7 +56,7 @@ Only `SX1262` (default) and `LR1121` build as-is. `CC1101` and `SX1280` have dri
 
 ```
 src/
-├── factory.ino, factory.ino.cpp   Arduino entry (setup/loop) — thin shell
+├── factory.ino                    Arduino entry (setup/loop) — thin shell (PlatformIO generates a gitignored factory.ino.cpp at build time)
 ├── main.cpp                       SDL2 emulator entry
 ├── core/                          Cross-module skeleton (App, AppManager, System, locks)
 ├── hal/                           Hardware abstraction (split into domain headers)
@@ -70,7 +70,7 @@ server/                            Go "lilyhub" LAN service (weather proxy, note
 protocol/                          PagerLink spec (PROTOCOL.md) + golden vectors shared by firmware, iOS and Go
 ios/                               iOS companion app: PagerKit Swift package + XcodeGen app (see ios/README.md)
 boards/, variants/                 PlatformIO board JSON + pins_arduino.h per device
-test/                              Native Unity tests (notes_path, hal_result, str_encode, link_frame, link_json, link_rpc)
+test/                              Native Unity tests (crc_cache, evict, hal_result, link_frame, link_json, link_rpc, link_xfer, notes_manifest, notes_migrate, notes_path, pbkdf2, str_encode, weather_payload)
 ```
 
 ### Core skeleton (`src/core/`)
@@ -94,9 +94,9 @@ Domain sub-headers replace the old monolithic interface: `types.h`, `system.h`, 
 
 Every `core::App` implementation lives here. `app_registry.{h,cpp}` exposes `make_*_app()` factories declared with the `APP_FACTORY(fn, cls)` macro and a `register_all()` helper called from both `factory.ino` and `main.cpp`.
 
-Shared UI scaffolding that is *not* an app subclass — `ui_main.cpp`, `ui_theme.cpp`, `ui_tools.cpp`, `ui_power.cpp`, `ui_msg.cpp`, `ui_lock.cpp`, `ui_wifi.cpp`, `ui_time_sync.cpp`, `ui_nfc_test.cpp`, `ui_list_picker.cpp` — stays in `src/` root. `ui_main.cpp` is intentionally only vendor-callback glue at this point.
+Shared UI scaffolding that is *not* an app subclass — `ui_main.cpp`, `ui_theme.cpp`, `ui_tools.cpp`, `ui_msg.cpp`, `ui_lock.cpp`, `ui_wifi.cpp`, `ui_time_sync.cpp`, `ui_nfc_test.cpp`, `ui_list_picker.cpp` — stays in `src/` root. `ui_main.cpp` is intentionally only vendor-callback glue at this point.
 
-**Settings app is split**: `apps/ui_settings.cpp` (page wiring, ~624 lines) plus per-subpage TUs (`settings_connectivity.cpp`, `settings_datetime.cpp`, `settings_display.cpp`, `settings_fonts.cpp`, `settings_hub.cpp`, `settings_info.cpp`, `settings_notes_sync.cpp`, `settings_storage.cpp`, `settings_telegram.cpp`, `settings_weather.cpp`, `settings_home_apps.cpp`, `settings_imu_debug.cpp`). All share `apps/settings_internal.h` — **private**; do not include from outside the split. Each subpage namespace exposes `build_subpage(menu, sub_page)` + `reset_state()` (+ optional `set_sub_page(page)`); `local_param` is the shared NVS working-copy struct.
+**Settings app is split**: `apps/ui_settings.cpp` (page wiring, ~700 lines) plus per-subpage TUs (`settings_connectivity.cpp`, `settings_datetime.cpp`, `settings_display.cpp`, `settings_fonts.cpp`, `settings_hub.cpp`, `settings_info.cpp`, `settings_notes_sync.cpp`, `settings_storage.cpp`, `settings_telegram.cpp`, `settings_weather.cpp`, `settings_home_apps.cpp`, `settings_imu_debug.cpp`). All share `apps/settings_internal.h` — **private**; do not include from outside the split. Each subpage namespace exposes `build_subpage(menu, sub_page)` + `reset_state()` (+ optional `set_sub_page(page)`); `local_param` is the shared NVS working-copy struct.
 
 ### UI helpers
 
@@ -122,16 +122,17 @@ Go HTTP service intended to run on a LAN box (Pi/ARM). Apps point at it first an
 
 ## Key dependencies
 
+All versions are exact pins in `platformio.ini`; bump deliberately and rebuild all three hardware envs.
+
 | Library | Version | Purpose |
 |---|---|---|
-| LilyGoLib | latest (GitHub) | Vendor hardware abstraction |
-| LVGL | `^9.4.0` (hw; currently resolves to 9.5.0 for pager/S3, 9.6.0 for ultra) / 9.2.2 (emu) | GUI framework |
-| RadioLib | 7.4.0 | Radio chip abstraction |
-| XPowersLib | 0.3.1 | PMIC driver |
-| SensorLib | 0.3.3 | IMU/sensor drivers |
-| TinyGPSPlus | 1.0.3 | NMEA parsing |
-| NimBLE-Arduino | `^2.2.3` (currently resolves to 2.5.1) | BLE stack, owned by `hal/ble_stack` (HID keyboard + PagerLink) |
-| ESP8266Audio | 2.0.0 | MP3 / audio playback |
-| ST25R3916-fork | latest | NFC controller (pager + ultra only) |
-| LibSSH-ESP32 | 4.2.0 | SSH client (pager only) |
-| Adafruit TCA8418 | 1.0.2 | Keyboard matrix (pager only) |
+| LilyGoLib | vendored in `lib/LilyGoLib`, locally patched | Vendor hardware abstraction (not fetched; edits there are ours) |
+| LVGL | 9.5.0 (hw) / 9.2.2 (emu) | GUI framework |
+| RadioLib | 7.6.0 | Radio chip abstraction |
+| XPowersLib | 0.3.3 | PMIC driver |
+| SensorLib | 0.3.4 | IMU/sensor drivers |
+| TinyGPSPlus | 1.1.0 | NMEA parsing |
+| NimBLE-Arduino | 2.5.0 | BLE stack, owned by `hal/ble_stack` (HID keyboard + PagerLink) |
+| ST25R3916-fork, NFC-RFAL-fork | GitHub, pinned commit | NFC controller (pager + ultra only) |
+| LibSSH-ESP32 | 4.2.0 (GitHub tag) | SSH client (pager only) |
+| Adafruit TCA8418 / BusIO | 1.0.2 / 1.17.4 | Keyboard matrix (pager only) |

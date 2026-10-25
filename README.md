@@ -14,11 +14,13 @@
 *   **Telegram Client**: Background polling and messaging support.
 *   **Weather App**: Displays local weather forecasts.
 *   **Media Remote**: Control media playback.
-*   **Audio Notes / Voice Recorder**: Uses the onboard microphone to record notes and `libhelix-mp3` for MP3 playback.
+*   **Audio Notes / Voice Recorder**: Records 16 kHz mono WAV notes from the onboard microphone and plays them back.
 *   **Text Editor & Journal**: Write and view text files and journal entries.
 *   **Notes & Secure Sync**: Note management with encrypted credentials.
 *   **Task Manager**: Keep track of to-do items.
-*   **File Browser**: Explore files stored on the device's filesystem (SD Card/SPIFFS/LittleFS).
+*   **File Browser**: Explore files stored on the device (internal FFat and SD card).
+*   **Chat**: Text and voice chat with an LLM.
+*   **SSH Client**: Interactive SSH terminal (T-LoRa-Pager only).
 *   **System Settings**: Comprehensive on-device configuration (Display, Connectivity, Fonts, Storage, Time/Date, Weather, Telegram).
 
 ### 🛠️ System Architecture & UI
@@ -27,11 +29,12 @@
 *   **Custom Typography**: Built-in support for highly readable fonts including Atkinson Hyperlegible, JetBrains Mono, and Courier Prime.
 *   **Thread-Safe Hardware Access**: Mutex-protected SPI bus access to prevent collisions between the UI rendering loop and radio/NFC background interrupts.
 *   **Desktop Emulator Support**: Features an SDL2 emulator allowing developers to test and iterate on the UI on Linux, macOS, or Windows without needing physical hardware.
+*   **PagerLink + iOS Companion**: A framed RPC protocol over BLE (TCP in the emulator) lets the iOS companion app in `ios/` route chat, notes sync, Telegram and weather through the phone. Spec and shared test vectors live in `protocol/`.
 
 ### 📻 Hardware & Radio Support
 *   **Unified Hardware Abstraction Layer (HAL)**: Decouples the UI logic from the physical hardware, ensuring code portability.
 *   **Multi-Device Targets**: Native support out-of-the-box for LilyGo T-LoRa-Pager, T-Watch-S3, and T-Watch-Ultra.
-*   **Flexible Radio Modules**: Abstracted radio interface supporting multiple chips via configuration: SX1262, CC1101, SX1280, LR1121, SI4432.
+*   **Radio Modules**: Abstracted radio interface. SX1262 (default) and LR1121 build as-is; CC1101 and SX1280 have drivers but need their RadioLib support re-enabled in `platformio.ini` (see `CLAUDE.md`).
 *   **NFC Provisioning**: Tap-to-configure or data transfer features utilizing onboard NFC readers.
 *   **Advanced Power Management**: Battery protection features (like limiting charging to 80% to preserve battery lifespan) and deep sleep capabilities.
 
@@ -43,8 +46,8 @@
 4. After restarting `Visual Studio Code`, select `File` in the upper left corner of `Visual Studio Code` -> `Open Folder` -> select the `t-lora-pager` directory
 5. Wait for the installation of third-party dependent libraries to complete
 6. Click on the `platformio.ini` file, and in the `platformio` column
-7. Select the board name you want to use in `default_envs` and uncomment it.
-8. The default compiled sketch is [main.cpp](./src/main.cpp) in the src directory. If you need to compile an example in LilyGoLib, uncomment one of the lines src_dir = examples/xxxxx to enable it and make sure only one line is valid.
+7. Set `default_envs` to the env you want to build: `tlora_pager` (default), `twatchs3`, `twatch_ultra`, or one of the `emulator_*` envs.
+8. The firmware entry point is [factory.ino](./src/factory.ino); the emulator entry point is [main.cpp](./src/main.cpp). To compile a LilyGoLib example instead, comment out `src_dir = src` and uncomment the `src_dir = lib/LilyGoLib/examples/helloworld` line (or point it at another example).
 9. Click the (✔) symbol in the lower left corner to compile
 10. Connect the board to the computer USB
 11. Click (→) to upload firmware
