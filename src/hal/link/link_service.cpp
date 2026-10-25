@@ -71,24 +71,13 @@ struct State {
     /** TransportOps::wake; may be empty. */
     std::function<void()> wake;
 
-    /* Counters for the current connection. */
-    uint32_t rx_packets = 0;
-    uint32_t tx_packets = 0;
-    uint32_t rx_messages = 0;
-
-    /* Running totals folded in on disconnect, so they survive reconnects. */
-    uint32_t total_resets = 0;
-    uint32_t total_malformed = 0;
-    uint32_t total_timeouts = 0;
-
     size_t packet_size = 0;
     size_t rx_queue_packets = 0;
-    std::string peer_name;
+    std::string peer_name; /* for the connect/disconnect log lines */
 
     /* Battery-change baseline for evt.battery. */
     int last_batt_pct = 0;
     bool last_charging = false;
-    bool have_batt = false;
 
     /* hw_get_filesystem_generation() last announced with evt.fs.changed. */
     uint32_t last_fs_gen = 0;
@@ -102,7 +91,6 @@ struct State {
         uint32_t last_ms;    /* steady_ms() at the start or the last ACK progress */
         uint32_t rto_ms;     /* steady_ms() at the start, the last ACK, or the last retransmit */
         uint32_t stall_ms;   /* no-ACK-progress timeout checked by service_tick() */
-        uint32_t last_acked; /* acked() at that last progress */
     };
     std::vector<Outbound> outbound;
 
@@ -188,7 +176,7 @@ void finish_outbound(size_t i, bool ok) {
     }
 }
 
-/** Fail every outbound transfer (disconnect / defensive teardown). */
+/** Fail every outbound transfer (disconnect). */
 void outbound_reset() {
     while (!state().outbound.empty()) {
         finish_outbound(0, false);
@@ -294,7 +282,6 @@ void outbound_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_
         o.tx->on_ack(payload, len);
         if (o.tx->acked() != before) {
             o.last_ms = steady_ms();
-            o.last_acked = o.tx->acked();
         }
         const XferState st = o.tx->pump();
         if (st == XferState::Done) {
@@ -313,7 +300,6 @@ void outbound_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_
  */
 void on_message(const uint8_t *msg, size_t len) {
     State &s = state();
-    s.rx_messages++;
     if (s.rpc) {
         s.rpc->on_message(msg, len);
     }
@@ -340,20 +326,8 @@ void service_on_connect(const TransportOps &ops) {
 
     reassembler().reset();
     s.segmenter.reset();
-
-    /* Fold any counters left over from a connection we never saw disconnect
-     * for (defensive; normally service_on_disconnect() already did this). */
-    if (s.rpc) {
-        s.connected = false; /* done() callbacks must not start a new transfer */
-        g_connected.store(false);
-        outbound_reset();
-        inbound_reset();
-        fs_reset();
-        s.total_resets += s.rpc->stats().link_resets;
-        s.total_malformed += s.rpc->stats().malformed;
-        s.total_timeouts += s.rpc->stats().timeouts;
-        s.rpc.reset();
-    }
+    /* Both transports call service_on_disconnect() before the next connect,
+     * so there is no previous Rpc or transfer left to tear down here. */
 
     s.send_packet = ops.send_packet;
     s.tx_room = ops.tx_room;
@@ -362,9 +336,6 @@ void service_on_connect(const TransportOps &ops) {
     s.packet_size = ops.packet_size;
     s.rx_queue_packets = ops.rx_queue_packets;
     s.peer_name = ops.peer_name;
-    s.rx_packets = 0;
-    s.tx_packets = 0;
-    s.rx_messages = 0;
 
     s.rpc.reset(new Rpc(
         Role::Pager,
@@ -377,14 +348,7 @@ void service_on_connect(const TransportOps &ops) {
             if (st.tx_room && !st.tx_room(packets_per_message(len, st.packet_size))) {
                 return false;
             }
-            return st.segmenter.send(
-                message, len, st.packet_size, [&st](const uint8_t *pkt, size_t len) -> bool {
-                    if (!st.send_packet(pkt, len)) {
-                        return false;
-                    }
-                    st.tx_packets++;
-                    return true;
-                });
+            return st.segmenter.send(message, len, st.packet_size, st.send_packet);
         },
         []() -> uint32_t { return steady_ms(); }));
 
@@ -429,7 +393,6 @@ void service_on_connect(const TransportOps &ops) {
     hw_get_monitor_params(mp);
     s.last_batt_pct = mp.battery_percent;
     s.last_charging = mp.is_charging;
-    s.have_batt = true;
 
     s.connected = true;
     g_connected.store(true);
@@ -442,7 +405,6 @@ void service_on_packet(const uint8_t *pkt, size_t len) {
     if (!s.connected) {
         return;
     }
-    s.rx_packets++;
     reassembler().feed(pkt, len);
 }
 
@@ -458,9 +420,6 @@ void service_on_disconnect() {
     if (s.rpc) {
         fs_reset();
         s.rpc->disconnect();
-        s.total_resets += s.rpc->stats().link_resets;
-        s.total_malformed += s.rpc->stats().malformed;
-        s.total_timeouts += s.rpc->stats().timeouts;
         s.rpc.reset();
     }
     s.send_packet = nullptr;
@@ -547,7 +506,7 @@ void service_tick() {
     if (delta < 0) {
         delta = -delta;
     }
-    if (!s.have_batt || delta >= 5 || charging != s.last_charging) {
+    if (delta >= 5 || charging != s.last_charging) {
         JsonWriter w;
         w.begin_object()
             .key("pct")
@@ -558,7 +517,6 @@ void service_tick() {
         s.rpc->emit("evt.battery", w.str());
         s.last_batt_pct = pct;
         s.last_charging = charging;
-        s.have_batt = true;
     }
 }
 
@@ -591,24 +549,6 @@ uint32_t service_next_tick_ms(uint32_t cap) {
 
 bool service_connected() {
     return g_connected.load();
-}
-
-std::string service_peer_name() {
-    LinkLock lock(__func__);
-    State &s = state();
-    return s.connected ? s.peer_name : std::string();
-}
-
-void service_get_stats(HwLinkStats &out) {
-    LinkLock lock(__func__);
-    State &s = state();
-    out.rx_packets = s.rx_packets;
-    out.tx_packets = s.tx_packets;
-    out.rx_messages = s.rx_messages;
-    out.link_resets = s.total_resets + (s.rpc ? s.rpc->stats().link_resets : 0);
-    out.malformed = s.total_malformed + (s.rpc ? s.rpc->stats().malformed : 0);
-    out.timeouts = s.total_timeouts + (s.rpc ? s.rpc->stats().timeouts : 0);
-    out.rx_dropped = 0; /* the transport fills it */
 }
 
 size_t service_packet_size() {
@@ -679,7 +619,6 @@ bool service_send_bytes(uint16_t xfer, const uint8_t *data, size_t len, uint32_t
     o.stall_ms = stall_ms;
     o.last_ms = steady_ms();
     o.rto_ms = o.last_ms;
-    o.last_acked = 0;
     o.tx.reset(new XferSender(
         static_cast<uint32_t>(len), MAX_DATA_CHUNK,
         [data](uint32_t off, uint8_t *buf, size_t n) -> bool {

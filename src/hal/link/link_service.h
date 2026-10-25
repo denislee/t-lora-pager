@@ -48,7 +48,7 @@ struct TransportOps {
      * its wait. Runs with the service lock held: it must only signal (P7.35).
      * Empty = ignored (TCP ticks on its own cadence). */
     std::function<void()> wake;
-    /** Human-readable peer name, e.g. "tcp:127.0.0.1:54321". */
+    /** Human-readable peer name for the log, e.g. "tcp:127.0.0.1:54321". */
     std::string peer_name;
 };
 
@@ -71,10 +71,6 @@ uint32_t service_next_tick_ms(uint32_t cap);
 
 /** True while a transport is connected. */
 bool service_connected();
-/** Connected peer name, or "" when disconnected. */
-std::string service_peer_name();
-/** Copy the running counters (see HwLinkStats) into `out`. */
-void service_get_stats(HwLinkStats &out);
 /** Negotiated packet size P (0 when no transport is connected). */
 size_t service_packet_size();
 /** The transport renegotiated its packet size (BLE MTU exchange after the

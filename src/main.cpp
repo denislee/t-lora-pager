@@ -108,7 +108,7 @@ extern "C" int main(void)
 
     // PagerLink companion protocol over TCP (127.0.0.1:7600, PAGERLINK_PORT=0
     // disables) so the iOS app in the Simulator can talk to the emulator.
-    hw_link_enable(true);
+    hw_link_start();
 
     hal_loop();
 }

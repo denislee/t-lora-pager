@@ -34,9 +34,7 @@ namespace {
 
 constexpr int DEFAULT_PORT = 7600;
 
-std::atomic<bool> g_stop{false};
-std::atomic<bool> g_enabled{false};
-std::atomic<int> g_listen_fd{-1};
+std::atomic<bool> g_started{false};
 std::thread g_thread;
 
 /** Write exactly `len` bytes; false on error (SIGPIPE suppressed). */
@@ -92,7 +90,7 @@ void serve_client(int cfd, const std::string &peer_name) {
     ops.peer_name = peer_name;
     pagerlink::service_on_connect(ops);
 
-    while (!g_stop.load()) {
+    for (;;) {
         pollfd cp{cfd, POLLIN, 0};
         const int pc = ::poll(&cp, 1, 1000);
         if (pc == 0) {
@@ -133,7 +131,7 @@ void serve_client(int cfd, const std::string &peer_name) {
 }
 
 void thread_main(int listen_fd) {
-    while (!g_stop.load()) {
+    for (;;) {
         pollfd lp{listen_fd, POLLIN, 0};
         const int pr = ::poll(&lp, 1, 500);
         if (pr <= 0) {
@@ -153,12 +151,6 @@ void thread_main(int listen_fd) {
         socklen_t plen = sizeof(peer);
         const int cfd = ::accept(listen_fd, reinterpret_cast<sockaddr *>(&peer), &plen);
         if (cfd < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (g_stop.load()) {
-                break;
-            }
             continue;
         }
 
@@ -174,23 +166,9 @@ void thread_main(int listen_fd) {
 
 }  // namespace
 
-bool hw_link_enable(bool en) {
-    if (!en) {
-        g_enabled.store(false);
-        g_stop.store(true);
-        const int fd = g_listen_fd.exchange(-1);
-        if (fd >= 0) {
-            ::shutdown(fd, SHUT_RDWR);
-            ::close(fd);
-        }
-        if (g_thread.joinable()) {
-            g_thread.join();
-        }
-        return false;
-    }
-
-    if (g_enabled.load()) {
-        return true;
+void hw_link_start() {
+    if (g_started.load()) {
+        return;
     }
 
     int port = DEFAULT_PORT;
@@ -199,13 +177,13 @@ bool hw_link_enable(bool en) {
     }
     if (port <= 0) {
         LINK_LOG("disabled by PAGERLINK_PORT");
-        return false;
+        return;
     }
 
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         LINK_LOG("socket() failed: %s", strerror(errno));
-        return false;
+        return;
     }
     int one = 1;
     ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -217,28 +195,19 @@ bool hw_link_enable(bool en) {
     if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
         LINK_LOG("bind 127.0.0.1:%d failed: %s", port, strerror(errno));
         ::close(fd);
-        return false;
+        return;
     }
     if (::listen(fd, 1) < 0) {
         LINK_LOG("listen 127.0.0.1:%d failed: %s", port, strerror(errno));
         ::close(fd);
-        return false;
+        return;
     }
 
-    g_stop.store(false);
-    g_listen_fd.store(fd);
-    g_enabled.store(true);
+    g_started.store(true);
     LINK_LOG("listening on 127.0.0.1:%d", port);
     g_thread = std::thread(thread_main, fd);
-    return true;
 }
 
-bool hw_link_enabled() { return g_enabled.load(); }
-
 bool hw_link_connected() { return pagerlink::service_connected(); }
-
-std::string hw_link_peer_name() { return pagerlink::service_peer_name(); }
-
-void hw_link_get_stats(HwLinkStats &out) { pagerlink::service_get_stats(out); }
 
 #endif  // !ARDUINO

@@ -132,7 +132,6 @@ TaskHandle_t g_tx_task = nullptr;
 UBaseType_t g_txq_depth = 0;
 
 std::atomic<bool> g_bt_on{false};
-std::atomic<bool> g_user_off{false};
 /** Companion connection handle; written only by the link task. */
 std::atomic<uint16_t> g_companion{NO_HANDLE};
 std::atomic<uint32_t> g_dropped{0};
@@ -153,10 +152,8 @@ UBaseType_t g_queue_depth = 0;
 /** A Kind::Wake is queued and not yet consumed (at most one in flight). */
 std::atomic<bool> g_wake_queued{false};
 
-bool accepting() { return g_bt_on.load() && !g_user_off.load(); }
-
 /**
- * Queue an event. Producers are the NimBLE host task and hw_link_enable();
+ * Queue an event. Producers are the NimBLE host task and set_enabled();
  * g_post_lock serialises them over the one static staging Event (~250 B, kept
  * off the host task's stack). Control events wait up to 50 ms for queue space;
  * packets never wait (a dropped packet costs one message, which the transfer
@@ -402,7 +399,7 @@ void handle(const Event &ev) {
         if (companion == ev.conn) {
             companion_down("resubscribed");
             companion_up(ev.conn, std::string(reinterpret_cast<const char *>(ev.data), ev.len));
-        } else if (companion == NO_HANDLE && accepting()) {
+        } else if (companion == NO_HANDLE && g_bt_on.load()) {
             companion_up(ev.conn, std::string(reinterpret_cast<const char *>(ev.data), ev.len));
         } else {
             LINK_LOG("[link] ignoring tx subscribe from handle %u", static_cast<unsigned>(ev.conn));
@@ -599,25 +596,6 @@ void on_mtu_change(uint16_t conn_handle, uint16_t mtu) {
 }  // namespace ble
 }  // namespace pagerlink
 
-using namespace pagerlink::ble;
-
-bool hw_link_enable(bool en) {
-    g_user_off.store(!en);
-    if (!en) {
-        post(Kind::Drop, NO_HANDLE, nullptr, 0);
-    }
-    return hw_link_enabled();
-}
-
-bool hw_link_enabled() { return g_task != nullptr && accepting(); }
-
 bool hw_link_connected() { return pagerlink::service_connected(); }
-
-std::string hw_link_peer_name() { return pagerlink::service_peer_name(); }
-
-void hw_link_get_stats(HwLinkStats &out) {
-    pagerlink::service_get_stats(out);
-    out.rx_dropped = g_dropped_total.load();
-}
 
 #endif  // ARDUINO

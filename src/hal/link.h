@@ -20,30 +20,14 @@
 #include <functional>
 #include <string>
 
-// Start/stop the transport; returns the resulting enabled state. On hardware
-// the link follows Bluetooth (on by default whenever BT is on); false stops
-// accepting a companion and drops the current one, true lifts that again but
-// cannot turn Bluetooth on. On the emulator it opens the TCP listener (env
-// PAGERLINK_PORT, "0" keeps it off).
-bool hw_link_enable(bool en);
-
-// True while the transport is enabled (the listener is up).
-bool hw_link_enabled();
+#ifndef ARDUINO
+// Emulator only: open the TCP listener once (env PAGERLINK_PORT, "0" keeps it
+// off). On hardware the link has no switch of its own: it follows Bluetooth.
+void hw_link_start();
+#endif
 
 // True while a companion is connected over the transport.
 bool hw_link_connected();
-
-// Human-readable peer name. "" when not connected; over TCP "tcp:<ip>:<port>".
-std::string hw_link_peer_name();
-
-// Cumulative link counters for the diagnostics UI.
-struct HwLinkStats {
-    uint32_t rx_packets, tx_packets, rx_messages, link_resets, malformed, timeouts;
-    uint32_t rx_dropped;  // packets the transport dropped before the service saw them (BLE rx queue full / oversize)
-};
-
-// Copy the current counters into `out`.
-void hw_link_get_stats(HwLinkStats &out);
 
 /*
  * Pager-initiated requests (D→P). Used by apps whose work the phone does for
