@@ -50,7 +50,7 @@ final class OutgoingQueue<Element: Sendable>: @unchecked Sendable {
         // producer can neither slip an item in nor miss the waiter.
         await withCheckedContinuation { (continuation: CheckedContinuation<Element?, Never>) in
             lock.lock()
-            if let item = popControlLocked() ?? popBulkLocked() {
+            if let item = Self.pop(&control, head: &controlHead) ?? Self.pop(&bulk, head: &bulkHead) {
                 lock.unlock()
                 continuation.resume(returning: item)
                 return
@@ -83,28 +83,16 @@ final class OutgoingQueue<Element: Sendable>: @unchecked Sendable {
         return (control.count - controlHead) + (bulk.count - bulkHead)
     }
 
-    /// Pop the control lane's head. Caller holds `lock`.
-    private func popControlLocked() -> Element? {
-        guard controlHead < control.count else { return nil }
-        let item = control[controlHead]
-        controlHead += 1
+    /// Pop a lane's head. Caller holds `lock`.
+    private static func pop(_ lane: inout [Element], head: inout Int) -> Element? {
+        guard head < lane.count else { return nil }
+        let item = lane[head]
+        head += 1
         // Reclaim consumed prefix once it dominates the array, so a long-lived
         // queue does not grow without bound (removeFirst is O(n), amortised).
-        if controlHead > 32, controlHead * 2 > control.count {
-            control.removeFirst(controlHead)
-            controlHead = 0
-        }
-        return item
-    }
-
-    /// Pop the bulk lane's head. Caller holds `lock`.
-    private func popBulkLocked() -> Element? {
-        guard bulkHead < bulk.count else { return nil }
-        let item = bulk[bulkHead]
-        bulkHead += 1
-        if bulkHead > 32, bulkHead * 2 > bulk.count {
-            bulk.removeFirst(bulkHead)
-            bulkHead = 0
+        if head > 32, head * 2 > lane.count {
+            lane.removeFirst(head)
+            head = 0
         }
         return item
     }

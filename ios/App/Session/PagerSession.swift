@@ -110,50 +110,40 @@ final class PagerSession: ObservableObject {
     }
 
     /// Open the emulator TCP transport and bring the link up.
-    func connectTCP(host: String = "127.0.0.1", port: UInt16 = 7600) async {
-        #if canImport(Network)
-            cancelReconnect()
-            userDisconnected = false
-            guard await beginConnect("TCP connecting to \(host):\(port)…") else { return }
-            linkIsBLE = false
-            let transport = TCPTransport(host: host, port: port)
-            stopTransport = { await transport.stop() }
-            do {
-                try await transport.start()
-            } catch {
-                await connectFailed(error)
-                return
-            }
-            await bringUp(transport)
-        #else
-            state = .failed("TCP transport needs Network (Apple platforms only)")
-            appendLog("connect unavailable: Network framework missing")
-        #endif
+    func connectTCP(host: String, port: UInt16) async {
+        cancelReconnect()
+        userDisconnected = false
+        guard await beginConnect("TCP connecting to \(host):\(port)…") else { return }
+        linkIsBLE = false
+        let transport = TCPTransport(host: host, port: port)
+        stopTransport = { await transport.stop() }
+        do {
+            try await transport.start()
+        } catch {
+            await connectFailed(error)
+            return
+        }
+        await bringUp(transport)
     }
 
     /// Find the pager over Bluetooth (sharing the system keyboard link when
     /// iOS already holds it) and bring the link up.
     func connectBLE() async {
-        #if canImport(CoreBluetooth)
-            cancelReconnect()
-            userDisconnected = false
-            guard await beginConnect("BLE: looking for the pager…") else { return }
-            linkIsBLE = true
-            let transport = BLETransport { [weak self] line in
-                Task { @MainActor in self?.appendLog("BLE: \(line)") }
-            }
-            stopTransport = { transport.stop() }
-            do {
-                try await transport.start()
-            } catch {
-                await connectFailed(error)
-                return
-            }
-            await bringUp(transport)
-        #else
-            state = .failed("Bluetooth transport needs CoreBluetooth")
-            appendLog("connect unavailable: CoreBluetooth missing")
-        #endif
+        cancelReconnect()
+        userDisconnected = false
+        guard await beginConnect("BLE: looking for the pager…") else { return }
+        linkIsBLE = true
+        let transport = BLETransport { [weak self] line in
+            Task { @MainActor in self?.appendLog("BLE: \(line)") }
+        }
+        stopTransport = { transport.stop() }
+        do {
+            try await transport.start()
+        } catch {
+            await connectFailed(error)
+            return
+        }
+        await bringUp(transport)
     }
 
     /// Common pre-connect: drop any old link, enter `.connecting`.
@@ -194,11 +184,7 @@ final class PagerSession: ObservableObject {
             appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
 
             // Auto time sync on connect (plan §4.5: sys.time.set).
-            try await sys.setTime(
-                epoch: Int(Date().timeIntervalSince1970),
-                tz: TimeZone.current.identifier
-            )
-            appendLog("time synced (\(TimeZone.current.identifier))")
+            try await setClock(sys)
 
             await refresh()
             location.requestAuthorizationIfNeeded()
@@ -246,12 +232,12 @@ final class PagerSession: ObservableObject {
 
     /// `sys.info` — battery, storage and Wi-Fi status.
     func refresh() async {
-        guard let session else {
+        guard let sys else {
             appendLog("refresh: not connected")
             return
         }
         do {
-            info = try await SysService(session: session).info()
+            info = try await sys.info()
             appendLog("sys.info updated")
         } catch {
             appendLog("sys.info failed: \(error)")
@@ -260,13 +246,13 @@ final class PagerSession: ObservableObject {
 
     /// `sys.ping` — round-trip time, measured with `ContinuousClock`.
     func ping() async {
-        guard let session else {
+        guard let sys else {
             appendLog("ping: not connected")
             return
         }
         let start = ContinuousClock.now
         do {
-            let echoed = try await SysService(session: session).ping(t: Int(Date().timeIntervalSince1970))
+            let echoed = try await sys.ping(t: Int(Date().timeIntervalSince1970))
             let elapsed = ContinuousClock.now - start
             lastRTT = elapsed
             appendLog("sys.ping ok (echo \(echoed), \(Self.describe(elapsed)))")
@@ -277,19 +263,27 @@ final class PagerSession: ObservableObject {
 
     /// `sys.time.set` — re-send the current epoch + IANA zone.
     func syncTime() async {
-        guard let session else {
+        guard let sys else {
             appendLog("sync time: not connected")
             return
         }
         do {
-            try await SysService(session: session).setTime(
-                epoch: Int(Date().timeIntervalSince1970),
-                tz: TimeZone.current.identifier
-            )
-            appendLog("time synced (\(TimeZone.current.identifier))")
+            try await setClock(sys)
         } catch {
             appendLog("time sync failed: \(error)")
         }
+    }
+
+    /// Set the pager clock to now in the phone's IANA zone.
+    private func setClock(_ sys: SysService) async throws {
+        let zone = TimeZone.current.identifier
+        try await sys.setTime(epoch: Int(Date().timeIntervalSince1970), tz: zone)
+        appendLog("time synced (\(zone))")
+    }
+
+    /// `sys.*` on the current link, if any.
+    private var sys: SysService? {
+        session.map { SysService(session: $0) }
     }
 
     /// Tear the link down and clear the transient device state.
@@ -332,9 +326,7 @@ final class PagerSession: ObservableObject {
 
     /// Format a duration the way the Diagnostics screen shows it.
     nonisolated static func describe(_ duration: Duration) -> String {
-        let seconds = Double(duration.components.seconds)
-            + Double(duration.components.attoseconds) / 1e18
-        return String(format: "%.1f ms", seconds * 1000)
+        String(format: "%.1f ms", duration / .milliseconds(1))
     }
 
     private static let logger = Logger(subsystem: "PagerCompanion", category: "session")

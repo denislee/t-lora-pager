@@ -155,5 +155,7 @@ help:
 	@echo "                     (DEVICE_TYPE=iPad, or DEVICE=<udid> to pick one)"
 	@echo "  make device-run  - the same, then launch it with the console attached"
 	@echo "  make device-console - launch the installed app with its console"
+	@echo "  make device-log  - stream the app's [pagerlink] log over USB (any iOS)"
+	@echo "  make clean-device - remove the device build ($(DD))"
 	@echo "  make clean       - remove PagerKit/.build and DerivedData"
 	@echo "  make help        - show this help"

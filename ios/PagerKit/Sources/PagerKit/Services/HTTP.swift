@@ -25,6 +25,21 @@ struct HTTPReply: Sendable {
 /// completion-handler `dataTask` (bridged to async) because it behaves the same
 /// on Darwin and on Linux `FoundationNetworking`.
 enum HTTP {
+    /// A request with what every service sets: method, timeout, an optional
+    /// bearer token, and an optional JSON body with its Content-Type.
+    static func request(url: URL, method: String = "GET", timeout: TimeInterval,
+                        bearer: String? = nil, json: JSONValue? = nil) throws -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = timeout
+        if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+        if let json {
+            request.httpBody = Data(try json.encoded())
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        return request
+    }
+
     /// Send `request` once and return the status and body.
     static func send(_ request: URLRequest, using session: URLSession) async throws -> HTTPReply {
         try await withCheckedThrowingContinuation { continuation in
@@ -70,7 +85,7 @@ enum HTTP {
             if let deadline {
                 let left = deadline - ContinuousClock.now
                 guard left > .zero else { throw lastError }
-                request.timeoutInterval = min(request.timeoutInterval, seconds(left))
+                request.timeoutInterval = min(request.timeoutInterval, left / .seconds(1))
             }
             do {
                 let reply = try await send(request, using: session)
@@ -86,11 +101,6 @@ enum HTTP {
             }
         }
         throw lastError
-    }
-
-    static func seconds(_ duration: Duration) -> TimeInterval {
-        let (whole, atto) = duration.components
-        return TimeInterval(whole) + TimeInterval(atto) / 1e18
     }
 
     static func retryable(_ status: Int) -> Bool {

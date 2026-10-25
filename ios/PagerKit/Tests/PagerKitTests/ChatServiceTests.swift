@@ -61,7 +61,7 @@ private final class FakeChatBackend: ChatBackend, @unchecked Sendable {
         _error = error
     }
 
-    func transcribe(wav: [UInt8]) async throws -> String {
+    func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String {
         let error = lock.withLock { () -> ChatBackendError? in
             _wavs.append(wav)
             return _error
@@ -70,7 +70,7 @@ private final class FakeChatBackend: ChatBackend, @unchecked Sendable {
         return "ola"
     }
 
-    func complete(history: [ChatTurn]) async throws -> String {
+    func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String {
         let (calls, error) = lock.withLock { () -> (Int, ChatBackendError?) in
             _histories.append(history)
             _completeCalls += 1
@@ -528,10 +528,6 @@ final class ChatServiceTests: XCTestCase {
             defer { lock.unlock() }
             _deadlines.append(deadline)
         }
-
-        func transcribe(wav: [UInt8]) async throws -> String { "ok" }
-
-        func complete(history: [ChatTurn]) async throws -> String { "ok" }
 
         func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String {
             record(deadline)

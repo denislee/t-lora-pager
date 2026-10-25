@@ -51,7 +51,6 @@ public final class BLETransport: NSObject, PacketTransport, @unchecked Sendable 
     /// Human-readable progress lines (discovery path, MTU, info JSON),
     /// called on the transport's private queue.
     private let onLog: (@Sendable (String) -> Void)?
-    private var info: String?
 
     public init(scanTimeout: TimeInterval = 10, log: (@Sendable (String) -> Void)? = nil) {
         self.scanTimeout = scanTimeout
@@ -62,16 +61,16 @@ public final class BLETransport: NSObject, PacketTransport, @unchecked Sendable 
         super.init()
     }
 
-    /// The `info` characteristic JSON, once read.
-    public var infoJSON: String? {
-        queue.sync { info }
-    }
-
     public var packetSize: Int {
         queue.sync {
-            guard let peripheral else { return 20 }
-            return max(20, peripheral.maximumWriteValueLength(for: .withoutResponse))
+            guard let peripheral else { return PagerLink.minPacket }
+            return Self.writeSize(of: peripheral)
         }
+    }
+
+    /// ATT_MTU − 3 for writes without response, never below the protocol floor.
+    private static func writeSize(of peripheral: CBPeripheral) -> Int {
+        max(PagerLink.minPacket, peripheral.maximumWriteValueLength(for: .withoutResponse))
     }
 
     /// Find the pager, connect, discover the service, subscribe to `tx`.
@@ -177,10 +176,6 @@ public final class BLETransport: NSObject, PacketTransport, @unchecked Sendable 
         central?.connect(p, options: nil)
     }
 
-    private func fail(_ reason: String) {
-        close(reason: reason)
-    }
-
     private func close(reason: String) {
         guard !closed else { return }
         closed = true
@@ -219,11 +214,11 @@ extension BLETransport: CBCentralManagerDelegate {
                 discover()
             }
         case .poweredOff:
-            fail("Bluetooth is off")
+            close(reason: "Bluetooth is off")
         case .unauthorized:
-            fail("Bluetooth permission denied (Settings → Pager Companion)")
+            close(reason: "Bluetooth permission denied (Settings → Pager Companion)")
         case .unsupported:
-            fail("Bluetooth LE unsupported on this device")
+            close(reason: "Bluetooth LE unsupported on this device")
         default:
             break  // .unknown / .resetting: wait for the next update
         }
@@ -251,7 +246,7 @@ extension BLETransport: CBCentralManagerDelegate {
         didFailToConnect peripheral: CBPeripheral,
         error: Error?
     ) {
-        fail("BLE connect failed: \(error?.localizedDescription ?? "unknown")")
+        close(reason: "BLE connect failed: \(error?.localizedDescription ?? "unknown")")
     }
 
     public func centralManager(
@@ -259,7 +254,7 @@ extension BLETransport: CBCentralManagerDelegate {
         didDisconnectPeripheral peripheral: CBPeripheral,
         error: Error?
     ) {
-        fail("BLE disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")")
+        close(reason: "BLE disconnected\(error.map { ": \($0.localizedDescription)" } ?? "")")
     }
 }
 
@@ -268,11 +263,11 @@ extension BLETransport: CBCentralManagerDelegate {
 extension BLETransport: CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error {
-            fail("service discovery failed: \(error.localizedDescription)")
+            close(reason: "service discovery failed: \(error.localizedDescription)")
             return
         }
         guard let service = peripheral.services?.first(where: { $0.uuid == PagerLinkUUID.serviceCB }) else {
-            fail("pager doesn't expose PagerLink. Is the firmware updated? \(Self.staleCacheHint)")
+            close(reason: "pager doesn't expose PagerLink. Is the firmware updated? \(Self.staleCacheHint)")
             return
         }
         peripheral.discoverCharacteristics(
@@ -287,7 +282,7 @@ extension BLETransport: CBPeripheralDelegate {
         error: Error?
     ) {
         if let error {
-            fail("characteristic discovery failed: \(error.localizedDescription)")
+            close(reason: "characteristic discovery failed: \(error.localizedDescription)")
             return
         }
         for c in service.characteristics ?? [] {
@@ -299,7 +294,7 @@ extension BLETransport: CBPeripheralDelegate {
             }
         }
         guard let tx, rx != nil else {
-            fail("PagerLink service is missing rx/tx")
+            close(reason: "PagerLink service is missing rx/tx")
             return
         }
         if let infoChar {
@@ -317,13 +312,13 @@ extension BLETransport: CBPeripheralDelegate {
     ) {
         guard characteristic.uuid == PagerLinkUUID.txCB else { return }
         if let error {
-            fail("subscribe to tx failed: \(error.localizedDescription)")
+            close(reason: "subscribe to tx failed: \(error.localizedDescription)")
             return
         }
         guard characteristic.isNotifying else { return }
         guard !ready, !closed else { return }
         ready = true
-        log("PagerLink up, packet size \(max(20, peripheral.maximumWriteValueLength(for: .withoutResponse)))")
+        log("PagerLink up, packet size \(Self.writeSize(of: peripheral))")
         startContinuation?.resume()
         startContinuation = nil
     }
@@ -339,9 +334,7 @@ extension BLETransport: CBPeripheralDelegate {
             guard ready, !value.isEmpty else { return }
             continuation.yield([UInt8](value))
         case PagerLinkUUID.infoCB:
-            let json = String(decoding: value, as: UTF8.self)
-            info = json
-            log("info \(json)")
+            log("info \(String(decoding: value, as: UTF8.self))")
         default:
             break
         }
@@ -353,7 +346,7 @@ extension BLETransport: CBPeripheralDelegate {
 
     public func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
         if invalidatedServices.contains(where: { $0.uuid == PagerLinkUUID.serviceCB }) {
-            fail("pager's PagerLink service went away")
+            close(reason: "pager's PagerLink service went away")
         }
     }
 }

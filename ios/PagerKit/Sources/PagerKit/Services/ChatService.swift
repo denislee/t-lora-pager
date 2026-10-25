@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 /// One turn of chat history, as the OpenAI-compatible API names them.
-public struct ChatTurn: Sendable, Equatable, Codable {
+public struct ChatTurn: Sendable, Equatable {
     public let role: String
     public let content: String
 
@@ -23,26 +23,13 @@ public enum ChatBackendError: Error, Equatable, Sendable {
     case upstream(String)
 }
 
-/// Speech-to-text plus chat completion. `complete` gets the conversation so
-/// far (oldest first, ending with the user's new turn) without the system
-/// prompt, which is the backend's business.
+/// Speech-to-text plus chat completion, each finishing (retries included)
+/// by `deadline` (P7.59). `complete` gets the conversation so far (oldest
+/// first, ending with the user's new turn) without the system prompt, which
+/// is the backend's business.
 public protocol ChatBackend: Sendable {
-    func transcribe(wav: [UInt8]) async throws -> String
-    func complete(history: [ChatTurn]) async throws -> String
-    /// The same, finishing (retries included) by `deadline` (P7.59).
     func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String
     func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String
-}
-
-extension ChatBackend {
-    /// Backends without a time budget ignore the deadline.
-    public func transcribe(wav: [UInt8], deadline: ContinuousClock.Instant) async throws -> String {
-        try await transcribe(wav: wav)
-    }
-
-    public func complete(history: [ChatTurn], deadline: ContinuousClock.Instant) async throws -> String {
-        try await complete(history: history)
-    }
 }
 
 /// Groq's OpenAI-compatible API: Whisper for speech, Llama for the reply. A
@@ -123,17 +110,12 @@ public struct GroqChatBackend: ChatBackend {
         body.append(contentsOf: wav)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
-        var request = URLRequest(url: baseURL.appendingPathComponent("audio/transcriptions"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = Self.requestTimeout
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        var request = try HTTP.request(url: baseURL.appendingPathComponent("audio/transcriptions"),
+                                       method: "POST", timeout: Self.requestTimeout, bearer: key)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
 
         let value = try await exchange(request, deadline: deadline)
-        if let message = value["error"]?["message"]?.stringValue {
-            throw ChatBackendError.upstream("groq: \(message)")
-        }
         return (value["text"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -151,24 +133,18 @@ public struct GroqChatBackend: ChatBackend {
         }
         let payload: JSONValue = ["model": .string(Self.chatModel), "messages": .array(messages)]
 
-        var request = URLRequest(url: baseURL.appendingPathComponent("chat/completions"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = Self.requestTimeout
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data(try payload.encoded())
+        let request = try HTTP.request(url: baseURL.appendingPathComponent("chat/completions"),
+                                       method: "POST", timeout: Self.requestTimeout, bearer: key, json: payload)
 
         let value = try await exchange(request, deadline: deadline)
-        if let message = value["error"]?["message"]?.stringValue {
-            throw ChatBackendError.upstream("groq: \(message)")
-        }
         guard case .array(let choices)? = value["choices"], let first = choices.first else {
             throw ChatBackendError.upstream("no choices in response")
         }
         return (first["message"]?["content"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// lilyhub `do`: retried exchange; non-2xx becomes `upstream N: <body>`.
+    /// lilyhub `do`: retried exchange; non-2xx becomes `upstream N: <body>`,
+    /// and a 2xx carrying Groq's `error.message` becomes `groq: <message>`.
     private func exchange(_ request: URLRequest, deadline: ContinuousClock.Instant) async throws -> JSONValue {
         let reply: HTTPReply
         do {
@@ -184,11 +160,16 @@ public struct GroqChatBackend: ChatBackend {
         guard reply.status / 100 == 2 else {
             throw ChatBackendError.upstream("upstream \(reply.status): \(HTTP.truncate(HTTP.text(reply.body), 200))")
         }
+        let value: JSONValue
         do {
-            return try JSONValue.decode(bytes: Array(reply.body))
+            value = try JSONValue.decode(bytes: Array(reply.body))
         } catch {
             throw ChatBackendError.upstream("parse: \(error)")
         }
+        if let message = value["error"]?["message"]?.stringValue {
+            throw ChatBackendError.upstream("groq: \(message)")
+        }
+        return value
     }
 }
 
@@ -251,9 +232,6 @@ public actor ChatService {
 
     /// Turns currently held (user + assistant).
     public var historyCount: Int { history.count }
-
-    /// The conversation so far, oldest first.
-    public var conversation: [ChatTurn] { history }
 
     // MARK: - chat.audio.begin
 
@@ -414,26 +392,5 @@ public actor ChatService {
         default:
             return RPCError(code: "http_error", msg: "\(stage): \(error)")
         }
-    }
-}
-
-/// Strict JSON-number readers for request params. `JSONValue` keeps numbers as
-/// `Double`, so "integer" means integral and in range (a fraction, a string or
-/// a bool is rejected).
-enum Params {
-    static func int64(_ value: JSONValue?) -> Int64? {
-        guard case .number(let number)? = value, number.isFinite, number == number.rounded(),
-              number >= -9_007_199_254_740_992, number <= 9_007_199_254_740_992 else { return nil }
-        return Int64(number)
-    }
-
-    static func uint32(_ value: JSONValue?) -> UInt32? {
-        guard let n = int64(value), n >= 0, n <= Int64(UInt32.max) else { return nil }
-        return UInt32(n)
-    }
-
-    static func uint16(_ value: JSONValue?) -> UInt16? {
-        guard let n = int64(value), n >= 0, n <= Int64(UInt16.max) else { return nil }
-        return UInt16(n)
     }
 }

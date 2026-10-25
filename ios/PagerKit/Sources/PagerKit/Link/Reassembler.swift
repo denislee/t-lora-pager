@@ -25,13 +25,6 @@ public struct Reassembler: Sendable {
 
     public init() {}
 
-    /// Reset expected_seq to 0, drop any partial message, leave discard state.
-    public mutating func reset() {
-        expected = 0
-        partial = nil
-        discarding = false
-    }
-
     /// Feed one packet (flags byte + message bytes) and return the events it
     /// produced.
     public mutating func feed(_ packet: [UInt8]) -> [ReassemblyEvent] {

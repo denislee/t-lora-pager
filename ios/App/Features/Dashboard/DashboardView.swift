@@ -1,4 +1,3 @@
-import Foundation
 import PagerKit
 import SwiftUI
 
@@ -8,8 +7,8 @@ import SwiftUI
 struct DashboardView: View {
     @EnvironmentObject private var session: PagerSession
 
-    @State private var host = "127.0.0.1"
-    @State private var port = "7600"
+    @State private var host = TCPTransport.defaultHost
+    @State private var port = String(TCPTransport.defaultPort)
 
     var body: some View {
         NavigationStack {

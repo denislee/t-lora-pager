@@ -146,8 +146,7 @@ public struct WeatherService: Sendable {
     // MARK: - HTTP
 
     private func get(_ url: URL, stage: String) async throws -> Data {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = Self.requestTimeout
+        let request = try HTTP.request(url: url, timeout: Self.requestTimeout)
         let reply: HTTPReply
         do {
             reply = try await HTTP.send(request, using: http)

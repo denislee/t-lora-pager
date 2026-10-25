@@ -10,7 +10,7 @@ import PagerKit
 /// relaunches; `logOut()` ends it on Telegram's side too.
 @MainActor
 final class TelegramAccount: ObservableObject {
-    enum Phase: Equatable {
+    enum Phase {
         case needsKeys
         case starting
         case waitPhone
@@ -91,10 +91,8 @@ final class TelegramAccount: ObservableObject {
         Task {
             do {
                 _ = try await client.query(request)
-            } catch let error as TDError {
-                lastError = error.message
             } catch {
-                lastError = String(describing: error)
+                lastError = Self.describe(error)
             }
             busy = false
         }
@@ -166,17 +164,18 @@ final class TelegramAccount: ObservableObject {
         ]
         do {
             _ = try await client.query(request)
-        } catch let error as TDError {
-            lastError = error.message
         } catch {
-            lastError = String(describing: error)
+            lastError = Self.describe(error)
         }
+    }
+
+    /// TDLib's own message for a `TDError`, else the error as Swift prints it.
+    nonisolated private static func describe(_ error: Error) -> String {
+        (error as? TDError)?.message ?? String(describing: error)
     }
 
     private func loadMe() async {
         guard let me = try? await client.query(["@type": "getMe"]) else { return }
-        let name = [me["first_name"]?.stringValue, me["last_name"]?.stringValue]
-            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
-        if case .ready = phase { phase = .ready(name: name) }
+        if case .ready = phase { phase = .ready(name: TDTelegram.displayName(me)) }
     }
 }

@@ -6,8 +6,8 @@ T‑LoRa‑Pager and the phone. It lives in this repository next to the firmware
 golden vectors in one commit (see `IOS_COMPANION_PLAN.md` §3.2).
 
 The app target is `PagerCompanion`. `PagerKit` is a plain Swift package that
-holds the framing codec, the RPC session and the transports; it has no
-UIKit/SwiftUI imports and builds (and tests) without Xcode.
+holds the framing codec, the RPC session, the transports and the phone-side
+services; it has no UIKit/SwiftUI imports and builds (and tests) without Xcode.
 
 ## Prerequisites
 
@@ -26,7 +26,7 @@ UIKit/SwiftUI imports and builds (and tests) without Xcode.
 ios/
   README.md                       this file
   project.yml                     XcodeGen spec (source of truth)
-  Makefile                        gen / test / test-linux / sim / clean
+  Makefile                        gen / test / test-linux / sim / device* / clean*
   .swift-format                   swift-format style config
   Config/
     Base.xcconfig                 shared build settings
@@ -34,14 +34,16 @@ ios/
   Resources/Info.plist            app Info.plist (build-setting variables)
   App/
     PagerCompanionApp.swift       @main, injects PagerSession + TelegramAccount
-    Session/PagerSession.swift    @Observable @MainActor link state
+    Session/PagerSession.swift    @MainActor ObservableObject link state
+    Session/LocationProvider.swift  CoreLocation fix + city for weather "auto"
     Telegram/…                    TDLib JSON client + the phone's Telegram login
     Features/RootView.swift       Dashboard / Telegram / Diagnostics tabs
     Features/Dashboard/…          connection + sys.info
     Features/Telegram/…           api keys, phone/code/2FA login, log out
     Features/Diagnostics/…        ping + session log
   PagerKit/                       Swift package (no UIKit/SwiftUI)
-    Sources/PagerKit/…            Transport / Link / RPC / Services / Model
+    Sources/PagerKit/…            Transport (BLE, TCP) / Link / RPC / Model /
+                                  Services (sys, weather, tg + TDLib, chat, notes)
     Tests/PagerKitTests/…         XCTest (reads ../../protocol/vectors)
 ```
 
@@ -96,8 +98,8 @@ checkout still generates and builds (unsigned, Simulator-only).
 
 ## Simulator ↔ emulator
 
-The iOS Simulator has no CoreBluetooth, so the app talks to the **emulator**
-over TCP. The emulator speaks the same PagerLink packets, length-prefixed
+The iOS Simulator has no Bluetooth radio, so there the app talks to the
+**emulator** over TCP. The emulator speaks the same PagerLink packets, length-prefixed
 (`protocol/PROTOCOL.md` §5).
 
 1. Build and run the emulator from the repo root:
@@ -114,7 +116,8 @@ over TCP. The emulator speaks the same PagerLink packets, length-prefixed
    iPhone Simulator, Run).
 
 3. In the app's **Dashboard** tab, open the **Emulator** disclosure group,
-   confirm host `127.0.0.1` / port `7600`, and tap **Connect**. The state goes
+   confirm host `127.0.0.1` / port `7600`, and tap **Connect to emulator**
+   (just below the group). The state goes
    to *Connected*, `sys.hello` fills firmware/board, the clock is synced, and
    `sys.info` fills battery, storage and Wi‑Fi.
 
@@ -141,13 +144,15 @@ falls back to the bridge the pager sends, if any.
 ## Status
 
 - **Phase 1, in progress.** The emulator/TCP path is wired end to end: the
-  Dashboard connects, shows live battery/storage/Wi‑Fi/hub, sets the clock and
+  Dashboard connects, shows live battery/storage/Wi‑Fi, sets the clock and
   zone on connect, and Diagnostics pings and logs.
-- **BLE transport pending Spikes S1/S2.** There is no `BLETransport` yet; the
-  CoreBluetooth central, state restoration and passkey pairing land once S1
-  (HID + a link service on one NimBLE server we own) and S2 (iOS letting the app
-  use PagerLink while the system holds the pager as a keyboard) are confirmed.
-  See `IOS_COMPANION_PLAN.md` §7.
+- **BLE is the main connect path.** `BLETransport` (a CoreBluetooth central)
+  backs **Connect via Bluetooth** and the auto-connect toggle (retries with
+  backoff). It shares the link iOS already holds for the pager as a keyboard,
+  falls back to the last pager used and then a scan, and lets iOS pair on the
+  encrypted rx/tx characteristics. State restoration is not wired yet, and
+  hardware acceptance is still open (`HUB_REMOVAL_PLAN.md` W15). See
+  `IOS_COMPANION_PLAN.md` §7.
 - **The app target builds on macOS** (`make gen && make sim`, Xcode 26, no
   warnings under strict concurrency). `TCPTransportTests` drives
   `TCPTransport` + `LinkSession` against a loopback-socket pager: connect

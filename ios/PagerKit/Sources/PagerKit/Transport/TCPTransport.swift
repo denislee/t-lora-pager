@@ -63,8 +63,7 @@ public actor TCPTransport: PacketTransport {
         }
         var record: [UInt8] = []
         record.reserveCapacity(2 + packet.count)
-        record.append(UInt8(length & 0xFF))
-        record.append(UInt8((length >> 8) & 0xFF))
+        LE.appendU16(&record, length)
         record.append(contentsOf: packet)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: Data(record), completion: .contentProcessed { error in
@@ -123,31 +122,30 @@ public actor TCPTransport: PacketTransport {
             close(reason: error.map { "TCP receive failed: \($0)" } ?? "TCP peer closed")
             return
         }
-        let start = data.startIndex
-        let length = Int(data[start]) | (Int(data[start + 1]) << 8)
-        receiveBody(remaining: length, buffer: [])
+        receiveBody(length: Int(LE.u16([UInt8](data), 0)))
     }
 
-    private func receiveBody(remaining: Int, buffer: [UInt8]) {
+    private func receiveBody(length: Int) {
         guard let connection else { return }
-        if remaining == 0 {
-            continuation.yield(buffer)
+        guard length > 0 else {
+            continuation.yield([])
             receiveLength()
             return
         }
-        connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { [weak self] data, _, _, error in
-            Task { await self?.handleBody(data, error: error, remaining: remaining, buffer: buffer) }
+        // minimumIncompleteLength == length: the whole record in one callback,
+        // or less only at EOF / on error.
+        connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, _, error in
+            Task { await self?.handleBody(data, error: error, length: length) }
         }
     }
 
-    private func handleBody(_ data: Data?, error: NWError?, remaining: Int, buffer: [UInt8]) {
-        guard error == nil, let data, !data.isEmpty else {
+    private func handleBody(_ data: Data?, error: NWError?, length: Int) {
+        guard error == nil, let data, data.count == length else {
             close(reason: error.map { "TCP receive failed: \($0)" } ?? "TCP peer closed")
             return
         }
-        var buffer = buffer
-        buffer.append(contentsOf: data)
-        receiveBody(remaining: remaining - data.count, buffer: buffer)
+        continuation.yield([UInt8](data))
+        receiveLength()
     }
 }
 #endif

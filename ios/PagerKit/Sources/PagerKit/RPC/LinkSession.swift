@@ -1,5 +1,3 @@
-import Foundation
-
 /// Metadata `fs.read` reports for one file (PROTOCOL.md §6.1). `protected`
 /// marks `Salted__` ciphertext; the bytes are always the on-disk bytes.
 public struct FileInfo: Sendable, Equatable {
@@ -57,9 +55,6 @@ public actor LinkSession {
 
     /// Cumulative counters for the failure modes the link layer observes.
     public struct Stats: Sendable, Equatable {
-        public var malformed = 0
-        public var lateResponses = 0
-        public var linkResets = 0
         /// DATA/ACK for a transfer id with no receiver/sender here.
         public var unroutedBulk = 0
 
@@ -87,26 +82,42 @@ public actor LinkSession {
         let onFailure: (@Sendable () -> Void)?
     }
 
+    /// What both transfer directions share: the idle clock, the caller
+    /// waiting for the end, and the watchdog timing it out.
+    private class Transfer {
+        var lastActivity = ContinuousClock.now
+        var waiter: CheckedContinuation<Void, Error>?
+        var watchdog: Task<Void, Never>?
+
+        /// Stop the watchdog and fail the waiter, if any.
+        func fail(_ error: Error) {
+            watchdog?.cancel()
+            waiter?.resume(throwing: error)
+            waiter = nil
+        }
+
+        /// Resume the waiter, if any: the transfer is no longer active.
+        func wake() {
+            guard let waiter else { return }
+            self.waiter = nil
+            waiter.resume()
+        }
+    }
+
     /// A transfer this side receives. DATA that arrives before the size is
     /// known (`openIncoming` → RES → `receiveBytes`) is held in `early`.
-    private final class Inbound {
+    private final class Inbound: Transfer {
         var receiver: XferReceiver?
         var early: [[UInt8]] = []
         var data: [UInt8] = []
         var acks: [[UInt8]] = []
-        var lastActivity = ContinuousClock.now
-        var waiter: CheckedContinuation<Void, Error>?
-        var watchdog: Task<Void, Never>?
     }
 
     /// A transfer this side sends under the peer's receiver id.
-    private final class Outbound {
+    private final class Outbound: Transfer {
         var sender: XferSender?
         var out: [[UInt8]] = []
-        var lastActivity = ContinuousClock.now
         var lastRetransmit = ContinuousClock.now
-        var waiter: CheckedContinuation<Void, Error>?
-        var watchdog: Task<Void, Never>?
     }
 
     /// Early DATA held per transfer before its size is known (the Go client's
@@ -208,20 +219,10 @@ public actor LinkSession {
             entry.timeoutTask.cancel()
             entry.continuation.resume(throwing: RPCError.disconnected())
         }
-        let doomedIn = inbound
+        let doomedTransfers: [Transfer] = Array(inbound.values) + Array(outbound.values)
         inbound.removeAll()
-        for (_, transfer) in doomedIn {
-            transfer.watchdog?.cancel()
-            transfer.waiter?.resume(throwing: RPCError.disconnected())
-            transfer.waiter = nil
-        }
-        let doomedOut = outbound
         outbound.removeAll()
-        for (_, transfer) in doomedOut {
-            transfer.watchdog?.cancel()
-            transfer.waiter?.resume(throwing: RPCError.disconnected())
-            transfer.waiter = nil
-        }
+        for transfer in doomedTransfers { transfer.fail(RPCError.disconnected()) }
     }
 
     /// Register or replace the handler for `method`.
@@ -293,11 +294,7 @@ public actor LinkSession {
     /// `receiveBytes` names the size. Used for `fs.read` and for a request that
     /// offers the peer an `xfer` for a bulk reply (`tg.*`).
     public func openIncoming() -> UInt16 {
-        var id = nextXfer
-        for _ in 0..<32768 {
-            if inbound[id] == nil { break }
-            id = advanceId(id)
-        }
+        let id = firstFree(from: nextXfer) { inbound[$0] != nil } ?? nextXfer
         nextXfer = advanceId(id)
         inbound[id] = Inbound()
         return id
@@ -313,10 +310,7 @@ public actor LinkSession {
 
     /// Drop a receive transfer; buffered bytes are discarded.
     public func closeIncoming(_ xfer: UInt16) {
-        guard let transfer = inbound.removeValue(forKey: xfer) else { return }
-        transfer.watchdog?.cancel()
-        transfer.waiter?.resume(throwing: RPCError.disconnected("transfer closed"))
-        transfer.waiter = nil
+        inbound.removeValue(forKey: xfer)?.fail(RPCError.disconnected("transfer closed"))
     }
 
     /// Stream `data` as DATA under `xfer`, a receiver id the PEER allocated
@@ -334,11 +328,7 @@ public actor LinkSession {
             send: { [unowned transfer] payload in transfer.out.append(payload) }
         )
         transfer.sender = sender
-        if let previous = outbound[xfer] {
-            previous.watchdog?.cancel()
-            previous.waiter?.resume(throwing: RPCError(code: "internal", msg: "transfer replaced"))
-            previous.waiter = nil
-        }
+        outbound[xfer]?.fail(RPCError(code: "internal", msg: "transfer replaced"))
         outbound[xfer] = transfer
         defer {
             if outbound[xfer] === transfer { outbound[xfer] = nil }
@@ -374,7 +364,7 @@ public actor LinkSession {
             "path": .string(path),
             "xfer": .number(Double(id)),
         ], timeout: timeout)
-        guard let size = Self.uint32(result["size"]), let crc = Self.uint32(result["crc32"]) else {
+        guard let size = Params.uint32(result["size"]), let crc = Params.uint32(result["crc32"]) else {
             throw RPCError(code: "internal", msg: "fs.read: bad response")
         }
         let info = FileInfo(size: size, crc32: crc, protected: result["protected"]?.boolValue ?? false)
@@ -391,12 +381,6 @@ public actor LinkSession {
             return []
         }
         return try await finishIncoming(transfer.xfer, crc32: transfer.crc32, timeout: timeout, label: "accept")
-    }
-
-    private static func uint32(_ value: JSONValue?) -> UInt32? {
-        guard let number = value?.doubleValue, number >= 0, number <= Double(UInt32.max),
-              number == number.rounded() else { return nil }
-        return UInt32(number)
     }
 
     /// Largest receive buffer reserved before the bytes arrive.
@@ -530,8 +514,7 @@ public actor LinkSession {
                 sender.pump()
                 flushData(transfer, xfer: xfer)
                 if sender.state != .active {
-                    transfer.waiter = nil
-                    waiter.resume()
+                    transfer.wake()
                     return nil
                 }
             }
@@ -572,10 +555,7 @@ public actor LinkSession {
         }
         receiver.onData(message.payload)
         flushAcks(transfer, xfer: message.id)
-        if receiver.state != .active, let waiter = transfer.waiter {
-            transfer.waiter = nil
-            waiter.resume()
-        }
+        if receiver.state != .active { transfer.wake() }
     }
 
     private func handleAck(_ message: Message) {
@@ -587,10 +567,7 @@ public actor LinkSession {
         sender.onAck(message.payload)
         sender.pump()
         flushData(transfer, xfer: message.id)
-        if sender.state != .active, let waiter = transfer.waiter {
-            transfer.waiter = nil
-            waiter.resume()
-        }
+        if sender.state != .active { transfer.wake() }
     }
 
     // MARK: - Outgoing
@@ -602,15 +579,20 @@ public actor LinkSession {
     }
 
     private func allocId() -> UInt16 {
-        var id = nextId
+        guard let id = firstFree(from: nextId, inUse: { pending[$0] != nil }) else { return 0 }
+        nextId = advanceId(id)
+        return id
+    }
+
+    /// The first id of this side's parity from `start` on that is not in
+    /// use; nil when every one is.
+    private func firstFree(from start: UInt16, inUse: (UInt16) -> Bool) -> UInt16? {
+        var id = start
         for _ in 0..<32768 {
-            if pending[id] == nil {
-                nextId = advanceId(id)
-                return id
-            }
+            if !inUse(id) { return id }
             id = advanceId(id)
         }
-        return 0
+        return nil
     }
 
     /// Next id of this side's parity: phone `…, 65534, 2`, pager `…, 65535, 1`.
@@ -636,13 +618,9 @@ public actor LinkSession {
         for event in reassembler.feed(packet) {
             switch event {
             case .message(let bytes):
-                guard let message = try? Message.decode(bytes) else {
-                    stats.malformed += 1
-                    continue
-                }
+                guard let message = try? Message.decode(bytes) else { continue }
                 dispatch(message)
             case .reset(let reason):
-                stats.linkResets += 1
                 eventContinuation.yield((
                     name: "link.reset",
                     params: .object(["reason": .string(reason.rawValue)])
@@ -667,10 +645,7 @@ public actor LinkSession {
     }
 
     private func handleResponse(_ message: Message) {
-        guard let entry = pending.removeValue(forKey: message.id) else {
-            stats.lateResponses += 1
-            return
-        }
+        guard let entry = pending.removeValue(forKey: message.id) else { return }
         entry.timeoutTask.cancel()
         if message.type == .res {
             if let value = try? JSONValue.decode(bytes: message.payload) {
@@ -695,10 +670,7 @@ public actor LinkSession {
     private func handleEvent(_ message: Message) {
         guard let value = try? JSONValue.decode(bytes: message.payload),
               case .object(let object) = value,
-              let name = object["e"]?.stringValue else {
-            stats.malformed += 1
-            return
-        }
+              let name = object["e"]?.stringValue else { return }
         eventContinuation.yield((name: name, params: object["p"] ?? .object([:])))
     }
 

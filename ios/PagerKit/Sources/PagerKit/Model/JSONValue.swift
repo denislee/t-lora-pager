@@ -1,43 +1,15 @@
 import Foundation
 
 /// A JSON value modelled as a Swift enum (PROTOCOL.md §3.1 payloads). Encodes
-/// with a shared `JSONEncoder` and decodes from `JSONSerialization` output.
-public enum JSONValue: Codable, Equatable, Sendable, Hashable {
+/// with a shared `JSONEncoder` and decodes from `JSONSerialization` output
+/// (`decode(bytes:)`), so it is `Encodable` only.
+public enum JSONValue: Encodable, Equatable, Sendable, Hashable {
     case null
     case bool(Bool)
     case number(Double)
     case string(String)
     case array([JSONValue])
     case object([String: JSONValue])
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-            return
-        }
-        if let value = try? container.decode(Bool.self) {
-            self = .bool(value)
-            return
-        }
-        if let value = try? container.decode(Double.self) {
-            self = .number(value)
-            return
-        }
-        if let value = try? container.decode(String.self) {
-            self = .string(value)
-            return
-        }
-        if let value = try? container.decode([JSONValue].self) {
-            self = .array(value)
-            return
-        }
-        if let value = try? container.decode([String: JSONValue].self) {
-            self = .object(value)
-            return
-        }
-        throw DecodingError.dataCorruptedError(in: container, debugDescription: "unknown JSON value")
-    }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
@@ -135,7 +107,7 @@ extension JSONValue {
     #else
     // swift-corelibs-foundation returns its `__NSCFBoolean` singletons for
     // `true`/`false`, the same class as `NSNumber(value: true)`.
-    nonisolated(unsafe) private static let booleanClass: AnyClass = type(of: NSNumber(value: true))
+    private static let booleanClass: AnyClass = type(of: NSNumber(value: true))
     private static func isBoolean(_ number: NSNumber) -> Bool {
         ObjectIdentifier(type(of: number)) == ObjectIdentifier(booleanClass)
     }

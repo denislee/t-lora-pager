@@ -8,9 +8,10 @@ import FoundationNetworking
 /// over the phone's internet.
 ///
 /// Validation matches the mock phone (`tools/pagerlink/cmd/pagerlink/
-/// tgbridge.go`): `bridge` and `token` are required on every call; `chat_id`,
-/// `limit`, `up_to` and `xfer` must be JSON integers; `limit` is 1..100; a
-/// non-zero `xfer` must be odd. The phone builds only the fixed bridge paths —
+/// tgbridge.go`): `bridge` and `token` are required on every call the bridge
+/// answers (not when `native` does, below); `chat_id`, `limit`, `up_to` and
+/// `xfer` must be JSON integers; `limit` is 1..100; a non-zero `xfer` must be
+/// odd. The phone builds only the fixed bridge paths —
 /// it never fetches a path the pager supplies — and uses the bearer token for
 /// that one request: it is never logged, stored, or echoed in an error.
 ///
@@ -166,14 +167,8 @@ public struct TelegramService: Sendable {
         guard let url = URL(string: call.base + path) else {
             throw RPCError(code: "invalid_argument", msg: "bad bridge url")
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.timeoutInterval = Self.requestTimeout
-        request.setValue("Bearer \(call.token)", forHTTPHeaderField: "Authorization")
-        if let json {
-            request.httpBody = Data(try json.encoded())
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
+        let request = try HTTP.request(url: url, method: method, timeout: Self.requestTimeout,
+                                       bearer: call.token, json: json)
 
         let reply: HTTPReply
         do {

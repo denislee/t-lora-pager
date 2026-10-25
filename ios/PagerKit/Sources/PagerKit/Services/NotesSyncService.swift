@@ -266,16 +266,9 @@ public struct GitHubNotesBackend: NotesRemote {
     private func exchange(_ method: String, _ url: String, _ cfg: GitHubNotesConfig,
                           body: JSONValue?, attempts: Int) async throws -> HTTPReply {
         guard let target = URL(string: url) else { throw NotesSyncError("bad url") }
-        var request = URLRequest(url: target)
-        request.httpMethod = method
-        request.timeoutInterval = 30
-        request.setValue("Bearer \(cfg.token)", forHTTPHeaderField: "Authorization")
+        var request = try HTTP.request(url: target, method: method, timeout: 30, bearer: cfg.token, json: body)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("PagerKit/1.0", forHTTPHeaderField: "User-Agent")
-        if let body {
-            request.httpBody = Data(try body.encoded())
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
         return try await HTTP.sendWithRetry(request, using: session, attempts: attempts, baseBackoff: baseBackoff)
     }
 
@@ -367,12 +360,6 @@ public struct GitHubNotesBackend: NotesRemote {
         return ref.split(separator: "/", omittingEmptySubsequences: false)
             .map { $0.addingPercentEncoding(withAllowedCharacters: allowed) ?? String($0) }
             .joined(separator: "/")
-    }
-
-    static func queryEscape(_ s: String) -> String {
-        var allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-        allowed.insert(charactersIn: "-_.~")
-        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
     }
 }
 

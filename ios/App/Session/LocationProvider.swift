@@ -1,5 +1,4 @@
 import CoreLocation
-import Foundation
 import PagerKit
 
 /// One-shot CoreLocation fix plus a reverse-geocoded city, for the weather

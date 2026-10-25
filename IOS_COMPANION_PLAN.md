@@ -862,7 +862,8 @@ Done (firmware only; untested on hardware):
 - Open: S1 exit (typing + media keys on iPhone), whether bonded phones need
   "Forget This Device" to see the new service, and whether a restored `tx`
   CCCD on reconnect marks a phone as companion while the app isn't running
-  (S2). The iOS `BLETransport` is still missing.
+  (S2). The iOS `BLETransport` is still missing (since added:
+  `ios/PagerKit/Sources/PagerKit/Transport/BLETransport.swift`).
 
 ### 2026-10-11 — Track C item 9: weather cache + `weather.push` (`668cbef`, `bf12208`, local, not pushed)
 
