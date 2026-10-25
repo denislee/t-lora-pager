@@ -48,6 +48,25 @@ void ui_request_editor_switch()
     lv_timer_create(deferred_switch_timer_cb, 10, NULL);
 }
 
+static void power_off_timer_cb(lv_timer_t *t)
+{
+    lv_timer_del(t);
+    hw_feedback();
+    lv_delay_ms(200);
+    hw_shutdown();
+}
+
+// Vendor rotary task: center button held while the screen is on. Runs on the
+// rotary task, so defer the shutdown onto the LVGL task (same sequence as the
+// Settings "Power off" item).
+void ui_request_power_off()
+{
+    ui_lock();
+    lv_timer_create(power_off_timer_cb, 0, NULL);
+    ui_unlock();
+    hw_lvgl_task_notify_wake();
+}
+
 void ui_resume_timers()
 {
     fake_sleep_active = false;

@@ -28,6 +28,7 @@ extern void ui_resume_timers();
 extern void ui_pause_timers();
 extern void ui_lock();
 extern void ui_unlock();
+extern void ui_request_power_off();
 
 #if    defined(ARDUINO_LILYGO_LORA_SX1262)
 SX1262 radio = newModule();
@@ -1467,9 +1468,17 @@ static void rotaryTask(void *p)
         }
 
         // Held
+        // [LOCAL PATCH] Screen off: a >1 s hold wakes (fake-sleep toggle).
+        // Screen on: a >2 s hold powers the device off. The longer threshold
+        // guards against an accidental shutdown from a slow click. Screen-off
+        // stays reachable via the 'l' shortcut and auto fake-sleep.
         if (btn_curr_state == LOW && !long_press_triggered) {
-            if (millis() - press_time > 1000) {
+            uint32_t held_ms = millis() - press_time;
+            if (s_display_off && held_ms > 1000) {
                 perform_fake_sleep_toggle();
+                long_press_triggered = true;
+            } else if (!s_display_off && held_ms > 2000) {
+                ui_request_power_off();
                 long_press_triggered = true;
             }
         }
