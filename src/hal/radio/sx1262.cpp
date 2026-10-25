@@ -1,11 +1,6 @@
 /**
- * @file      hw_sx1262.cpp
- * @brief     SX1262 (sub-GHz LoRa) — per-chip programming.
- *
- * The shared ISR/event-group/TX/RX/listening logic lives in
- * hal/radio_common.cpp; this file only owns the chip-specific pieces:
- * RadioLib `radio.set*()` calls, mode entry, default params, and the
- * frequency/bandwidth/power option tables exposed via `radio_get_*_list`.
+ * @file      sx1262.cpp
+ * @brief     SX1262 (sub-GHz LoRa) — radio_chip:: driver (hal/radio_chip.h).
  */
 
 #include "../../hal_interface.h"
@@ -24,7 +19,6 @@ void default_params(radio_params_t &params)
     params.bandwidth = 125.0;
     params.freq      = RADIO_DEFAULT_FREQUENCY;
     params.cr        = 5;
-    params.mode      = RADIO_DISABLE;
     params.sf        = 12;
     params.power     = 22;
     params.syncWord  = 0xCD;
@@ -35,8 +29,8 @@ int16_t configure(const radio_params_t &params)
 #ifdef ARDUINO
     // Wake the chip before touching any registers. RadioLib requires the chip
     // to be in standby (not sleep) before register writes succeed after a
-    // prior radio.sleep() call. This makes every configure() path — TX, RX,
-    // or RADIO_DISABLE — self-healing if the chip was sleeping.
+    // prior radio.sleep() call, so configure() is self-healing if the chip
+    // was sleeping.
     radio.standby();
 
     int16_t state = radio.setFrequency(params.freq);
@@ -68,14 +62,7 @@ int16_t configure(const radio_params_t &params)
         Serial.println(F("Selected current limit is invalid for this module!"));
     }
 
-    switch (params.mode) {
-    case RADIO_DISABLE: state = radio.sleep();             break;
-    case RADIO_TX:      state = radio.startTransmit(""); break;
-    case RADIO_RX:      state = radio.startReceive();    break;
-    case RADIO_CW:                                        break;
-    default:                                              break;
-    }
-    return state;
+    return radio.sleep();
 #else
     (void)params;
     return 0;

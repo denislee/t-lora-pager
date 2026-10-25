@@ -348,7 +348,6 @@ void hw_init()
 
     hw_audio_init();
 
-    hw_radio_begin();
 #ifdef USING_EXTERN_NRF2401
     hw_nrf24_begin();
 #endif
@@ -783,10 +782,10 @@ void hw_power_down_all()
     // otherwise returns the deep idle floor (P5.4).
     hw_set_cpu_freq(hw_fake_sleep_target_freq());
 
-    // Sleep the radio chip — vendor lightSleep() parity (LilyGo_LoRa_Pager.cpp:687).
-    // STANDBY_RC draws ~0.6–1.6 mA; sleep is <1 µA. SPI lock required because
-    // radio_chip::sleep() bypasses hw_set_radio_params() and its internal lock.
-    // Does NOT touch user_setting.radio_enable — intent is preserved across wake.
+    // Sleep the radio chip — vendor lightSleep() parity. STANDBY_RC draws
+    // ~0.6–1.6 mA; sleep is <1 µA. SPI lock required because radio_chip::sleep()
+    // bypasses hw_set_radio_enable() and its internal lock. Does NOT touch
+    // user_setting.radio_enable — intent is preserved across wake.
     {
         core::ScopedSpiLock spi;
         radio_chip::sleep();
@@ -845,14 +844,10 @@ void hw_power_up_all()
 #endif
     // Speaker is only powered on when needed by playback routines and if enabled
 
-    // Restore the radio to the user-configured state after the sleep placed in
-    // hw_power_down_all(). configure()'s top-of-function radio.standby() self-heals
-    // the chip from sleep before re-applying settings. hw_set_radio_enable →
-    // hw_set_radio_params already takes ScopedSpiLock internally — no extra lock here.
-    // P7.46: a disabled radio is already asleep (hw_power_down_all), so skip the
-    // standby + setFrequency + modulation + sleep round trip; enabling it later
-    // goes through hw_set_radio_enable(true) → configure() as before.
-    if (user_setting.radio_enable) hw_set_radio_enable(true);
+    // The radio stays asleep from hw_power_down_all(). Nothing transmits or
+    // receives (DC2.3.13), so re-programming it here only to park it again
+    // (the old standby + setters + sleep round trip when radio_enable was set)
+    // bought nothing; the Radio toggle still runs configure() when flipped.
 
     // PB.2 — restore WiFi power-save to MIN_MODEM after fake sleep.
     // Reverts the MAX_MODEM escalation applied in hw_power_down_all() so normal

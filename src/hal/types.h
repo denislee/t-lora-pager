@@ -90,21 +90,14 @@ typedef enum {
 #include <WiFi.h>
 #endif
 
-// radio_params_t.mode values.
-enum {
-    RADIO_DISABLE,
-    RADIO_TX,
-    RADIO_RX,
-    RADIO_CW,
-};
-
+// Startup settings a radio_chip:: driver applies before parking the chip
+// (hal/radio_chip.h). Nothing transmits or receives (P4.18 / DC2.3.13).
 typedef struct {
     float freq;
     float bandwidth;
     uint16_t cr;
     uint8_t power;
     uint8_t sf;
-    uint8_t mode;
     uint8_t syncWord;
 } radio_params_t;
 

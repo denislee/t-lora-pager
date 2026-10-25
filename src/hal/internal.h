@@ -26,11 +26,8 @@ void hw_audio_deinit_task();
 
 void save_user_setting_nvs();
 
-// Boot-time radio init. `hw_radio_begin()` lives in hal/radio_common.cpp
-// (one-time attach of the LoRa/FSK ISR); `hw_nrf24_begin()` lives in the
-// per-chip file hal/radio/nrf2401.cpp (NRF24 IRQ attach). Called once from
-// hal/system.cpp's hw_init().
-void hw_radio_begin();
+// Boot-time probe of the optional external nRF24 (pager, USING_EXTERN_NRF2401;
+// hal/radio/nrf2401.cpp). Called once from hal/system.cpp's hw_init().
 void hw_nrf24_begin();
 
 #ifndef ARDUINO

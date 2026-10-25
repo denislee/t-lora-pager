@@ -1,8 +1,6 @@
 /**
- * @file      hw_cc1101.cpp
- * @brief     CC1101 (sub-GHz FSK/OOK) — per-chip programming.
- *
- * Shared ISR/event-group/TX/RX plumbing lives in hal/radio_common.cpp.
+ * @file      cc1101.cpp
+ * @brief     CC1101 (sub-GHz FSK/OOK) — radio_chip:: driver (hal/radio_chip.h).
  */
 
 #include "../../hal_interface.h"
@@ -24,7 +22,6 @@ void default_params(radio_params_t &params)
     params.bandwidth = 102.0;
     params.freq      = 433.0;
     params.cr        = 0;
-    params.mode      = RADIO_DISABLE;
     params.sf        = 0;
     params.power     = 10;
     params.syncWord  = 0xCD;
@@ -57,14 +54,7 @@ int16_t configure(const radio_params_t &params)
         Serial.println(F("[CC1101] Selected frequency deviation is invalid for this module!"));
     }
 
-    switch (params.mode) {
-    case RADIO_DISABLE: state = radio.standby();         break;
-    case RADIO_TX:      state = radio.startTransmit(""); break;
-    case RADIO_RX:      state = radio.startReceive();    break;
-    case RADIO_CW:                                       break;
-    default:                                             break;
-    }
-    return state;
+    return radio.standby();
 #else
     (void)params;
     return 0;
@@ -82,35 +72,5 @@ int16_t sleep()
 
 } // namespace radio_chip
 
-
-// ----- Option tables -----
-
-static const float bandwidth_list[]   = {0.025, 5, 10, 20, 30, 60, 80, 100, 120, 150, 200, 300, 400, 500, 600};
-static const float power_level_list[] = {-30, -20, -15, -10, 0, 5, 7, 10};
-static const float freq_list[]        = {
-    387.0, 400.0, 410.0, 420.0, 433.0, 440.0, 450.0, 460.0, 464.0
-};
-
-uint16_t radio_get_freq_length()      { return sizeof(freq_list)        / sizeof(freq_list[0]); }
-uint16_t radio_get_bandwidth_length() { return sizeof(bandwidth_list)   / sizeof(bandwidth_list[0]); }
-uint16_t radio_get_tx_power_length()  { return sizeof(power_level_list) / sizeof(power_level_list[0]); }
-
-float radio_get_freq_from_index(uint8_t index)
-{
-    if (index >= radio_get_freq_length()) return 433.0;
-    return freq_list[index];
-}
-
-float radio_get_bandwidth_from_index(uint8_t index)
-{
-    if (index >= radio_get_bandwidth_length()) return 102.0;
-    return bandwidth_list[index];
-}
-
-float radio_get_tx_power_from_index(uint8_t index)
-{
-    if (index >= radio_get_tx_power_length()) return 10;
-    return power_level_list[index];
-}
 
 #endif  // ARDUINO_LILYGO_LORA_CC1101

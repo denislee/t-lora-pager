@@ -9,12 +9,8 @@
 // --- Primary radio module (LoRa / FSK) ---
 bool hw_get_radio_enable();
 // Returns RADIOLIB_ERR_NONE (0) on success, or a negative RadioLib status
-// code from the underlying hw_set_radio_params() call on failure. The
-// persisted user_setting is updated regardless so the user's intent is
-// remembered across boots even if the hardware rejected it this time.
+// code from radio_chip::configure() on failure. The persisted user_setting
+// is updated regardless so the user's intent is remembered across boots even
+// if the hardware rejected it this time.
 int16_t hw_set_radio_enable(bool en);
-
-int16_t hw_set_radio_params(radio_params_t &params);
-void hw_get_radio_params(radio_params_t &params);
-int16_t hw_set_radio_default();
 
