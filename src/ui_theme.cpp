@@ -769,8 +769,10 @@ bool theme_init()
 // from the encoder (FOCUSED) or the keyboard (FOCUS_KEY).
 static const lv_style_selector_t kFocusStates[] = {LV_STATE_FOCUSED, LV_STATE_FOCUS_KEY};
 
-void ui_block(lv_obj_t *obj, lv_color_t face)
+void ui_block(lv_obj_t *obj)
 {
+    // Every block sits on the resting surface colour (home tiles and pills).
+    const lv_color_t face = ui_color_surface();
     if (ui_style_is_pixel()) {
         // The block reads as a raised iso tile — lit top/left edge plus a hard
         // 2:1 extrusion; pressing pushes it into the ground, focus lifts it.

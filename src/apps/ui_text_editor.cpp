@@ -448,7 +448,7 @@ static void editor_build_ui(lv_obj_t *parent)
 
     content_dirty = false;
 
-    menu = create_menu(parent, nullptr);
+    menu = create_menu(parent);
 
     lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_COLUMN);

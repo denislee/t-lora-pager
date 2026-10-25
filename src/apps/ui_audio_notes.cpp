@@ -709,7 +709,7 @@ static void ui_notes_enter(lv_obj_t *parent)
         current_view = VIEW_LIST;
     }
 
-    menu = create_menu(parent, nullptr);
+    menu = create_menu(parent);
     main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_style_pad_all(main_page, 0, 0);
     lv_obj_set_style_pad_row(main_page, 6, 0);

@@ -575,7 +575,7 @@ static void ui_sys_enter(lv_obj_t *parent)
 
     hw_get_user_setting(local_param);
 
-    menu = create_menu(parent, nullptr);
+    menu = create_menu(parent);
 
     // Suppress the menu's built-in header back button: LVGL re-un-hides it on
     // each subpage, so a plain HIDDEN flag on the header doesn't stick. Zero

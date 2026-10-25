@@ -521,7 +521,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
     current_source = SOURCE_INTERNAL;
     current_dir = "/";
 
-    menu = create_menu(parent, nullptr);
+    menu = create_menu(parent);
 
     lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_COLUMN);

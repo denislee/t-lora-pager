@@ -715,7 +715,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_obj_set_style_text_font(icon, &lv_font_montserrat_18, 0);
         lv_obj_center(icon);
         lv_obj_set_user_data(btn, icon);
-        ui_block(btn, rest_bg());
+        ui_block(btn);
         return btn;
     };
 
@@ -886,7 +886,7 @@ void MenuApp::onStart(lv_obj_t* parent) {
         // Pressed: brief flash via a slightly lighter neutral fill.
         lv_obj_set_style_bg_color(tile, lv_color_mix(UI_COLOR_FG, rest_bg(), LV_OPA_10),
                                   LV_STATE_PRESSED);
-        ui_block(tile, rest_bg());
+        ui_block(tile);
 
         lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(tile, LV_FLEX_ALIGN_CENTER,

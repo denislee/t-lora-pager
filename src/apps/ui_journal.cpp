@@ -824,7 +824,7 @@ static void journal_build_ui(lv_obj_t *parent)
     // in the background so the app opens instantly even with a stale index.
     bool show_loader = need_refresh && !have_cache;
     if (show_loader) loader_show();
-    menu = create_menu(parent, nullptr);
+    menu = create_menu(parent);
     // P7.6: the first-run reconcile (index missing, empty or undecryptable:
     // one snippet decrypt per note plus an encrypted index save) runs on
     // s_bg_job like the IS.9 refresh, not inside lv_timer_handler. The loader

@@ -60,4 +60,4 @@ const char *ui_battery_icon(int percent, bool is_charging);
 lv_obj_t *create_floating_button(lv_event_cb_t event_cb, void *user_data);
 /* Full-panel lv_menu with the root back button disabled. `event_cb` (may be
  * nullptr) is attached for LV_EVENT_CLICKED. */
-lv_obj_t *create_menu(lv_obj_t *parent, lv_event_cb_t event_cb);
+lv_obj_t *create_menu(lv_obj_t *parent);

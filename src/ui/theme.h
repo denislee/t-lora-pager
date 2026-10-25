@@ -79,7 +79,7 @@ int32_t ui_radius();
 /* Isometric extrusion vector for Pixel Iso blocks — 2:1, the pixel-art iso ratio. */
 #define UI_ISO_DEPTH_X   4
 #define UI_ISO_DEPTH_Y   2
-void ui_block(lv_obj_t *obj, lv_color_t face);  // raised block for Pixel Iso / Hotel / BeOS; no-op in Classic
+void ui_block(lv_obj_t *obj);  // raised block for Pixel Iso / Hotel / BeOS; no-op in Classic
 void ui_apply_backdrop(lv_obj_t *obj);           // screen bg; Pixel Iso / Hotel tile a patterned backdrop
 typedef enum { UI_TITLE_NONE = 0, UI_TITLE_BAR, UI_TITLE_TAB } ui_title_chrome_t;
 // Title chrome per style: Hotel paints `bar` (may be the label itself) as the

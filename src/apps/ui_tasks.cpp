@@ -390,7 +390,7 @@ static void ui_tasks_enter(lv_obj_t *parent) {
     if (menu != NULL) return;
     enable_keyboard();
 
-    menu = create_menu(parent, nullptr);
+    menu = create_menu(parent);
     ui_show_back_button(tasks_back_cb);
 
     lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
