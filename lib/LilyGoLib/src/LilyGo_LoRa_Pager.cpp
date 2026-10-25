@@ -28,7 +28,7 @@ extern void ui_resume_timers();
 extern void ui_pause_timers();
 extern void ui_lock();
 extern void ui_unlock();
-extern void ui_request_power_off();
+extern void ui_request_wheel_sleep();
 
 #if    defined(ARDUINO_LILYGO_LORA_SX1262)
 SX1262 radio = newModule();
@@ -249,32 +249,25 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         uint64_t wakeup_pin_mask = esp_sleep_get_ext1_wakeup_status();
         if (wakeup_pin_mask & _BV(ROTARY_C)) {
             pinMode(ROTARY_C, INPUT_PULLUP);
-            // Filter: require double-click to stay awake
-            bool second_click = false;
+            // [LOCAL PATCH] Filter: the wheel must stay held for ~1 s to boot,
+            // so a bump in a pocket goes straight back to sleep. The rotary
+            // task ignores a press already held when it starts, so holding on
+            // past boot does not re-trigger the 2 s hold-to-sleep.
+            bool held = true;
             uint32_t start_time = millis();
-            
-            // 1. Wait for first release
-            while (digitalRead(ROTARY_C) == LOW) {
-                if (millis() - start_time > 2000) break; // Timeout if held too long
-                delay(10);
-            }
-            delay(50); // Debounce
-            
-            // 2. Wait for second press
-            start_time = millis();
-            while (millis() - start_time < 500) {
-                if (digitalRead(ROTARY_C) == LOW) {
-                    second_click = true;
+            while (millis() - start_time < 1000) {
+                if (digitalRead(ROTARY_C) == HIGH) {
+                    held = false;
                     break;
                 }
                 delay(10);
             }
-            
-            if (!second_click) {
-                // If not double-clicked, go back to sleep immediately
+
+            if (!held) {
+                // Released too early, go back to sleep immediately
                 // We reuse the sleep logic but since we haven't fully initialized,
                 // we call the lower level sleep directly or enough to go back.
-                esp_sleep_enable_ext1_wakeup(_BV(ROTARY_C) | _BV(0), ESP_EXT1_WAKEUP_ANY_LOW);
+                esp_sleep_enable_ext1_wakeup(_BV(ROTARY_C), ESP_EXT1_WAKEUP_ANY_LOW);
                 rtc_gpio_pullup_en((gpio_num_t)ROTARY_C);
                 gpio_hold_en((gpio_num_t)ROTARY_C);
                 gpio_deep_sleep_hold_en();
@@ -1439,6 +1432,12 @@ static void rotaryTask(void *p)
 
     instance.rotary.begin();
     pinMode(ROTARY_C, INPUT_PULLUP);
+    // [LOCAL PATCH] A press still held from the hold-to-wake at boot is not a
+    // new press: swallow it until release (no click, no hold-to-sleep).
+    if (digitalRead(ROTARY_C) == LOW) {
+        btn_prev_state = LOW;
+        long_press_triggered = true;
+    }
     // [LOCAL PATCH P5.1] Arm the wake interrupt before the first fake-sleep
     // block below can ever be reached.
     s_rotary_task_handle = xTaskGetCurrentTaskHandle();
@@ -1469,8 +1468,9 @@ static void rotaryTask(void *p)
 
         // Held
         // [LOCAL PATCH] Screen off: a >1 s hold wakes (fake-sleep toggle).
-        // Screen on: a >2 s hold powers the device off. The longer threshold
-        // guards against an accidental shutdown from a slow click. Screen-off
+        // Screen on: a >2 s hold deep-sleeps the device (a ~1 s wheel hold
+        // boots it again). The longer threshold guards against an accidental
+        // sleep from a slow click. Screen-off
         // stays reachable via the 'l' shortcut and auto fake-sleep.
         if (btn_curr_state == LOW && !long_press_triggered) {
             uint32_t held_ms = millis() - press_time;
@@ -1478,7 +1478,7 @@ static void rotaryTask(void *p)
                 perform_fake_sleep_toggle();
                 long_press_triggered = true;
             } else if (!s_display_off && held_ms > 2000) {
-                ui_request_power_off();
+                ui_request_wheel_sleep();
                 long_press_triggered = true;
             }
         }

@@ -53,6 +53,9 @@ int  hw_get_time_sync_status();
 void hw_notify_time_sync_completed();
 
 void hw_shutdown();
+// Deep sleep woken by a ~1 s scroll-wheel hold (pager); hw_shutdown() elsewhere.
+// Draws ~530 uA vs ~26 uA for hw_shutdown(), but needs no PWR button to restart.
+void hw_deep_sleep_wheel_wake();
 void hw_sleep();
 void hw_power_down_all();
 void hw_power_up_all();

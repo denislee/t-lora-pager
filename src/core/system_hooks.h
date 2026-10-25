@@ -65,8 +65,8 @@ void ui_unlock();
 void ui_request_editor_switch();
 
 // Vendor rotary task: long-press of the center button while the screen is
-// on. Defers hw_shutdown() onto the LVGL task. Safe from any task.
-void ui_request_power_off();
+// on. Defers hw_deep_sleep_wheel_wake() onto the LVGL task. Safe from any task.
+void ui_request_wheel_sleep();
 
 // Show the home menu panel. Thin wrapper over core::System.
 void menu_show();

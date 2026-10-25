@@ -963,6 +963,34 @@ void hw_sleep()
 #endif
 }
 
+void hw_deep_sleep_wheel_wake()
+{
+#if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)
+    hw_save_flush();  // IS.2
+    hw_filesystem_dirty_persist();  // P7.27
+    notes_crypto_lock();  // asleep must look the same as off
+    hw_audio_deinit_task();
+#ifdef USING_PDM_MICROPHONE
+    instance.mic.end();
+#endif
+#ifdef USING_PCM_AMPLIFIER
+    instance.player.end();
+#endif
+    instance.decrementBrightness(0, 5, false);
+    // ext1 wake is level-triggered: sleeping with the wheel still down from
+    // the hold that got us here would wake at once.
+    while (digitalRead(ROTARY_C) == LOW) delay(10);
+#ifdef HAS_SD_CARD_SOCKET
+    instance.sleepSkipsSD = true;  // P7.34, see hw_low_power_loop()
+    hw_sd_unmount_for_sleep();
+#endif
+    core::ScopedKbLock kb_lock;  // sleep() calls kb.end()
+    instance.sleep((WakeupSource_t)(WAKEUP_SRC_ROTARY_BUTTON));
+#else
+    hw_shutdown();
+#endif
+}
+
 void hw_feedback()
 {
 #ifdef ARDUINO
