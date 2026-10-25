@@ -19,9 +19,12 @@
  *                                         exit/rebuild.
  *   tasks:   s_bg_job (journal_bg)      — OneShotJob worker running the rescan on a
  *                                         snapshot; s_bg_job.teardown() on exit
- *                                         detaches it (it frees its own result).
- *                                         bg_refresh_done applies the result on the
- *                                         LVGL thread, dropped if s_entries_gen moved.
+ *                                         detaches it (its result is freed on
+ *                                         arrival) and the next refresh
+ *                                         re-attaches it if it is still running
+ *                                         (DC2.0.5). bg_refresh_done applies the
+ *                                         result on the LVGL thread, dropped if
+ *                                         s_entries_gen moved.
  *   flags:   s_first_run_pending        — true while a first-run reconcile
  *                                         (P7.6: index missing/empty/undecryptable,
  *                                         run on s_bg_job instead of the LVGL thread)
@@ -33,7 +36,6 @@
  */
 #include "../ui_define.h"
 #include "app_registry.h"
-#include "../core/app_manager.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/notes_path.h"
 #include "../core/one_shot_job.h"
@@ -218,10 +220,11 @@ static void report(ProgressFn cb, void *ud, const char *phase, int cur, int tota
         if (lv_tick_elaps(last_refr) > 100) {
             lv_refr_now(NULL);
             last_refr = now;
-            // The scan/decrypt loop runs inside lv_timer_handler on the
-            // dedicated LVGL task. Without a yield here, large journals keep
-            // IDLE1 off the CPU long enough for the task watchdog to panic the
-            // device. vTaskDelay(1) costs one tick but guarantees IDLE runs.
+            // With a callback the scan/decrypt loop runs on the LVGL task (the
+            // inline fallback when the s_bg_job task can't be created). Without
+            // a yield here, large journals keep IDLE1 off the CPU long enough
+            // for the task watchdog to panic the device. vTaskDelay(1) costs
+            // one tick but guarantees IDLE runs.
 #ifdef ARDUINO
             vTaskDelay(1);
 #endif
@@ -381,7 +384,7 @@ static void loader_hide()
 }
 
 void ui_journal_enter(lv_obj_t *parent);
-void ui_journal_exit(lv_obj_t *parent);
+void ui_journal_exit();
 static void journal_build_ui(lv_obj_t *parent);
 static void schedule_bg_refresh();
 
@@ -446,7 +449,6 @@ struct BgRefreshResult {
 // worker result computed from an older snapshot is dropped instead of applied.
 static uint32_t s_entries_gen = 0;
 static void bg_refresh_done(BgRefreshResult &r);
-static void start_first_run_refresh();
 static void schedule_first_run_refresh();
 // True while a first-run reconcile (P7.6) owns the journal loader.
 static bool s_first_run_pending = false;
@@ -481,8 +483,8 @@ static uint32_t entries_signature(const std::vector<JournalEntry> &v)
     return h;
 }
 
-// No-op progress sink whose sole purpose is to keep report()'s periodic
-// watchdog yield alive during the background scan (report() only yields when a
+// No-op progress sink for the inline (no task) background refresh: it keeps
+// report()'s periodic watchdog yield alive (report() only yields when a
 // callback is supplied). Deliberately touches nothing on the UI.
 static void bg_progress_cb(void *, const char *, int, int, const char *) {}
 
@@ -494,14 +496,15 @@ static void cancel_bg_refresh()
     }
 }
 
-static void bg_refresh_timer_cb(lv_timer_t *t)
+// The one refresh path for both the IS.9 background reconcile and the P7.6
+// first run: hand a snapshot of journal_entries to s_bg_job. If an earlier
+// worker (e.g. detached by leaving mid-reconcile) is still running, start()
+// re-adopts it and its result lands in bg_refresh_done instead — which
+// reschedules if that result is stale (DC2.0.5: it used to be dropped, leaving
+// the list stale). With no task, runs inline with `inline_cb` so the list
+// still updates.
+static void start_bg_refresh(ProgressFn inline_cb)
 {
-    bg_refresh_timer = nullptr;
-    lv_timer_del(t);
-    if (menu == NULL || parent_obj == NULL) return;  // app closed before we ran
-    // A worker is already running (or its result is waiting to drain): it lands
-    // through bg_refresh_done, which reschedules if that result is stale.
-    if (s_bg_job.busy()) return;
     BgRefreshResult *seed = new BgRefreshResult();
     // P7.25: copies names, mtimes and shared snippet handles, not snippet text.
     seed->entries = journal_entries;
@@ -512,36 +515,21 @@ static void bg_refresh_timer_cb(lv_timer_t *t)
         seed->saved_index = refresh_journal_entries(seed->entries, nullptr, nullptr);
         return seed;
     }, 10240, "journal_bg", 1, 0);
-    if (started != core::OneShotJob<BgRefreshResult>::Start::Started) {
-        // Task could not be created (Failed), or Attached to a stale worker
-        // that busy() missed: run inline like before so the list still updates.
-        seed->saved_index = refresh_journal_entries(seed->entries, bg_progress_cb, nullptr);
+    if (started == core::OneShotJob<BgRefreshResult>::Start::Attached) {
+        delete seed;   // the work lambda was not used; the running worker reports
+    } else if (started == core::OneShotJob<BgRefreshResult>::Start::Failed) {
+        seed->saved_index = refresh_journal_entries(seed->entries, inline_cb, nullptr);
         bg_refresh_done(*seed);
         delete seed;
     }
 }
 
-// P7.6: the first-run reconcile hands its pass to s_bg_job instead of running
-// it on the LVGL thread. If an earlier worker (detached by a previous exit) is
-// still running, start() re-adopts it and its result lands here instead.
-static void start_first_run_refresh()
+static void bg_refresh_timer_cb(lv_timer_t *t)
 {
-    BgRefreshResult *seed = new BgRefreshResult();
-    seed->entries_gen = s_entries_gen;   // journal_entries is empty here
-    seed->fs_gen = hw_get_filesystem_generation();
-    auto started = s_bg_job.start([seed]() {
-        INPUT_PROF_SPAN("journal_bg");
-        seed->saved_index = refresh_journal_entries(seed->entries, nullptr, nullptr);
-        return seed;
-    }, 10240, "journal_bg", 1, 0);
-    if (started == core::OneShotJob<BgRefreshResult>::Start::Attached) {
-        delete seed;   // the work lambda was not used; the running worker reports
-    } else if (started == core::OneShotJob<BgRefreshResult>::Start::Failed) {
-        // No task: run inline like before so the list still appears.
-        seed->saved_index = refresh_journal_entries(seed->entries, loader_update, nullptr);
-        bg_refresh_done(*seed);
-        delete seed;
-    }
+    bg_refresh_timer = nullptr;
+    lv_timer_del(t);
+    if (menu == NULL || parent_obj == NULL) return;  // app closed before we ran
+    start_bg_refresh(bg_progress_cb);
 }
 
 static void first_run_timer_cb(lv_timer_t *t)
@@ -552,7 +540,7 @@ static void first_run_timer_cb(lv_timer_t *t)
         s_first_run_pending = false;
         return;
     }
-    start_first_run_refresh();
+    start_bg_refresh(loader_update);   // journal_entries is empty here
 }
 
 // Queue the first-run reconcile right after this frame; shares bg_refresh_timer
@@ -566,7 +554,7 @@ static void schedule_first_run_refresh()
     if (bg_refresh_timer) {
         lv_timer_set_repeat_count(bg_refresh_timer, 1);
     } else {
-        start_first_run_refresh();
+        start_bg_refresh(loader_update);
     }
 }
 
@@ -724,7 +712,7 @@ static void journal_key_event_cb(lv_event_t *e)
     if (key == 'r' || key == 'R') {
         cache_valid = false;
         lv_obj_t *parent = parent_obj;  // ui_journal_exit nulls it
-        ui_journal_exit(NULL);
+        ui_journal_exit();
         ui_journal_enter(parent);
         return;
     }
@@ -843,7 +831,7 @@ static void journal_build_ui(lv_obj_t *parent)
     // stays up (indeterminate: the worker can't touch LVGL) over the empty page
     // until bg_refresh_done applies the result and hides it.
     // The job is started from a one-shot timer once this build returns, so an
-    // inline completion (emulator, or no task) can't rebuild the page under us.
+    // inline completion (no task) can't rebuild the page under us.
     if (show_loader) need_refresh = false;
 
     lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
@@ -1049,9 +1037,7 @@ static void journal_build_ui(lv_obj_t *parent)
     }
 
 #ifdef USING_TOUCHPAD
-    quit_btn = create_floating_button([](lv_event_t *e) {
-        do_exit();
-    }, NULL);
+    quit_btn = create_floating_button(exit_btn_cb, NULL);
 #endif
 
     // Cached list is now on screen; reconcile with the filesystem in the
@@ -1063,10 +1049,10 @@ static void journal_build_ui(lv_obj_t *parent)
     if (!s_first_run_pending) loader_hide();
 }
 
-void ui_journal_exit(lv_obj_t *parent)
+void ui_journal_exit()
 {
     cancel_bg_refresh();
-    s_bg_job.teardown();  // detach a running worker; it frees its own result
+    s_bg_job.teardown();  // detach a running worker; its result is freed on arrival
     s_first_run_pending = false;
     loader_hide();
     ui_hide_back_button();
@@ -1091,7 +1077,7 @@ public:
     JournalApp() : core::App("Journal") {}
     void onStart(lv_obj_t *parent) override { ui_journal_enter(parent); }
     void onStop() override {
-        ui_journal_exit(getRoot());
+        ui_journal_exit();
         core::App::onStop();
     }
 };
