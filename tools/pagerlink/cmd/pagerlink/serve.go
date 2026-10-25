@@ -66,7 +66,7 @@ type noteFile struct {
 }
 
 // cmdServe implements `pagerlink serve`; the caller has already dialed.
-func cmdServe(c *pagerlink.Client, addr string, timeout time.Duration, args []string) int {
+func cmdServe(c *pagerlink.Client, addr string, _ time.Duration, args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	responses := fs.String("responses", "", "JSON file mapping method -> result object")
 	notesOut := fs.String("notes-out", "", "directory to write notes bytes fetched during notes.sync")

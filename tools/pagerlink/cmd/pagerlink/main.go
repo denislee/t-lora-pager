@@ -5,9 +5,12 @@
 //
 // The `smoke` subcommand is the useful one: it walks the four system methods a
 // pager must implement, checks each required error code, proves the link
-// recovers after a deliberate sequence fault, and then exercises the fs.* file
-// service end to end (see fs.go). The ls/stat/get/put/rm/mkdir/mv commands are
-// hand tools for the same service.
+// recovers after a deliberate sequence fault, exercises the fs.* file service
+// end to end (fs.go), and then runs the pager-initiated steps — calls, bulk
+// DATA, chat, notes sync, Telegram and weather via the phone — through the
+// emulator-only test hooks (smoke_link.go, smoke_weather.go), so a full pass
+// needs the emulator. The ls/stat/get/put/rm/mkdir/mv commands are hand tools
+// for the file service.
 package main
 
 import (
@@ -34,10 +37,8 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, rest := args[0], args[1:]
-	switch cmd {
-	case "hello", "info", "ping", "time", "call", "smoke", "serve",
-		"ls", "stat", "get", "put", "rm", "mkdir", "mv":
-	default:
+	run, ok := commands[cmd]
+	if !ok {
 		fmt.Fprintf(os.Stderr, "pagerlink: unknown command %q\n", cmd)
 		usage()
 		os.Exit(2)
@@ -49,9 +50,44 @@ func main() {
 		os.Exit(1)
 	}
 
-	code := run(c, *addr, *timeout, cmd, rest)
+	code := run(c, *addr, *timeout, rest)
 	c.Close()
 	os.Exit(code)
+}
+
+// command runs one subcommand on a dialed client and returns the exit code.
+type command func(c *pagerlink.Client, addr string, timeout time.Duration, args []string) int
+
+// commands is the single table main validates against and dispatches from.
+var commands = map[string]command{
+	"hello": func(c *pagerlink.Client, _ string, timeout time.Duration, _ []string) int {
+		return callOne(c, timeout, "sys.hello",
+			map[string]any{"proto": 1, "app": "pagerlink-cli", "caps": []string{"sys"}})
+	},
+	"info": func(c *pagerlink.Client, _ string, timeout time.Duration, _ []string) int {
+		return callOne(c, timeout, "sys.info", nil)
+	},
+	"ping": noAddr(func(c *pagerlink.Client, timeout time.Duration, _ []string) int { return cmdPing(c, timeout) }),
+	"time": noAddr(cmdTime),
+	"call": noAddr(cmdCall),
+	"smoke": func(c *pagerlink.Client, addr string, timeout time.Duration, _ []string) int {
+		return cmdSmoke(c, addr, timeout)
+	},
+	"serve": cmdServe,
+	"ls":    noAddr(cmdLS),
+	"stat":  noAddr(cmdStat),
+	"get":   noAddr(cmdGet),
+	"put":   noAddr(cmdPut),
+	"rm":    noAddr(cmdRM),
+	"mkdir": noAddr(cmdMkdir),
+	"mv":    noAddr(cmdMV),
+}
+
+// noAddr adapts a subcommand that does not need the dial address.
+func noAddr(f func(*pagerlink.Client, time.Duration, []string) int) command {
+	return func(c *pagerlink.Client, _ string, timeout time.Duration, args []string) int {
+		return f(c, timeout, args)
+	}
 }
 
 func usage() {
@@ -63,7 +99,7 @@ Commands:
   ping                           sys.ping and the measured RTT
   time [-tz ZONE]                sys.time.set with the current epoch
   call <method> [json-params]    arbitrary RPC
-  smoke                          check every Phase-1 method and error path
+  smoke                          end-to-end check: sys, fs and pager->phone (emulator)
   serve [-responses f.json] [-notes-out dir]  mock phone for emulator work
   ls <vol> <path>                list a directory (fs.list, paged)
   stat <vol> <path>              show file metadata (fs.stat)
@@ -73,44 +109,6 @@ Commands:
   mkdir <vol> <path>             create a directory (fs.mkdir)
   mv <vol> <from> <to>           rename a file or directory (fs.rename)
 `)
-}
-
-func run(c *pagerlink.Client, addr string, timeout time.Duration, cmd string, args []string) int {
-	switch cmd {
-	case "hello":
-		return callOne(c, timeout, "sys.hello",
-			map[string]any{"proto": 1, "app": "pagerlink-cli", "caps": []string{"sys"}})
-	case "info":
-		return callOne(c, timeout, "sys.info", nil)
-	case "ping":
-		return cmdPing(c, timeout)
-	case "time":
-		return cmdTime(c, timeout, args)
-	case "call":
-		return cmdCall(c, timeout, args)
-	case "smoke":
-		return cmdSmoke(c, addr, timeout)
-	case "serve":
-		return cmdServe(c, addr, timeout, args)
-	case "ls":
-		return cmdLS(c, timeout, args)
-	case "stat":
-		return cmdStat(c, timeout, args)
-	case "get":
-		return cmdGet(c, timeout, args)
-	case "put":
-		return cmdPut(c, timeout, args)
-	case "rm":
-		return cmdRM(c, timeout, args)
-	case "mkdir":
-		return cmdMkdir(c, timeout, args)
-	case "mv":
-		return cmdMV(c, timeout, args)
-	default:
-		fmt.Fprintf(os.Stderr, "pagerlink: unknown command %q\n", cmd)
-		usage()
-		return 2
-	}
 }
 
 // callOne sends one request, prints the pretty JSON result, and returns the

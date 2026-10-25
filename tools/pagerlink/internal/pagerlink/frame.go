@@ -7,8 +7,9 @@
 //
 // The pager firmware (src/hal/link/) and the iOS companion (ios/PagerKit) are
 // the other two implementations of this spec, and all three are tested against
-// the golden vectors in protocol/vectors/*.json. This file must therefore stay
-// byte-for-byte identical to protocol/tools/mkvectors.py, which is the oracle.
+// the golden vectors in protocol/vectors/*.json. The codec here must therefore
+// behave exactly like protocol/tools/mkvectors.py, the oracle: every encoding
+// byte-for-byte identical to its output (frame_test.go checks the vectors).
 package pagerlink
 
 import (
