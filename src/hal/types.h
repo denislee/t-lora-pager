@@ -26,8 +26,6 @@ typedef enum {
 
 #ifndef ARDUINO
 
-#define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
-
 #ifndef _BV
 #define _BV(x)                      (1UL<<x)
 #endif

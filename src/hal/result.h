@@ -2,11 +2,11 @@
  * @file      result.h
  * @brief     Typed HAL error codes + helpers.
  *
- * Most HAL entry points today return `bool` with an out-param `std::string`
- * error message. That works but the call sites bake user-facing strings
- * into the HAL ("Cannot open SD file for writing."), which makes the same
- * failure look different from each path and forces the UI layer to grep
- * for substrings if it wants to react to a specific cause.
+ * Many HAL entry points return `bool` with an out-param `std::string` error
+ * message. That works but the call sites bake user-facing strings into the
+ * HAL ("Cannot open SD file for writing."), which makes the same failure
+ * look different from each path and forces the UI layer to grep for
+ * substrings if it wants to react to a specific cause.
  *
  * This header introduces an `enum class HalError` that names the failure
  * categories the UI actually distinguishes. A function that wants typed
@@ -37,7 +37,7 @@ enum class HalError : uint8_t {
     InternalError,
 
     /* Storage */
-    StorageFull,       /* no producer yet; test_hal_result's error sample */
+    StorageFull,       /* fs.write out of space (link/handlers_fs.cpp) */
 
     /* Wireless / network */
     WifiOffline,
@@ -45,7 +45,7 @@ enum class HalError : uint8_t {
     Unauthorized,      /* 401/403 */
 
     /* Link */
-    LinkOffline,       /* phone not connected; no producer until hw_link_call (HUB_REMOVAL_PLAN H2.1) */
+    LinkOffline,       /* phone not connected (the *_link.cpp services) */
 
     /* Hub */
     HubDisabled,
@@ -59,8 +59,8 @@ const char *hal_error_string(HalError e);
 
 /* Value-or-error wrapper for the common `T value, std::string err` pattern.
  *
- * Usage:
- *   HalResult<size_t> r = hw_save_file_v2(path, content);
+ * Usage (e.g. the *_link.cpp services):
+ *   HalResult<size_t> r = some_hal_call(path, content);
  *   if (!r) {
  *       ui_msg_pop_up("Save", hal_error_string(r.error()));
  *       return;
@@ -89,8 +89,3 @@ private:
     T        v_;
     HalError e_;
 };
-
-/* Specialization for the void case — `HalResult<void>` is just an alias
- * pattern; callers can use `HalError` directly. Kept as a typedef so
- * generic code over `HalResult<X>` doesn't need void-specialization. */
-using HalStatus = HalError;

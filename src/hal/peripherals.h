@@ -1,6 +1,6 @@
 /**
  * @file      peripherals.h
- * @brief     NFC and IR remote.
+ * @brief     NFC discovery and the NFC enable toggle.
  */
 #pragma once
 
@@ -10,13 +10,13 @@
 bool hw_get_nfc_enable();
 void hw_set_nfc_enable(bool en);
 bool hw_start_nfc_discovery();
-void hw_stop_nfc_discovery();
 
 /* True iff the last hw_start_nfc_discovery() call succeeded and we haven't
  * since stopped. Distinguishes "chip powered" from "RFAL polling live". */
 bool hw_nfc_discovery_active();
 
-/* Diagnostic hook invoked on every NFC event, in the LVGL thread.
+/* Diagnostic hook invoked on every NFC event, from the nfc_reader task
+ * (hal/nfc_task.cpp) with the instance lock held.
  * `kind` values:
  *   0 = raw detection (before NDEF parse)
  *   1 = RTD Text

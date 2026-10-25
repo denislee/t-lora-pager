@@ -35,7 +35,6 @@ public:
     void enterApp(const char* name);
 
     lv_group_t* getMenuGroup() const { return _menuGroup; }
-    lv_group_t* getAppGroup() const { return _appGroup; }
 
     // Show the menu after the current LVGL dispatch unwinds (run from loop()).
     void queueShowMenu();

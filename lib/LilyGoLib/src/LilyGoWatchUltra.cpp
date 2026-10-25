@@ -767,7 +767,8 @@ void LilyGoUltra::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_GPS, false);
     powerControl(POWER_SPEAK, false);
     powerControl(POWER_NFC, false);
-    if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
+    // [LOCAL PATCH P7.34] No uninstallSD(): the caller unmounts the card
+    // before (hw_sd_unmount_for_sleep) and remounts it after (hw_mount_sd).
     powerControl(POWER_SD_CARD, false);
 
     sleepDisplay();
@@ -818,7 +819,7 @@ void LilyGoUltra::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_GPS, true);
     powerControl(POWER_NFC, true);
     powerControl(POWER_SD_CARD, true);
-    if (!sleepSkipsSD) installSD();   // [LOCAL PATCH P7.34]
+    // [LOCAL PATCH P7.34] No installSD(): the caller remounts (hw_mount_sd).
 
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ |
@@ -882,7 +883,7 @@ void LilyGoUltra::sleep(WakeupSource_t wakeup_src, bool off_rtc_backup_domain, u
 
     LilyGoDispQSPI::end();
 
-    if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
+    // [LOCAL PATCH P7.34] No uninstallSD(): the caller unmounted the card.
 
 #if  defined(USING_BHI_EXPANDS)
 

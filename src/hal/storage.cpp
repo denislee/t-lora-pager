@@ -217,10 +217,10 @@ void hw_set_sd_unmount_hook(void (*hook)())
     s_sd_unmount_hook.store(hook);
 }
 
-/* P7.34: the sleep paths' half of the vendor's SD unmount/remount, done here
- * so the SPI lock is taken first (kb_lock.h order) instead of inside
- * lightSleep() under the caller's I2C lock (sleepSkipsSD). The hook closes
- * every kept-open SD file while the card is still mounted. */
+/* P7.34: the sleep paths' half of the vendor's old SD unmount/remount, done
+ * here so the SPI lock is taken first (kb_lock.h order) instead of inside
+ * lightSleep() under the caller's I2C lock. The hook closes every kept-open
+ * SD file while the card is still mounted. */
 void hw_sd_unmount_for_sleep()
 {
 #if defined(ARDUINO) && defined(HAS_SD_CARD_SOCKET)

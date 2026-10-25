@@ -6,7 +6,7 @@
  * `ui_is_fake_sleep` / `ui_lock` / `ui_unlock` hooks) and the new
  * `core::System` + `core::AppManager`. New code should talk to `core::`
  * directly; this file only exists to satisfy the vendor callbacks and the
- * `menu_show` public API.
+ * `menu_show_deferred` public API.
  */
 #include "ui_define.h"
 #include "core/system.h"
@@ -114,11 +114,6 @@ bool ui_is_fake_sleep()
 // prefer core::ScopedInstanceLock.
 void ui_lock()   { instanceLockTake(); }
 void ui_unlock() { instanceLockGive(); }
-
-void menu_show()
-{
-    core::System::getInstance().showMenu();
-}
 
 void menu_show_deferred()
 {

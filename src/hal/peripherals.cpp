@@ -50,17 +50,17 @@ static void nrf_notify_callback()
 
 static void ndef_event_callback(ndefTypeId id, void *data)
 {
-    ndefTypeRtdDeviceInfo   devInfoData;
-    ndefConstBuffer         bufAarString;
     ndefRtdUri              url;
     ndefRtdText             text;
     String msg = "";
     wifi_conn_params_t params;
     switch (id) {
+    // Recognised but unused: no diag "other" event (kind 4) for these.
     case NDEF_TYPE_EMPTY:
-        break;
     case NDEF_TYPE_RTD_DEVICE_INFO:
-        memcpy(&devInfoData, data, sizeof(ndefTypeRtdDeviceInfo));
+    case NDEF_TYPE_RTD_AAR:
+    case NDEF_TYPE_MEDIA:
+    case NDEF_TYPE_MEDIA_VCARD:
         break;
     case NDEF_TYPE_RTD_TEXT:
         memcpy(&text, data, sizeof(ndefRtdText));
@@ -91,14 +91,6 @@ static void ndef_event_callback(ndefTypeId id, void *data)
         msg.concat("URL:");
         msg.concat(reinterpret_cast < const char * > (url.bufUriString.buffer));
         ui_msg_pop_up("NFC Url", msg.c_str());
-        break;
-    case NDEF_TYPE_RTD_AAR:
-        memcpy(&bufAarString, data, sizeof(ndefConstBuffer));
-        Serial.printf("NDEF_TYPE_RTD_AAR :%s\n", (char *)bufAarString.buffer);
-        break;
-    case NDEF_TYPE_MEDIA:
-        break;
-    case NDEF_TYPE_MEDIA_VCARD:
         break;
     case NDEF_TYPE_MEDIA_WIFI: {
         ndefTypeWifi *wifi = (ndefTypeWifi *)data;
@@ -138,9 +130,10 @@ bool hw_start_nfc_discovery()
 #endif
 }
 
-void hw_stop_nfc_discovery()
+#ifdef ARDUINO
+static void hw_stop_nfc_discovery()
 {
-#if  defined(USING_ST25R3916) && defined(ARDUINO)
+#if  defined(USING_ST25R3916)
     deinitNFC();
     {
         core::ScopedI2cLock i2c;  // P7.45
@@ -149,6 +142,7 @@ void hw_stop_nfc_discovery()
     g_discovery_active = false;
 #endif
 }
+#endif
 
 bool hw_nfc_discovery_active()
 {

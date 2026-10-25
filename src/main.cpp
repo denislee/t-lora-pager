@@ -17,12 +17,9 @@
 #include "drivers/sdl/lv_sdl_mouse.h"
 #include "drivers/sdl/lv_sdl_mousewheel.h"
 #include "drivers/sdl/lv_sdl_keyboard.h"
-#include "demos/lv_demos.h"
-#include "examples/lv_examples.h"
 
 #include "hal_interface.h"
 #include "core/system.h"
-#include "core/system_hooks.h"
 #include "apps/app_registry.h"
 #include "emu_shots.h"
 #include "hal/link.h"
@@ -32,18 +29,6 @@
 // when !ARDUINO so this TU no longer needs to define them.
 
 static lv_display_t *lvDisplay;
-static lv_indev_t *lvMouse;
-static lv_indev_t *lvMouseWheel;
-static lv_indev_t *lvKeyboard;
-
-
-#if LV_USE_LOG != 0
-static void lv_log_print_g_cb(lv_log_level_t level, const char * buf)
-{
-    LV_UNUSED(level);
-    LV_UNUSED(buf);
-}
-#endif
 
 
 void hal_setup(void)
@@ -54,18 +39,14 @@ void hal_setup(void)
     setenv("DBUS_FATAL_WARNINGS", "0", 1);
 #endif
 
-#if LV_USE_LOG != 0
-    lv_log_register_print_cb(lv_log_print_g_cb);
-#endif
-
     /* Add a display
      * Use the 'monitor' driver which creates window on PC's monitor to simulate a display*/
 
 
     lvDisplay = lv_sdl_window_create(SDL_HOR_RES, SDL_VER_RES);
-    lvMouse = lv_sdl_mouse_create();
-    lvMouseWheel = lv_sdl_mousewheel_create();
-    lvKeyboard = lv_sdl_keyboard_create();
+    lv_sdl_mouse_create();
+    lv_sdl_mousewheel_create();
+    lv_sdl_keyboard_create();
 }
 
 void hal_loop(void)

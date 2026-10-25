@@ -276,17 +276,6 @@ static const hw_device_t hw_devices[] = {
 
 #ifndef ARDUINO
 static time_t emu_time_offset = 0;
-
-int random(int min, int max)
-{
-    if (min > max) {
-        int temp = min;
-        min = max;
-        max = temp;
-    }
-    int range = max - min + 1;
-    return rand() % range + min;
-}
 #endif
 
 
@@ -884,9 +873,9 @@ void hw_fake_sleep_tick(uint32_t now_ms)
 
 // Only reached through hw_low_power_loop(), which has already dropped the
 // notes passphrase.
-void hw_sleep()
-{
 #ifdef ARDUINO
+static void hw_sleep()
+{
     hw_audio_deinit_task();
 
 #ifdef USING_PDM_MICROPHONE
@@ -899,8 +888,8 @@ void hw_sleep()
 
     instance.decrementBrightness(0, 5, false);
     instance.sleep((WakeupSource_t)(WAKEUP_SRC_BOOT_BUTTON));
-#endif
 }
+#endif
 
 void hw_deep_sleep_wheel_wake()
 {
@@ -920,8 +909,7 @@ void hw_deep_sleep_wheel_wake()
     // the hold that got us here would wake at once.
     while (digitalRead(ROTARY_C) == LOW) delay(10);
 #ifdef HAS_SD_CARD_SOCKET
-    instance.sleepSkipsSD = true;  // P7.34, see hw_low_power_loop()
-    hw_sd_unmount_for_sleep();
+    hw_sd_unmount_for_sleep();  // P7.34, see hw_low_power_loop()
 #endif
     core::ScopedKbLock kb_lock;  // sleep() calls kb.end()
     instance.sleep((WakeupSource_t)(WAKEUP_SRC_ROTARY_BUTTON));
@@ -951,9 +939,9 @@ void hw_low_power_loop()
     notes_crypto_lock();
 #ifdef HAS_SD_CARD_SOCKET
     /* P7.34: unmount and remount the card here, not inside lightSleep()/sleep()
-     * under the I2C lock below (their SD calls take the SPI lock: I2C -> SPI
-     * inverted the kb_lock.h order, and the remount's SD.begin ran unlocked). */
-    instance.sleepSkipsSD = true;
+     * under the I2C lock below (their SD calls took the SPI lock: I2C -> SPI
+     * inverted the kb_lock.h order, and the remount's SD.begin ran unlocked).
+     * The vendor sleep paths no longer touch the card at all. */
     hw_sd_unmount_for_sleep();
 #endif
     {
@@ -970,19 +958,12 @@ void hw_low_power_loop()
 #endif
 }
 
-#if defined(ARDUINO)
-#include <Esp.h>
-#include <esp_heap_caps.h>
-#endif
-
-void hw_get_heap_info(uint32_t &total, uint32_t &free)
+uint32_t hw_get_free_heap()
 {
 #if defined(ARDUINO)
-    total = ESP.getHeapSize();
-    free = ESP.getFreeHeap();
+    return ESP.getFreeHeap();
 #else
-    total = 512 * 1024;
-    free = 256 * 1024;
+    return 256 * 1024;
 #endif
 }
 

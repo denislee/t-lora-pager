@@ -25,8 +25,6 @@ std::mutex              s_mu;              // guards s_queue + s_next_id
 std::deque<Notification> s_queue;
 uint32_t                s_next_id = 1;
 
-std::vector<Subscriber> s_subs;            // LVGL-thread only
-
 // --- Default renderer: banner stack on lv_layer_top() --------------------
 
 struct ActiveBanner {
@@ -45,8 +43,6 @@ constexpr size_t  kMaxVisible  = 3;
 static lv_color_t sev_bg(Severity s)
 {
     switch (s) {
-    case Severity::Success: return lv_palette_darken(LV_PALETTE_GREEN, 2);
-    case Severity::Warning: return lv_palette_darken(LV_PALETTE_AMBER, 2);
     case Severity::Error:   return lv_palette_darken(LV_PALETTE_RED,   2);
     case Severity::Info:
     default:                return lv_color_hex(0x0b6fa8);
@@ -144,25 +140,17 @@ static void default_renderer(const Notification &n)
 
 } // namespace
 
-uint32_t post(Notification n)
+void post(Notification n)
 {
-    uint32_t id;
     {
         std::lock_guard<std::mutex> g(s_mu);
-        id = s_next_id++;
+        n.id = s_next_id++;
         if (s_next_id == 0) s_next_id = 1;  // skip 0, it means "invalid"
-        n.id = id;
         s_queue.push_back(std::move(n));
     }
     // pump() runs on every LVGL task pass; wake it so the banner doesn't wait
     // for the next timer deadline (up to 200 ms on a static screen).
     hw_lvgl_task_notify_wake();
-    return id;
-}
-
-void subscribe(Subscriber s)
-{
-    s_subs.push_back(std::move(s));
 }
 
 void pump()
@@ -185,15 +173,13 @@ void pump()
         batch.swap(s_queue);
     }
     for (auto &n : batch) {
-        for (auto &sub : s_subs) sub(n);
+        if (s_renderer_installed) default_renderer(n);
     }
 }
 
 void install_default_renderer()
 {
-    if (s_renderer_installed) return;
     s_renderer_installed = true;
-    subscribe(default_renderer);
 }
 
 } // namespace notify

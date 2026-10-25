@@ -30,12 +30,6 @@ void hw_wifi_get_saved_list(std::vector<std::string> &ssids);
 void hw_wifi_add_saved(const std::string &ssid, const std::string &password);
 void hw_wifi_forget();  // drop every saved network
 
-// Kick off a connection to the most recent saved credential. No-op if WiFi is
-// already connected or no credential is stored. Needed at boot because
-// setAutoReconnect(false) is in effect, so WiFi.mode(WIFI_STA) alone won't
-// restore the prior session — we have to drive WiFi.begin() ourselves.
-void hw_wifi_reconnect_saved();
-
 // P4.17: WiFi reconnect supervisor with exponential backoff.
 // Call from the main loop at any cadence >= 1 Hz; the function self-throttles.
 // Retries hw_wifi_reconnect_saved() at 30 s -> 60 s -> 5 min (cap); after
@@ -96,8 +90,6 @@ void hw_set_bt_enable(bool en);
 
 // --- BLE keyboard ---
 const char *hw_get_ble_kb_name();
-void hw_set_ble_kb_enable();
-void hw_set_ble_kb_disable();
 void hw_set_ble_kb_char(const char *c);
 bool hw_get_ble_kb_connected();
 std::string hw_get_ble_kb_peer_address();

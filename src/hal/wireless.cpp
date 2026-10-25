@@ -10,6 +10,17 @@
 #include "ca_certs.h"   // P4.27 root CA bundle
 #include "ble_stack.h"  // hal::ble::DEVICE_NAME
 
+// Own-TU helpers (DC2.3.31), defined further down.
+// Kick off a connection to the most recent saved credential. No-op if WiFi is
+// already connected or no credential is stored. Needed at boot because
+// setAutoReconnect(false) is in effect, so WiFi.mode(WIFI_STA) alone won't
+// restore the prior session — we have to drive WiFi.begin() ourselves.
+#ifdef ARDUINO
+static void hw_wifi_reconnect_saved();
+#endif
+static void hw_set_ble_kb_enable();
+static void hw_set_ble_kb_disable();
+
 #ifdef ARDUINO
 #include <LilyGoLib.h>
 #include <WiFi.h>
@@ -19,6 +30,7 @@
 #include <Preferences.h>
 #include <esp_heap_caps.h>  // heap_caps_get_largest_free_block() for StringSink
 #include "task_util.h"
+
 // board_config.h defines USING_BLE_KEYBOARD for every supported board, so the
 // BLE keyboard code below is guarded on ARDUINO alone.
 #if !defined(USING_BLE_KEYBOARD)
@@ -131,16 +143,16 @@ void hw_set_wifi_enable(bool en) {
 #endif
 }
 
-void hw_wifi_reconnect_saved()
-{
 #ifdef ARDUINO
+static void hw_wifi_reconnect_saved()
+{
     if (WiFi.isConnected()) return;
     std::string s, pw;
     if (wifi_load_saved(s, pw)) {
         WiFi.begin(s.c_str(), pw.c_str());
     }
-#endif
 }
+#endif
 
 // PB.2 — WiFi power-save wrappers called by hw_power_down_all / hw_power_up_all.
 //
@@ -782,7 +794,7 @@ const char *hw_get_ble_kb_name()
     return hal::ble::DEVICE_NAME;
 }
 
-void hw_set_ble_kb_enable()
+static void hw_set_ble_kb_enable()
 {
 #ifdef ARDUINO
     // ble_stack inits NimBLE once (HID + PagerLink on one server) and only
@@ -797,7 +809,7 @@ void hw_set_ble_kb_enable()
 #endif
 }
 
-void hw_set_ble_kb_disable()
+static void hw_set_ble_kb_disable()
 {
 #ifdef ARDUINO
     if (ble_kb_keepalive_handle) {

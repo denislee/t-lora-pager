@@ -409,11 +409,10 @@ public:
      */
     void uninstallSD();
 
-    // [LOCAL PATCH P7.34] When true, lightSleep()/sleep() leave the SD card
-    // alone: the caller unmounts it before (src/hal/storage.cpp
-    // hw_sd_unmount_for_sleep) and remounts it after (hw_mount_sd), outside
-    // its I2C lock, so the non-recursive SPI lock is never taken under it.
-    bool sleepSkipsSD = false;
+    // [LOCAL PATCH P7.34] lightSleep()/sleep() leave the SD card alone: the
+    // caller unmounts it before (src/hal/storage.cpp hw_sd_unmount_for_sleep)
+    // and remounts it after (hw_mount_sd), outside its I2C lock, so the
+    // non-recursive SPI lock is never taken under it.
 
     /**
      * @brief Check if the SD card is ready.

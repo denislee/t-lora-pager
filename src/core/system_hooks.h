@@ -3,8 +3,8 @@
  * @brief     Canonical declarations for cross-module system entry points.
  *
  * Every TU that reaches across module boundaries (`ui_is_fake_sleep`,
- * `menu_show`, the instance lock, editor deep-link glue) goes through this
- * header. Replaces ad-hoc `extern bool ui_is_fake_sleep();` declarations
+ * `menu_show_deferred`, the instance lock, the fake-sleep notifies) goes
+ * through this header. Replaces ad-hoc `extern bool ui_is_fake_sleep();` declarations
  * that previously drifted across factory.ino, hal/lvgl_task.cpp, and
  * hal/nfc_task.cpp — a rename used to be a landmine, now it's `grep`-able
  * from one place.
@@ -68,10 +68,8 @@ void ui_request_editor_switch();
 // on. Defers hw_deep_sleep_wheel_wake() onto the LVGL task. Safe from any task.
 void ui_request_wheel_sleep();
 
-// Show the home menu panel. Thin wrapper over core::System.
-void menu_show();
-
-// Deferred menu_show(): runs after the current LVGL event dispatch unwinds.
+// Show the home menu panel (core::System::queueShowMenu) after the current
+// LVGL event dispatch unwinds.
 // Use this from event callbacks (back buttons, ESC handlers, unlock results)
 // so the app is not torn down under the widget that is still dispatching.
 void menu_show_deferred();

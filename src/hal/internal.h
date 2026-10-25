@@ -30,6 +30,3 @@ void save_user_setting_nvs();
 // hal/radio/nrf2401.cpp). Called once from hal/system.cpp's hw_init().
 void hw_nrf24_begin();
 
-#ifndef ARDUINO
-int random(int min, int max);
-#endif

@@ -8,7 +8,6 @@
  */
 
 #include "nfc_reader.h"
-#include "../core/scoped_lock.h"
 
 #if defined(ARDUINO) && defined(USING_ST25R3916)
 
@@ -26,27 +25,14 @@ static ndef_event_callback_t ndef_event_cb = NULL;
 static bool _nfc_running = false;
 
 static void ndefRecordHandle(const ndefRecord *record);
-static ReturnCode ndefRtdDeviceInfoDump(const ndefType *devInfo, ndefTypeRtdDeviceInfo *devInfoData);
 static ReturnCode ndefRtdTextDump(const ndefType *text, ndefRtdText *rtdText);
 static ReturnCode ndefRtdUriDump(const ndefType *uri, ndefRtdUri *rtdUri);
-static ReturnCode ndefRtdAarDump(const ndefType *aar, ndefConstBuffer *bufAarString);
 static ReturnCode ndefMediaWifiDump(const ndefType *wifi, ndefTypeWifi *wifiConfig);
 
 static void ndefClassHandler()
 {
     rfalNfcDevice *nfcDev;
     NFCReader.rfalNfcGetActiveDevice(&nfcDev);
-
-    {
-        char idbuf[3 * 16 + 1];
-        int n = 0;
-        int max_bytes = nfcDev->nfcidLen;
-        if (max_bytes > 16) max_bytes = 16;
-        for (int i = 0; i < max_bytes; i++) {
-            n += snprintf(idbuf + n, sizeof(idbuf) - n, "%02X ", nfcDev->nfcid[i]);
-        }
-        log_d("NDEF ID: %s", idbuf);
-    }
 
     // See if we can get an NDEF record from it
     ReturnCode  err = ndef.ndefPollerContextInitialization(nfcDev);
@@ -94,15 +80,7 @@ static void ndefClassHandler()
 
 static void demoNotif(rfalNfcState st )
 {
-    if ( st == RFAL_NFC_STATE_WAKEUP_MODE ) {
-        log_d("Wake Up mode started");
-    } else if ( st == RFAL_NFC_STATE_POLL_TECHDETECT ) {
-        log_d("Wake Up mode terminated. Polling for devices");
-    } else if ( st == RFAL_NFC_STATE_POLL_SELECT ) {
-        log_d("State poll select");
-    } else if ( st == RFAL_NFC_STATE_START_DISCOVERY ) {
-        log_d("State start discovery");
-    } else if (st == RFAL_NFC_STATE_ACTIVATED) {
+    if (st == RFAL_NFC_STATE_ACTIVATED) {
         if (ndef_notify_cb) {
             ndef_notify_cb();
         }
@@ -114,10 +92,6 @@ static void demoNotif(rfalNfcState st )
     }
 }
 
-
-
-// Rate-limits the "tag can be removed" log line while the tag stays in the field.
-static uint32_t interval = 0;
 
 void loopNFCReader()
 {
@@ -140,10 +114,6 @@ void loopNFCReader()
                 log_d("Start discovery");
                 return ;
             }
-            if (millis() > interval) {
-                log_d("Operation completed, tag can be removed from the field");
-                interval = millis() + 1000;
-            }
             NFCReader.rfalNfcaPollerSleep();
         } else if (err == ST_ERR_TIMEOUT) {
             state = ST_POLLING;
@@ -157,12 +127,10 @@ void loopNFCReader()
     }
 }
 
-// Decodes one record's well-known type and hands it to the event callback.
-// vCard records are reported with no payload (nothing consumes them).
+// Decodes the record types the event callback consumes (Text, URI, Wi-Fi) and
+// hands every record to it; the others arrive with no payload.
 static void ndefRecordHandle(const ndefRecord *record)
 {
-    static ndefTypeRtdDeviceInfo   devInfoData;
-    static ndefConstBuffer         bufAarString;
     static ndefTypeWifi            wifiConfig;
     static ndefRtdUri              url;
     static ndefRtdText             rtdText;
@@ -173,10 +141,6 @@ static void ndefRecordHandle(const ndefRecord *record)
     }
     void *user_data = NULL;
     switch (type.id) {
-    case NDEF_TYPE_RTD_DEVICE_INFO:
-        ndefRtdDeviceInfoDump(&type, &devInfoData);
-        user_data = &devInfoData;
-        break;
     case NDEF_TYPE_RTD_TEXT:
         ndefRtdTextDump(&type, &rtdText);
         user_data = &rtdText;
@@ -185,40 +149,16 @@ static void ndefRecordHandle(const ndefRecord *record)
         ndefRtdUriDump(&type, &url);
         user_data = &url;
         break;
-    case NDEF_TYPE_RTD_AAR:
-        ndefRtdAarDump(&type, &bufAarString);
-        user_data = &bufAarString;
-        break;
     case NDEF_TYPE_MEDIA_WIFI:
         ndefMediaWifiDump(&type, &wifiConfig);
         user_data = &wifiConfig;
         break;
-    case NDEF_TYPE_EMPTY:
-    case NDEF_TYPE_MEDIA_VCARD:
-    case NDEF_TYPE_ID_COUNT:
     default:
         break;
     }
     if (ndef_event_cb) {
         ndef_event_cb(type.id, user_data);
     }
-}
-
-static ReturnCode ndefRtdDeviceInfoDump(const ndefType *devInfo, ndefTypeRtdDeviceInfo *devInfoData)
-{
-
-    if (devInfo == NULL) {
-        return ST_ERR_PARAM;
-    }
-    if (devInfoData == NULL) {
-        return ST_ERR_PARAM;
-    }
-    if (devInfo->id != NDEF_TYPE_RTD_DEVICE_INFO) {
-        return ST_ERR_PARAM;
-    }
-
-    ndef.ndefGetRtdDeviceInfo(devInfo, devInfoData);
-    return ST_ERR_NONE;
 }
 
 static ReturnCode ndefRtdTextDump(const ndefType *text, ndefRtdText *rtdText)
@@ -244,18 +184,6 @@ static ReturnCode ndefRtdUriDump(const ndefType *uri, ndefRtdUri *rtdUri)
         return ST_ERR_PARAM;
     }
     ndef.ndefGetRtdUri(uri, &rtdUri->bufProtocol, &rtdUri->bufUriString);
-    return ST_ERR_NONE;
-}
-
-static ReturnCode ndefRtdAarDump(const ndefType *aar, ndefConstBuffer *bufAarString)
-{
-    if (aar == NULL || bufAarString == NULL) {
-        return ST_ERR_PARAM;
-    }
-    if (aar->id != NDEF_TYPE_RTD_AAR) {
-        return ST_ERR_PARAM;
-    }
-    ndef.ndefGetRtdAar(aar, bufAarString);
     return ST_ERR_NONE;
 }
 

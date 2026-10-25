@@ -32,8 +32,7 @@
 #include "../hal/storage.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/system.h"
-#include <mbedtls/md.h>
-#include <mbedtls/pkcs5.h>
+#include "../hal/pbkdf2_sha256.h"
 #include <string>
 #include <vector>
 #else
@@ -173,11 +172,9 @@ void hist_add(uint64_t hold_us) {
 } // namespace
 
 void lock_acquired(uint64_t wait_us) {
+    (void)wait_us;  // kb_reader stopped taking the instance lock in IS.1
     s_take_us = now_us();
     s_holder = current_task_name();
-    if (strcmp(s_holder, "kb_reader") == 0 && wait_us > s_kb_wait_max_us) {
-        s_kb_wait_max_us = wait_us;
-    }
 }
 
 void lock_released() {
@@ -228,7 +225,7 @@ void boot_pre_app() {
 
 // One display flush (vendor disp_flush hook): pixels, byte-swap and SPI push
 // time (P7.9).
-void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) {
+static void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) {
     if (!s_boot_flushed) { s_boot_flushed = true; boot_mark("first flush"); }
     s_fr_px += px;
     s_fr_swap_us += swap_us;
@@ -367,18 +364,14 @@ void run_command(char *line) {
     case 'g': s_req_group = true; break;
     case 'f': s_req_dirty = true; break;
     case 'p': {
-        // Time one PBKDF2-HMAC-SHA256 x10000 / 48 B, the derive_key_iv() work.
-        const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-        mbedtls_md_context_t md;
-        mbedtls_md_init(&md);
-        mbedtls_md_setup(&md, info, 1);
-        const unsigned char salt[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-        unsigned char out[48];
+        // Time one PBKDF2-HMAC-SHA256 x10000 / 48 B, the derive_key_iv() work
+        // (hal::pbkdf2_sha256 since P7.2, not mbedTLS).
+        const uint8_t salt[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        uint8_t out[48];
         uint64_t t0 = now_us();
-        mbedtls_pkcs5_pbkdf2_hmac(&md, (const unsigned char *)"benchmark-pw", 12, salt, 8,
-                                  10000, sizeof(out), out);
+        hal::pbkdf2_hmac_sha256((const uint8_t *)"benchmark-pw", 12, salt, sizeof(salt),
+                                10000, out, sizeof(out));
         uint64_t us = now_us() - t0;
-        mbedtls_md_free(&md);
         PROF_LOG("pbkdf2 x10000: %u ms at %u MHz (task prio %u)", (unsigned)(us / 1000),
                  (unsigned)getCpuFrequencyMhz(), (unsigned)uxTaskPriorityGet(NULL));
         break;

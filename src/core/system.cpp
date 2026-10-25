@@ -488,9 +488,7 @@ void System::setupGlobalUI() {
 
         if (self._statMemLabel) {
             if (settings.show_mem_usage) {
-                uint32_t total, free_h;
-                hw_get_heap_info(total, free_h);
-                uint32_t mem_free_kb = free_h / 1024;
+                uint32_t mem_free_kb = hw_get_free_heap() / 1024;
                 if (mem_free_kb != prev_mem_free_kb) {
                     lv_label_set_text_fmt(self._statMemLabel, "M:%uK", mem_free_kb);
                     prev_mem_free_kb = mem_free_kb;

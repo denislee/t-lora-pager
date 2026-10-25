@@ -331,9 +331,6 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         log_d("Initializing expand succeeded");
         devices_probe |= HW_EXPAND_ONLINE;
         const uint8_t expands[] = {
-#ifdef  EXPANDS_DISP_RST
-            EXPANDS_DISP_RST,
-#endif  /*EXPANDS_DISP_RST*/
             EXPANDS_KB_RST,
             EXPANDS_LORA_EN,
             EXPANDS_GPS_EN,
@@ -348,9 +345,6 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
 #endif /*EXPANDS_KB_EN*/
 #ifdef EXPANDS_GPIO_EN
             EXPANDS_GPIO_EN,
-#endif /*EXPANDS_GPIO_EN*/
-#ifdef EXPANDS_SD_PULLEN
-            // EXPANDS_SD_PULLEN,
 #endif /*EXPANDS_GPIO_EN*/
 #ifdef EXPANDS_SD_EN
             EXPANDS_SD_EN,
@@ -374,12 +368,8 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
         cfg |= (uint16_t)(1U << EXPANDS_SD_PULLEN);
         io.configPort(ExtensionIOXL9555::PORT0, (uint8_t)(cfg & 0xFF));
         io.configPort(ExtensionIOXL9555::PORT1, (uint8_t)(cfg >> 8));
-
-#ifdef EXPANDS_DISP_RST
-        io.digitalWrite(EXPANDS_DISP_RST, LOW);
-        delay(50);
-        io.digitalWrite(EXPANDS_DISP_RST, HIGH);
-#endif /*EXPANDS_DISP_RST*/
+        // [LOCAL PATCH DC2.3.32] The pager defines no EXPANDS_DISP_RST: the
+        // display-reset pulse and its expands[] entries are gone.
     } else {
         log_d("Initializing expand Failed!");
     }
@@ -596,8 +586,8 @@ bool LilyGoLoRaPager::initPMU()
 // on every outcome, not just in begin(): src/hal/storage.cpp hw_mount_sd (card
 // inserted after boot) and the lightSleep() wake remount both come through
 // here. No locks are taken in here: hw_mount_sd holds the SPI lock and then the
-// I2C lock (SD_DET read on the XL9555) around the call, and with sleepSkipsSD
-// set the light-sleep remount is hw_mount_sd too ([LOCAL PATCH P7.34]).
+// I2C lock (SD_DET read on the XL9555) around the call, and the light-sleep
+// remount is hw_mount_sd too ([LOCAL PATCH P7.34]).
 bool LilyGoLoRaPager::installSD()
 {
 
@@ -764,7 +754,8 @@ void LilyGoLoRaPager::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_NFC, false);
     powerControl(POWER_KEYBOARD, false);
 
-    if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
+    // [LOCAL PATCH P7.34] No uninstallSD(): the caller unmounts the card
+    // before (hw_sd_unmount_for_sleep) and remounts it after (hw_mount_sd).
     powerControl(POWER_SD_CARD, false);
 
 
@@ -817,7 +808,7 @@ void LilyGoLoRaPager::lightSleep(WakeupSource_t wakeup_src)
     powerControl(POWER_NFC, true);
     powerControl(POWER_KEYBOARD, true);
     powerControl(POWER_SD_CARD, true);
-    if (!sleepSkipsSD) installSD();   // [LOCAL PATCH P7.34]
+    // [LOCAL PATCH P7.34] No installSD(): the caller remounts (hw_mount_sd).
 
     // [LOCAL PATCH DC2.3.20] No ppm.enableMeasure(): src/hal/system.cpp
     // hw_init() keeps the BQ25896 ADC off (nothing reads it).
@@ -874,9 +865,6 @@ void LilyGoLoRaPager::sleep(WakeupSource_t wakeup_src, bool off_rtc_backup_domai
 #endif
 
     const uint8_t expands[] = {
-#ifdef EXPANDS_DISP_RST
-        EXPANDS_DISP_RST,
-#endif /*EXPANDS_DISP_RST*/
         EXPANDS_KB_RST,
         EXPANDS_LORA_EN,
         EXPANDS_GPS_EN,
@@ -895,12 +883,6 @@ void LilyGoLoRaPager::sleep(WakeupSource_t wakeup_src, bool off_rtc_backup_domai
 #ifdef EXPANDS_SD_DET
         EXPANDS_SD_DET,
 #endif /*EXPANDS_SD_DET*/
-        // #ifdef EXPANDS_SD_PULLEN
-        //         EXPANDS_SD_PULLEN,
-        // #endif /*EXPANDS_GPIO_EN*/
-        // #ifdef EXPANDS_SD_EN
-        //         EXPANDS_SD_EN,
-        // #endif /*EXPANDS_SD_EN*/
     };
     for (auto pin : expands) {
         io.digitalWrite(pin, LOW);
@@ -927,9 +909,9 @@ void LilyGoLoRaPager::sleep(WakeupSource_t wakeup_src, bool off_rtc_backup_domai
         log_d("%d second sleep ...", i);
         delay(1000);
     }
-    if (io.digitalRead(EXPANDS_SD_DET)) {
-        if (!sleepSkipsSD) uninstallSD();   // [LOCAL PATCH P7.34]
-    } else {
+    // [LOCAL PATCH P7.34] A present card was already unmounted by the caller
+    // (hw_sd_unmount_for_sleep); only an empty slot is powered off here.
+    if (!io.digitalRead(EXPANDS_SD_DET)) {
         powerControl(POWER_SD_CARD, false);
     }
 

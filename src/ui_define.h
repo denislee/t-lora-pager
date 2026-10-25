@@ -35,7 +35,6 @@
 /* Cross-module hooks that don't belong in a feature header. */
 lv_indev_t *lv_get_encoder_indev();
 lv_indev_t *lv_get_keyboard_indev();
-/* menu_show declared in core/system_hooks.h (via include above). */
 void set_default_group(lv_group_t *group);
 
 void disable_keyboard();

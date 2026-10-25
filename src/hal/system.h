@@ -58,7 +58,6 @@ void hw_shutdown();
 // Deep sleep woken by a ~1 s scroll-wheel hold (pager); hw_shutdown() elsewhere.
 // Draws ~530 uA vs ~26 uA for hw_shutdown(), but needs no PWR button to restart.
 void hw_deep_sleep_wheel_wake();
-void hw_sleep();
 void hw_power_down_all();
 void hw_power_up_all();
 void hw_low_power_loop();
@@ -76,7 +75,7 @@ void hw_get_user_setting(user_setting_params_t &param);
 void hw_load_setting();
 void hw_set_user_setting(user_setting_params_t &param);
 
-void hw_get_heap_info(uint32_t &total, uint32_t &free);
+uint32_t hw_get_free_heap();
 
 // Internal-RAM and PSRAM heap telemetry (P7.49). The low-water marks are
 // since boot; `int_largest` is the biggest single internal block, which is
