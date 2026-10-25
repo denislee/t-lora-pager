@@ -54,12 +54,11 @@
 #include "hal/ble_hid.h"
 #include "hal/ble_stack.h"
 #include "hal/link/link_frame.h"
+#include "hal/link/link_log.h"
 #include "hal/link/link_service.h"
 #include "hal/link/link_uuids.h"
 #include "hal/storage.h"
 #include "hal/system.h"
-
-#define LINK_LOG(...) log_i(__VA_ARGS__)
 
 namespace pagerlink {
 namespace ble {

@@ -14,8 +14,7 @@
 
 #ifndef ARDUINO
 
-#include <cstdio>
-#define LINK_LOG(fmt, ...) printf("[link] " fmt "\n", ##__VA_ARGS__)
+#include "hal/link/link_log.h"
 
 #include <atomic>
 #include <cerrno>

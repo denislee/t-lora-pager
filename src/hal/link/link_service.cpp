@@ -17,18 +17,11 @@
 #include <utility>
 #include <vector>
 
+#include "hal/link/link_log.h"
 #include "hal/link/link_xfer.h"
 #include "hal/power.h"
 #include "hal/storage.h"
 #include "core/input_profile.h"
-
-#ifdef ARDUINO
-#include <esp32-hal-log.h>
-#define LINK_LOG(...) log_i(__VA_ARGS__)
-#else
-#include <cstdio>
-#define LINK_LOG(fmt, ...) printf("[link] " fmt "\n", ##__VA_ARGS__)
-#endif
 
 namespace pagerlink {
 namespace {
@@ -187,10 +180,9 @@ uint32_t steady_ms() {
  */
 void finish_outbound(size_t i, bool ok) {
     State &s = state();
+    LINK_LOG("send %s id=%u", ok ? "done" : "failed", static_cast<unsigned>(s.outbound[i].xfer));
     std::function<void(bool)> done = std::move(s.outbound[i].done);
-    const uint16_t xfer = s.outbound[i].xfer;
     s.outbound.erase(s.outbound.begin() + static_cast<std::ptrdiff_t>(i));
-    LINK_LOG("send %s id=%u", ok ? "done" : "failed", static_cast<unsigned>(xfer));
     if (done) {
         done(ok);
     }
