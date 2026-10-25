@@ -40,7 +40,7 @@ static std::string mask_preview(const std::string &v)
 {
     if (v.size() <= 4) return "****";
     if (v.size() <= 12) return "****" + v.substr(v.size() - 4);
-    return v.substr(0, 2) + "…" + v.substr(v.size() - 4);
+    return v.substr(0, 2) + "..." + v.substr(v.size() - 4);
 }
 
 /* Strict ASCII-only, no whitespace, no control bytes. Bearer tokens and PATs

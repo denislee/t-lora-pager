@@ -74,9 +74,10 @@ static void tear_down(LockCtx *ctx)
 }
 
 /* ---- Unlock on a worker (P7.4) ----
- * The canary check (one PBKDF2) and, on success, the fixed-salt prewarm
- * (journal index + secret slots, P6.22b) run on s_unlock_job so the LVGL
- * thread keeps drawing the "Unlocking…" loader. notes_crypto_unlock publishes
+ * The canary check (one PBKDF2) runs on s_unlock_job so the LVGL thread keeps
+ * drawing the "Unlocking..." loader. The fixed-salt prewarm (journal index +
+ * secret slots, P6.22b; one PBKDF2 each) is handed to its own background
+ * task, so the loader closes after the canary instead of after all of them. notes_crypto_unlock publishes
  * the unlocked state itself, only after the canary verified. */
 struct UnlockResult {
     bool ok;
@@ -89,7 +90,7 @@ static UnlockResult *run_unlock(std::string *pw, uint32_t submit)
     bool ok = notes_crypto_unlock(pw->c_str());
     hal::secret_scrub(*pw);     // the job's copy; g_passphrase holds the live one
     delete pw;
-    if (ok) notes_crypto_prewarm_fixed();
+    if (ok) notes_crypto_prewarm_fixed_async();
     return new UnlockResult{ok, submit};
 }
 
@@ -125,7 +126,7 @@ static void unlock_submit(LockCtx *ctx, const char *p1)
     const uint32_t submit = ctx->submit;
     lv_obj_add_state(ctx->ta1, LV_STATE_DISABLED);
     set_error(ctx, "");
-    ui_loading_open(&ctx->loading, "Unlocking\xE2\x80\xA6", nullptr);
+    ui_loading_open(&ctx->loading, "Unlocking...", nullptr);
     /* Priority 1 = the LVGL loop's, so the loader keeps animating while both
      * cores derive (P7.2 runs T2 on the other core at the caller's priority).
      * Emulator: runs inline and unlock_done has already fired on return. */

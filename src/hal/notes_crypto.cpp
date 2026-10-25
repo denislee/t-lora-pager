@@ -1095,6 +1095,29 @@ void notes_crypto_prewarm_fixed()
 #endif
 }
 
+#ifdef ARDUINO
+static std::atomic<bool> s_prewarm_fixed_running{false};
+
+static void prewarm_fixed_task(void *)
+{
+    notes_crypto_prewarm_fixed();
+    s_prewarm_fixed_running = false;
+    vTaskDelete(nullptr);
+}
+#endif
+
+void notes_crypto_prewarm_fixed_async()
+{
+#ifdef ARDUINO
+    if (!g_unlocked || s_prewarm_fixed_running.exchange(true)) return;
+    /* Priority 1, below the LVGL task: a foreground derive (opening a note)
+     * preempts this one. pin_key's epoch check drops keys if a lock() races. */
+    if (xTaskCreate(prewarm_fixed_task, "nc_prewarm_fx", 8192, nullptr, 1, nullptr) != pdPASS) {
+        s_prewarm_fixed_running = false;
+    }
+#endif
+}
+
 bool notes_crypto_decrypt_buffer(const uint8_t *ct, size_t ct_len,
                                  std::string &out)
 {

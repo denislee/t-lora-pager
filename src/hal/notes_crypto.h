@@ -84,9 +84,13 @@ void notes_crypto_unpin_key(int tag);
 /* Derive and pin every fixed-salt key that exists on this device: the
  * journal index (FFat first, then SD, like hw_read_preferred_bytes) and the
  * secret slots (hal::secret_prewarm_pinned). One PBKDF2 per blob present;
- * BLOCKS — call it from a worker right after notes_crypto_unlock() succeeds
- * (ui_lock.cpp's unlock job). No-op when locked. */
+ * BLOCKS — call it from a worker. No-op when locked. */
 void notes_crypto_prewarm_fixed();
+
+/* notes_crypto_prewarm_fixed() on a low-priority background task, so unlock
+ * returns after the one canary PBKDF2 (ui_lock.cpp). At most one in flight;
+ * a reader that misses the pinned slot meanwhile derives its own key. */
+void notes_crypto_prewarm_fixed_async();
 
 /* First-time setup: refuses if crypto is already enabled. Writes the canary
  * and unlocks the session. The caller is responsible for migrating any
