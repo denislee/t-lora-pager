@@ -16,6 +16,8 @@
 // to the SSH app's loopback backend.
 #define USING_LIBSSH
 
+// The optional external nRF24 is only probed when RadioLib keeps its driver;
+// platformio.ini excludes it by default (DC2.3.14).
 #ifndef RADIOLIB_EXCLUDE_NRF24
 #define USING_EXTERN_NRF2401
 #endif
