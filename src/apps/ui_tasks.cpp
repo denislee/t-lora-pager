@@ -5,7 +5,7 @@
  * @date      2026-04-10
  *
  * State reset on onStop (ui_tasks_exit):
- *   widgets: menu, main_page, add_ta, task_container, quit_btn
+ *   widgets: menu, add_ta, task_container, quit_btn
  *                                       — destroyed via lv_obj_del then nulled
  *   timers:  save_debounce_timer        — flushed (pending write forced
  *                                          through) then lv_timer_del + null
@@ -27,7 +27,6 @@ struct TaskItem {
 };
 
 static lv_obj_t *menu = NULL;
-static lv_obj_t *main_page = NULL;
 static lv_obj_t *add_ta = NULL;
 static lv_obj_t *task_container = NULL;
 static lv_obj_t *quit_btn = NULL;
@@ -37,7 +36,7 @@ static int32_t editing_idx = -1;
 
 static const char *tasks_file_path = "/tasks.txt";
 
-static void ui_tasks_exit(lv_obj_t *parent);
+static void ui_tasks_exit();
 static void do_exit();
 
 static void save_tasks() {
@@ -195,10 +194,9 @@ static void add_ta_event_cb(lv_event_t *e) {
     if (code == LV_EVENT_FOCUSED) {
         set_add_ta_collapsed(ta, false);
         // Match the Telegram composer's pattern: clear editing on focus so the
-        // physical keyboard delivers characters straight to the textarea. If
-        // we entered Tasks with the menu group still in editing mode (e.g.
-        // after the volume tile toggled it), the first LV_EVENT_KEY arrives
-        // while the indev is mid-edit-transition and the character is dropped.
+        // physical keyboard delivers characters straight to the textarea
+        // (e.g. focus coming back from a task row that was left in edit mode).
+        // App entry already starts non-editing (IS.4).
         if (g) lv_group_set_editing(g, false);
     } else if (code == LV_EVENT_DEFOCUSED) {
         set_add_ta_collapsed(ta, true);
@@ -395,7 +393,7 @@ static void ui_tasks_enter(lv_obj_t *parent) {
     menu = create_menu(parent, nullptr);
     ui_show_back_button(tasks_back_cb);
 
-    main_page = lv_menu_page_create(menu, NULL);
+    lv_obj_t *main_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_flex_flow(main_page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(main_page, 0, 0); // Remove padding to flush left
 
@@ -420,20 +418,16 @@ static void ui_tasks_enter(lv_obj_t *parent) {
     ui_tasks_refresh();
 
     lv_menu_set_page(menu, main_page);
+    // enterApp hands us an empty, non-editing group (IS.4), and add_ta's
+    // FOCUSED handler clears editing again, so the first key reaches it.
     lv_group_focus_obj(add_ta);
-    // The previously-active app (or menu) may have left the group in editing
-    // mode. Clear it before the user types so the very first key reaches the
-    // textarea instead of being consumed by an edit-mode transition.
-    lv_group_set_editing(lv_group_get_default(), false);
 
 #ifdef USING_TOUCHPAD
-    quit_btn = create_floating_button([](lv_event_t *e) {
-        do_exit();
-    }, NULL);
+    quit_btn = create_floating_button(tasks_back_cb, NULL);
 #endif
 }
 
-static void ui_tasks_exit(lv_obj_t *parent) {
+static void ui_tasks_exit() {
     ui_hide_back_button();
     disable_keyboard();
     // save_tasks() serializes the `tasks` model (not widget state); flush
@@ -448,7 +442,6 @@ static void ui_tasks_exit(lv_obj_t *parent) {
         lv_obj_del_async(quit_btn);
         quit_btn = NULL;
     }
-    main_page = NULL;
     add_ta = NULL;
     task_container = NULL;
     add_ta_expanded_h = 0;
@@ -464,7 +457,7 @@ public:
     TasksApp() : core::App("Tasks") {}
     void onStart(lv_obj_t *parent) override { ui_tasks_enter(parent); }
     void onStop() override {
-        ui_tasks_exit(getRoot());
+        ui_tasks_exit();
         core::App::onStop();
     }
 };

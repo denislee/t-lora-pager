@@ -8,9 +8,10 @@
  *   widgets: menu, text_area, quit_btn, word_count_label, float_bar,
  *            float_sync_btn, float_sync_icon, float_journal_btn
  *                                       — destroyed via lv_obj_del then nulled
- *   widgets: pending_editor_parent      — nulled (was deferred-build pointer)
+ *   unlock:  pending_editor_parent      — nulled, so an unlock prompt that
+ *                                          completes after exit builds nothing
  *   display: clip_invalidate_cb         — removed from the default display
- *   timers:  sync_pill_wifi_timer       — lv_timer_del + null
+ *   timers:  sync_pill_timer            — lv_timer_del + null
  *            word_count_debounce_timer  — lv_timer_del + null
  *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
  *   state:   s_pending_open_path        — consumed by editor_build_ui
@@ -19,10 +20,9 @@
  * into a destroyed textarea if leaked.
  */
 #include "../ui_define.h"
-#include "../core/app_manager.h"
-#include "../core/input_profile.h"
 #include "../core/system.h"
 #include "../core/notify.h"
+#include "../hal/link.h"
 #include "../hal/notes_crypto.h"
 #include "../hal/storage.h"
 #include "../hal/wireless.h"
@@ -40,8 +40,8 @@ static lv_obj_t *float_bar = NULL;
 static lv_obj_t *float_sync_btn = NULL;
 static lv_obj_t *float_sync_icon = NULL;
 static lv_obj_t *float_journal_btn = NULL;
-static lv_timer_t *sync_pill_wifi_timer = NULL;
-static int sync_pill_wifi_last_state = -1;
+static lv_timer_t *sync_pill_timer = NULL;
+static int sync_pill_last_state = -1;
 static string current_file_path = "";
 static bool content_dirty = false;
 static string s_pending_open_path;
@@ -53,7 +53,8 @@ static string s_pending_open_path;
 // typing stutter as a note grows past a few hundred chars.
 static lv_timer_t *word_count_debounce_timer = NULL;
 
-static void ui_text_editor_exit(lv_obj_t *parent);
+static void ui_text_editor_exit();
+static void ui_text_editor_open_file(const char *path);
 static void update_word_count();
 static void schedule_word_count_update();
 
@@ -226,7 +227,7 @@ static void do_exit()
     menu_show_deferred();  // switchApp → onStop → ui_text_editor_exit
 }
 
-static void exit_btn_cb(lv_event_t *e)
+static void exit_btn_cb(lv_event_t *)
 {
     do_exit();
 }
@@ -292,10 +293,16 @@ static void float_btn_click_cb(lv_event_t *e)
     core::System::getInstance().queueEnterApp(app_name);
 }
 
-/* Sync needs WiFi to talk to GitHub, so the pill is gated on the live link
- * state. Disabled state blocks input and makes encoder nav skip the pill,
- * matching the behaviour of WiFi-gated tiles on the home screen. */
-static void apply_sync_pill_wifi_state(bool connected)
+/* Notes Sync needs a route out: WiFi (GitHub / the hub) or the phone over
+ * PagerLink (H2.5). The pill is gated on that live state. Disabled state
+ * blocks input and makes encoder nav skip the pill, matching the behaviour of
+ * the gated tiles on the home screen. */
+static bool sync_route_up()
+{
+    return hw_get_wifi_connected() || hw_link_connected();
+}
+
+static void apply_sync_pill_state(bool connected)
 {
     if (!float_sync_btn) return;
     lv_color_t accent = lv_palette_main(LV_PALETTE_GREEN);
@@ -318,13 +325,13 @@ static void apply_sync_pill_wifi_state(bool connected)
     }
 }
 
-static void sync_pill_wifi_tick(lv_timer_t *t)
+static void sync_pill_tick(lv_timer_t *t)
 {
     (void)t;
-    int now = hw_get_wifi_connected() ? 1 : 0;
-    if (now != sync_pill_wifi_last_state) {
-        apply_sync_pill_wifi_state(now != 0);
-        sync_pill_wifi_last_state = now;
+    int now = sync_route_up() ? 1 : 0;
+    if (now != sync_pill_last_state) {
+        apply_sync_pill_state(now != 0);
+        sync_pill_last_state = now;
     }
 }
 
@@ -435,7 +442,7 @@ static void editor_build_ui(lv_obj_t *parent)
         if (lv_obj_get_parent(menu) == parent) {
             return;
         }
-        ui_text_editor_exit(NULL);
+        ui_text_editor_exit();
     }
     enable_keyboard();
 
@@ -470,11 +477,11 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_set_style_border_opa(text_area, LV_OPA_COVER, LV_STATE_FOCUSED);
 
     /* Cursor style */
-    lv_obj_set_style_bg_color(text_area, UI_COLOR_FG, LV_PART_CURSOR | LV_STATE_FOCUSED);
-    lv_obj_set_style_bg_opa(text_area, LV_OPA_COVER, LV_PART_CURSOR | LV_STATE_FOCUSED);
-    lv_obj_set_style_width(text_area, 8, LV_PART_CURSOR | LV_STATE_FOCUSED);
-    lv_obj_set_style_anim_duration(text_area, 0, LV_PART_CURSOR | LV_STATE_FOCUSED);
-    lv_obj_set_style_border_width(text_area, 0, LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_color(text_area, UI_COLOR_FG, (lv_style_selector_t)LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_bg_opa(text_area, LV_OPA_COVER, (lv_style_selector_t)LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_width(text_area, 8, (lv_style_selector_t)LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_anim_duration(text_area, 0, (lv_style_selector_t)LV_PART_CURSOR | LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(text_area, 0, (lv_style_selector_t)LV_PART_CURSOR | LV_STATE_FOCUSED);
 
     lv_obj_add_event_cb(text_area, encoder_enter_cb,
                         (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
@@ -515,8 +522,8 @@ static void editor_build_ui(lv_obj_t *parent)
 
     float_sync_btn = make_editor_pill(float_bar, LV_SYMBOL_REFRESH,
                                       LV_PALETTE_GREEN);
-    /* The pill icon is the first child of the button — cache it so the WiFi
-     * gate can recolour it without walking the tree on every tick. */
+    /* The pill icon is the first child of the button — cache it so the
+     * route gate can recolour it without walking the tree on every tick. */
     float_sync_icon = lv_obj_get_child(float_sync_btn, 0);
     lv_obj_add_event_cb(float_sync_btn, float_btn_click_cb,
                         LV_EVENT_CLICKED, (void *)"Notes Sync");
@@ -532,15 +539,14 @@ static void editor_build_ui(lv_obj_t *parent)
         lv_group_add_obj(def_grp, float_sync_btn);
     }
 
-    /* Apply the initial WiFi-gated state for the Sync pill and start a
+    /* Apply the initial route-gated state for the Sync pill and start a
      * lightweight tick that re-evaluates it — the user can flip WiFi from
-     * the home screen toggles and come back to the editor without the pill
-     * going stale. */
-    sync_pill_wifi_last_state = -1;
-    apply_sync_pill_wifi_state(hw_get_wifi_connected());
-    sync_pill_wifi_last_state = hw_get_wifi_connected() ? 1 : 0;
-    if (!sync_pill_wifi_timer) {
-        sync_pill_wifi_timer = lv_timer_create(sync_pill_wifi_tick, 1000, NULL);
+     * the home screen toggles (or the phone can connect) and come back to
+     * the editor without the pill going stale. */
+    sync_pill_last_state = sync_route_up() ? 1 : 0;
+    apply_sync_pill_state(sync_pill_last_state != 0);
+    if (!sync_pill_timer) {
+        sync_pill_timer = lv_timer_create(sync_pill_tick, 1000, NULL);
     }
 
     word_count_label = lv_label_create(lv_obj_get_parent(back_btn));
@@ -561,9 +567,7 @@ static void editor_build_ui(lv_obj_t *parent)
     update_word_count();
 
 #ifdef USING_TOUCHPAD
-    quit_btn = create_floating_button([](lv_event_t *e) {
-        do_exit();
-    }, NULL);
+    quit_btn = create_floating_button(exit_btn_cb, NULL);
 #endif
 
     if (!s_pending_open_path.empty()) {
@@ -580,7 +584,7 @@ static void editor_build_ui(lv_obj_t *parent)
     notes_crypto_prewarm();
 }
 
-void ui_text_editor_open_file(const char *path)
+static void ui_text_editor_open_file(const char *path)
 {
     if (text_area == NULL) return;
     current_file_path = path;
@@ -598,7 +602,7 @@ void ui_text_editor_open_file_deferred(const char *path)
     core::System::getInstance().queueEnterApp("Editor");
 }
 
-static void ui_text_editor_exit(lv_obj_t *parent)
+static void ui_text_editor_exit()
 {
     // Persist on every teardown path (app switch, sleep, any switchApp that
     // bypasses the back button); the save runs on a worker (IS.2) so teardown
@@ -618,11 +622,12 @@ static void ui_text_editor_exit(lv_obj_t *parent)
         word_count_label = NULL;
     }
 
-    if (sync_pill_wifi_timer) {
-        lv_timer_del(sync_pill_wifi_timer);
-        sync_pill_wifi_timer = NULL;
+    if (sync_pill_timer) {
+        lv_timer_del(sync_pill_timer);
+        sync_pill_timer = NULL;
     }
-    sync_pill_wifi_last_state = -1;
+    sync_pill_last_state = -1;
+    pending_editor_parent = NULL;
 
     if (word_count_debounce_timer) {
         lv_timer_del(word_count_debounce_timer);
@@ -659,7 +664,7 @@ public:
     TextEditorApp() : core::App("Editor") {}
     void onStart(lv_obj_t *parent) override { ui_text_editor_enter(parent); }
     void onStop() override {
-        ui_text_editor_exit(getRoot());
+        ui_text_editor_exit();
         core::App::onStop();
     }
 };

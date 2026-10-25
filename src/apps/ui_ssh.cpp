@@ -31,15 +31,23 @@
  *   statics: s_prompt_app                 — cleared if this app owns it
  *            s_live_                      — cleared if this app owns it; a drain
  *                                           posted after exit finds it null
+ *   widgets: top_bar_, status_lbl_, conn_btn_, conn_icon_, edit_btn_, term_,
+ *            input_, keys_row_, ctrl_btn_, ctrl_lbl_
+ *                                         — nulled (deleted with the panel)
+ *   input:   ctrl_armed_ (Ctrl latch), ansi_ (escape-parser state)
+ *                                         — reset so a half-typed chord or a
+ *                                           sequence cut off by the exit does
+ *                                           not leak into the next session
+ *   kept:    cfg_ (mirror of the NVS host/user/port, reloaded in onStart),
+ *            history_ (command history survives re-entry on purpose)
  * Unlike most apps, this one holds state as App members (poll_timer_,
- * backend_) rather than file statics. Add new members alongside and make
- * sure onStop() releases them BEFORE chaining core::App::onStop() — the
- * base destroys the parent panel and any timer pointing into it explodes.
+ * backend_) rather than file statics; the SshApp object outlives each
+ * session. Add new members alongside and make sure onStop() releases them
+ * BEFORE chaining core::App::onStop() — the base destroys the parent panel
+ * and any timer pointing into it explodes.
  */
 #include "../ui_define.h"
 #include "../core/app.h"
-#include "../core/app_manager.h"
-#include "../core/system.h"
 #include "../core/ui_post.h"
 #include "../hal/wireless.h"
 #include "../hal/secrets.h"
@@ -103,7 +111,6 @@ public:
     virtual std::string read_pending() = 0;
 
     virtual State       state() const = 0;
-    virtual std::string error_message() const { return ""; }
 };
 
 // Loopback backend: fakes a remote shell. Demonstrates the full UI/data path
@@ -159,7 +166,6 @@ public:
         return out;
     }
     State       state() const override { return state_; }
-    std::string error_message() const override { return ""; }
 private:
     std::string prompt() const {
         return cfg_.user + "@" + cfg_.host + ":~$ ";
@@ -220,7 +226,6 @@ public:
         stop_flag_.store(false);
         {
             xSemaphoreTake(io_mtx_, portMAX_DELAY);
-            err_.clear();
             in_buf_.clear();
             out_buf_.clear();
             xSemaphoreGive(io_mtx_);
@@ -238,7 +243,6 @@ public:
         if (ok != pdPASS) {
             task_ = nullptr;
             hal::secret_scrub(cfg_.password);
-            set_error("Failed to create SSH task");
             push_output("[!] Failed to spawn SSH task.\n");
             state_.store(State::Error);
         }
@@ -268,15 +272,6 @@ public:
 
     State state() const override { return state_.load(); }
 
-    std::string error_message() const override {
-        std::string ret;
-        if (xSemaphoreTake(io_mtx_, pdMS_TO_TICKS(20)) == pdTRUE) {
-            ret = err_;
-            xSemaphoreGive(io_mtx_);
-        }
-        return ret;
-    }
-
 private:
     static void task_trampoline(void* arg) {
         auto* self = static_cast<LibSshBackend*>(arg);
@@ -293,10 +288,9 @@ private:
         bool        connected = false;  // ssh_connect succeeded
         bool        ch_open   = false;  // ssh_channel_open_session succeeded
 
-        // Shared error exit: record the error, echo it to the terminal,
-        // release whatever has been set up so far and park in Error.
-        auto fail = [&](const std::string& err, const std::string& out) {
-            set_error(err);
+        // Shared error exit: echo the error to the terminal, release whatever
+        // has been set up so far and park in Error.
+        auto fail = [&](const std::string& out) {
             push_output(out);
             if (ch) {
                 if (ch_open) ssh_channel_close(ch);
@@ -308,7 +302,7 @@ private:
         };
 
         if (!sess) {
-            fail("ssh_new failed", "[!] ssh_new failed.\n");
+            fail("[!] ssh_new failed.\n");
             return;
         }
 
@@ -324,7 +318,7 @@ private:
         push_output("Connecting...\n");
         if (ssh_connect(sess) != SSH_OK) {
             std::string e = ssh_get_error(sess);
-            fail("Connect failed: " + e, "[!] " + e + "\n");
+            fail("[!] " + e + "\n");
             return;
         }
         connected = true;
@@ -336,13 +330,13 @@ private:
         hal::secret_scrub(cfg_.password);  // not needed past auth
         if (auth != SSH_AUTH_SUCCESS) {
             std::string e = ssh_get_error(sess);
-            fail("Auth failed: " + e, "[!] Auth failed: " + e + "\n");
+            fail("[!] Auth failed: " + e + "\n");
             return;
         }
 
         ch = ssh_channel_new(sess);
         if (!ch || ssh_channel_open_session(ch) != SSH_OK) {
-            fail("Failed to open shell channel", "[!] Failed to open channel.\n");
+            fail("[!] Failed to open channel.\n");
             return;
         }
         ch_open = true;
@@ -350,7 +344,7 @@ private:
         if (ssh_channel_request_pty(ch) != SSH_OK
             || ssh_channel_change_pty_size(ch, 80, 24) != SSH_OK
             || ssh_channel_request_shell(ch) != SSH_OK) {
-            fail("Failed to request shell", "[!] Failed to request shell.\n");
+            fail("[!] Failed to request shell.\n");
             return;
         }
 
@@ -502,12 +496,6 @@ private:
         if (was_empty) ssh_output_ready();
     }
 
-    void set_error(const std::string& msg) {
-        xSemaphoreTake(io_mtx_, portMAX_DELAY);
-        err_ = msg;
-        xSemaphoreGive(io_mtx_);
-    }
-
     static void ensure_libssh_started() {
         static std::atomic<bool> started{false};
         bool exp = false;
@@ -523,7 +511,6 @@ private:
     SemaphoreHandle_t  done_sem_ = nullptr;
     std::string        in_buf_;
     std::string        out_buf_;
-    std::string        err_;
     TaskHandle_t       task_     = nullptr;
     int                wake_fd_  = -1;   // eventfd; see connect()
 };
@@ -542,8 +529,8 @@ std::unique_ptr<SshBackend> make_default_backend() {
 // Real shells sprinkle output with CSI (ESC '[' ... final), OSC (ESC ']' ...
 // BEL or ST), and standalone ESC sequences for color, cursor, title, etc.
 // LVGL's textarea renders those as noise. We strip them with a tiny state
-// machine that survives across read chunks (a sequence may straddle a 256-
-// byte boundary). We also drop lone '\r' (terminal "go to column 0") and
+// machine that survives across read chunks (a sequence may straddle two
+// read_pending() chunks). We also drop lone '\r' (terminal "go to column 0") and
 // other C0 control bytes apart from '\n' and '\t'.
 class AnsiFilter {
 public:
@@ -776,12 +763,17 @@ void ssh_host_cb(const char* host, void* ud) {
                    ssh_user_cb, nullptr);
 }
 
+// Connect/edit gate: pops up a hint and returns false while WiFi is down.
+static bool wifi_ready_or_warn() {
+    if (hw_get_wifi_connected()) return true;
+    ui_msg_pop_up("SSH", "WiFi is not connected.");
+    return false;
+}
+
+// cfg_ needs no reload here: onStart loads it and connect_with() keeps it
+// equal to what finish_connect_with_pw() saves.
 void SshApp::start_connect_flow() {
-    if (!hw_get_wifi_connected()) {
-        ui_msg_pop_up("SSH", "WiFi is not connected.");
-        return;
-    }
-    cfg_load(cfg_);
+    if (!wifi_ready_or_warn()) return;
     if (!try_saved_connect()) start_prompt_chain();
 }
 
@@ -881,6 +873,10 @@ void SshApp::onStop() {
     if (backend_)    { backend_->disconnect(); backend_.reset(); }
     ui_hide_back_button();
     if (s_prompt_app == this) s_prompt_app = nullptr;
+    top_bar_ = status_lbl_ = conn_btn_ = conn_icon_ = edit_btn_ = nullptr;
+    term_ = input_ = keys_row_ = ctrl_btn_ = ctrl_lbl_ = nullptr;
+    ctrl_armed_ = false;
+    ansi_.reset();
     core::App::onStop();
 }
 
@@ -1122,12 +1118,7 @@ void SshApp::connect_btn_cb(lv_event_t* e) {
 
 void SshApp::edit_btn_cb(lv_event_t* e) {
     SshApp* self = (SshApp*)lv_event_get_user_data(e);
-    if (!self) return;
-    if (!hw_get_wifi_connected()) {
-        ui_msg_pop_up("SSH", "WiFi is not connected.");
-        return;
-    }
-    cfg_load(self->cfg_);
+    if (!self || !wifi_ready_or_warn()) return;
     self->start_prompt_chain();
 }
 

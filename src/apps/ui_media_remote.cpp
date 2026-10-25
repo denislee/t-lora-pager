@@ -92,13 +92,19 @@ static void status_timer_cb(lv_timer_t *t)
     }
 }
 
+// The toggle's " On " / " Off " label (its user_data) follows LV_STATE_CHECKED.
+static void sync_toggle_label(lv_obj_t *btn)
+{
+    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(btn);
+    if (label) lv_label_set_text(label, lv_obj_has_state(btn, LV_STATE_CHECKED) ? " On " : " Off ");
+}
+
 static void set_toggle_checked(lv_obj_t *btn, bool on)
 {
     if (!btn) return;
     if (on) lv_obj_add_state(btn, LV_STATE_CHECKED);
     else    lv_obj_remove_state(btn, LV_STATE_CHECKED);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(btn);
-    if (label) lv_label_set_text(label, on ? " On " : " Off ");
+    sync_toggle_label(btn);
 }
 
 static void ble_switch_cb(lv_event_t *e)
@@ -215,12 +221,7 @@ static lv_obj_t *make_key_button(lv_obj_t *parent, const char *symbol,
 
 static void toggle_btn_value_cb(lv_event_t *e)
 {
-    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
-    lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(btn);
-    if (label) {
-        lv_label_set_text(label,
-            lv_obj_has_state(btn, LV_STATE_CHECKED) ? " On " : " Off ");
-    }
+    sync_toggle_label((lv_obj_t *)lv_event_get_target(e));
 }
 
 static lv_obj_t *make_toggle_row(lv_obj_t *parent, const char *label_txt,
@@ -258,9 +259,9 @@ static lv_obj_t *make_toggle_row(lv_obj_t *parent, const char *label_txt,
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
 
     lv_obj_t *state_lbl = lv_label_create(btn);
-    lv_label_set_text(state_lbl, checked ? " On " : " Off ");
-    lv_obj_center(state_lbl);
     lv_obj_set_user_data(btn, state_lbl);
+    sync_toggle_label(btn);
+    lv_obj_center(state_lbl);
 
     lv_obj_add_event_cb(btn, toggle_btn_value_cb,
                         LV_EVENT_VALUE_CHANGED, nullptr);
@@ -316,7 +317,9 @@ static void ui_media_remote_enter(lv_obj_t *parent)
     lv_obj_set_width(disconnect_btn, lv_pct(100));
     lv_obj_set_height(disconnect_btn, 34);
     lv_obj_set_style_radius(disconnect_btn, UI_RADIUS, 0);
-    lv_obj_set_style_bg_color(disconnect_btn, lv_color_hex(0x600000), 0); // Dark red
+    // Dark red in every style: the theme has no "danger" token yet, so this
+    // stays a literal (add one to ui_palette_t if a second user appears).
+    lv_obj_set_style_bg_color(disconnect_btn, lv_color_hex(0x600000), 0);
     lv_obj_add_event_cb(disconnect_btn, disconnect_btn_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *disconnect_lbl = lv_label_create(disconnect_btn);
     lv_label_set_text(disconnect_lbl, "Disconnect");

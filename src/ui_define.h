@@ -41,7 +41,6 @@ void set_default_group(lv_group_t *group);
 void disable_keyboard();
 void enable_keyboard();
 
-void ui_text_editor_open_file(const char *path);
 /* Open `path` in the Editor after the current event unwinds (switches to the
  * Editor, IS.5). */
 void ui_text_editor_open_file_deferred(const char *path);
