@@ -53,22 +53,33 @@ void refocus_after_visibility_change(lv_obj_t *btn)
     }
 }
 
-void wifi_after(lv_obj_t *btn, bool en)
+// Show/hide the rows that follow a toggle (also the initial state at build).
+void show_wifi_rows(bool en)
 {
-    if (!g_wifi_networks_row) return;
     set_hidden(g_wifi_networks_row, !en);
     set_hidden(g_wifi_networks_btn, !en);
     set_hidden(g_internet_test_row, !en);
     set_hidden(g_internet_test_btn, !en);
     set_hidden(g_internet_test_status, !en);
+}
+
+void show_nfc_rows(bool en)
+{
+    set_hidden(g_nfc_test_row, !en);
+    set_hidden(g_nfc_test_btn, !en);
+}
+
+void wifi_after(lv_obj_t *btn, bool en)
+{
+    if (!g_wifi_networks_row) return;
+    show_wifi_rows(en);
     refocus_after_visibility_change(btn);
 }
 
 void nfc_after(lv_obj_t *btn, bool en)
 {
     if (!g_nfc_test_row) return;
-    set_hidden(g_nfc_test_row, !en);
-    set_hidden(g_nfc_test_btn, !en);
+    show_nfc_rows(en);
     refocus_after_visibility_change(btn);
 }
 
@@ -121,7 +132,7 @@ void wifi_networks_click_cb(lv_event_t *)
 }
 
 // Render the internet-test outcome into the status label. Shared by the
-// async drain and the synchronous fallbacks (task-spawn failure, emulator).
+// job's delivery and the synchronous task-spawn-failure fallback.
 void show_internet_result(bool ok, uint32_t rtt_ms, const std::string &err)
 {
     if (!g_internet_test_status) return;
@@ -139,13 +150,12 @@ void show_internet_result(bool ok, uint32_t rtt_ms, const std::string &err)
     }
 }
 
-#ifdef ARDUINO
 // P2.3: hw_ping_internet blocks for up to 3 s; running it inline froze the
 // LVGL thread (dead back button/encoder) for the whole probe — exactly the
 // situation in which a user taps this button. Run it on a core::OneShotJob
-// worker and deliver the result via its drain timer: the worker touches only
-// its own heap result (never the widget tree), and internet_test_teardown()
-// kills the drain before the subpage widgets free.
+// worker and deliver the result on the LVGL thread: the worker touches only
+// its own heap result (never the widget tree), and reset_state() detaches it
+// before the subpage widgets free.
 struct InternetTestResult {
     bool ok = false;
     uint32_t rtt_ms = 0;
@@ -159,16 +169,9 @@ void internet_test_done(InternetTestResult &res)
 
 core::OneShotJob<InternetTestResult> g_inet_test_job(internet_test_done);
 
-void internet_test_teardown()
-{
-    g_inet_test_job.teardown();
-}
-#endif // ARDUINO
-
 void internet_test_click_cb(lv_event_t *)
 {
     if (!g_internet_test_status) return;
-#ifdef ARDUINO
     using Job = core::OneShotJob<InternetTestResult>;
     Job::Start started = g_inet_test_job.start([]() {
         InternetTestResult *res = new InternetTestResult();
@@ -176,7 +179,7 @@ void internet_test_click_cb(lv_event_t *)
         return res;
     }, 4096, "inet_tst", 1);
     // Attached: a check is already in flight (e.g. page was exited/re-entered
-    // mid-probe); the job re-attached its drain so that result still lands.
+    // mid-probe); the job re-attached so that result still lands.
     lv_label_set_text(g_internet_test_status, started == Job::Start::Attached
                                                   ? "Still testing..."
                                                   : "Testing 1.1.1.1...");
@@ -189,16 +192,6 @@ void internet_test_click_cb(lv_event_t *)
         bool ok = hw_ping_internet(&rtt_ms, &err);
         show_internet_result(ok, rtt_ms, err);
     }
-#else
-    // Emulator: no FreeRTOS task; probe inline.
-    lv_label_set_text(g_internet_test_status, "Testing 1.1.1.1...");
-    lv_obj_set_style_text_color(g_internet_test_status, UI_COLOR_ACCENT, 0);
-    lv_refr_now(NULL);
-    uint32_t rtt_ms = 0;
-    std::string err;
-    bool ok = hw_ping_internet(&rtt_ms, &err);
-    show_internet_result(ok, rtt_ms, err);
-#endif
 }
 
 } // anonymous namespace
@@ -213,9 +206,7 @@ void reset_state()
     g_internet_test_row    = nullptr;
     g_internet_test_btn    = nullptr;
     g_internet_test_status = nullptr;
-#ifdef ARDUINO
-    internet_test_teardown();
-#endif
+    g_inet_test_job.teardown();
 }
 
 void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
@@ -227,47 +218,33 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 
     add_hw_toggle(sub_page, kWifi);
 
-    btn = create_button(sub_page, LV_SYMBOL_WIFI, "WiFi Networks", wifi_networks_click_cb);
+    btn = settings_button_row(sub_page, LV_SYMBOL_WIFI, "WiFi Networks", wifi_networks_click_cb);
     g_wifi_networks_btn = btn;
     g_wifi_networks_row = lv_obj_get_parent(btn);  // menu_cont holding icon+label+btn
     g_connectivity_subpage = sub_page;
-    if (!hw_get_wifi_enable()) {
-        lv_obj_add_flag(g_wifi_networks_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
-    }
-    register_subpage_group_obj(sub_page, btn);
 
     // "Test Internet" — TCP connect to Cloudflare DNS (1.1.1.1:53) to confirm
     // the WiFi link has actual internet reachability, not just an AP association.
     // Hidden together with the WiFi Networks row when WiFi is off.
-    btn = create_button(sub_page, LV_SYMBOL_REFRESH, "Test Internet", internet_test_click_cb);
+    btn = settings_button_row(sub_page, LV_SYMBOL_REFRESH, "Test Internet", internet_test_click_cb);
     g_internet_test_btn = btn;
     g_internet_test_row = lv_obj_get_parent(btn);
     g_internet_test_status = lv_label_create(sub_page);
     lv_label_set_text(g_internet_test_status, "");
     lv_obj_set_style_text_color(g_internet_test_status, UI_COLOR_MUTED, 0);
     lv_obj_set_style_pad_left(g_internet_test_status, 12, 0);
-    if (!hw_get_wifi_enable()) {
-        lv_obj_add_flag(g_internet_test_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(g_internet_test_status, LV_OBJ_FLAG_HIDDEN);
-    }
-    register_subpage_group_obj(sub_page, btn);
+    show_wifi_rows(hw_get_wifi_enable());
 
     add_hw_toggle(sub_page, kBt);
     add_hw_toggle(sub_page, kRadio);
     add_hw_toggle(sub_page, kNfc);
 
 #if defined(USING_ST25R3916)
-    btn = create_button(sub_page, LV_SYMBOL_REFRESH, "NFC Test",
-                        [](lv_event_t *) { ui_nfc_test_open(); });
+    btn = settings_button_row(sub_page, LV_SYMBOL_REFRESH, "NFC Test",
+                              [](lv_event_t *) { ui_nfc_test_open(); });
     g_nfc_test_btn = btn;
     g_nfc_test_row = lv_obj_get_parent(btn);
-    if (!hw_get_nfc_enable()) {
-        lv_obj_add_flag(g_nfc_test_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
-    }
-    register_subpage_group_obj(sub_page, btn);
+    show_nfc_rows(hw_get_nfc_enable());
 #endif
 
     add_hw_toggle(sub_page, kSpeaker);

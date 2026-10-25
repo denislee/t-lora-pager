@@ -9,7 +9,6 @@
  * This file is just the UI over `apps::nsync_cfg_*`.
  */
 #include "../ui_define.h"
-#include "../hal/notes_crypto.h"
 #include "../core/one_shot_job.h"
 #include "app_registry.h"
 #include "settings_internal.h"
@@ -28,7 +27,7 @@ static core::OneShotJob<std::string> g_mask_job;
 
 void reset_state()
 {
-    // Kill the token-label drain before the widgets it writes into go away.
+    // Detach the token-label job before the widgets it writes into go away.
     g_mask_job.teardown();
     g_repo_label = nullptr;
     g_branch_label = nullptr;
@@ -138,39 +137,21 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_flex_flow(status, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(status, 2, 0);
 
-    g_repo_label = lv_label_create(status);
-    lv_label_set_long_mode(g_repo_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_repo_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_repo_label, UI_COLOR_MUTED, 0);
+    g_repo_label = settings_muted_label(status);
 
-    g_branch_label = lv_label_create(status);
-    lv_label_set_long_mode(g_branch_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_branch_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_branch_label, UI_COLOR_MUTED, 0);
+    g_branch_label = settings_muted_label(status);
 
-    g_tok_label = lv_label_create(status);
-    lv_label_set_long_mode(g_tok_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_tok_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_tok_label, UI_COLOR_MUTED, 0);
+    g_tok_label = settings_muted_label(status);
 
-    lv_obj_t *b1 = create_button(sub_page, LV_SYMBOL_DIRECTORY,
-                                 "Set repo", btn_set_repo_cb);
-    register_subpage_group_obj(sub_page, b1);
+    settings_button_row(sub_page, LV_SYMBOL_DIRECTORY, "Set repo", btn_set_repo_cb);
 
-    lv_obj_t *b2 = create_button(sub_page, LV_SYMBOL_SHUFFLE,
-                                 "Set branch", btn_set_branch_cb);
-    register_subpage_group_obj(sub_page, b2);
+    settings_button_row(sub_page, LV_SYMBOL_SHUFFLE, "Set branch", btn_set_branch_cb);
 
-    lv_obj_t *b3 = create_button(sub_page, LV_SYMBOL_KEYBOARD,
-                                 "Set token", btn_set_token_cb);
-    register_subpage_group_obj(sub_page, b3);
+    settings_button_row(sub_page, LV_SYMBOL_KEYBOARD, "Set token", btn_set_token_cb);
 
 #ifdef ARDUINO
     lv_obj_t *note_row = lv_menu_cont_create(sub_page);
-    g_note_label = lv_label_create(note_row);
-    lv_label_set_long_mode(g_note_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_note_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_note_label, UI_COLOR_MUTED, 0);
+    g_note_label = settings_muted_label(note_row);
 #endif
 
     // refresh_labels never decrypts on this thread (P7.3), so fill the labels now.

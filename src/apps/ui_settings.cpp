@@ -6,16 +6,24 @@
  * @date      2025-01-05
  *
  * State reset on onStop (ui_sys_exit):
- *   widgets: menu, quit_btn, settings_main_page, settings_exit_btn
- *                                       — destroyed via lv_obj_del then nulled
- *   arrays:  main_page_group_items[]    — cleared, count reset to 0
- *            settings_shortcuts[]       — cleared, count reset to 0
- *   subpages: every settings_X / notes_sec namespace's reset_state() fires
- *             via the settings_internal.h contract to null its cached state
- * Each settings_X.cpp is responsible for its own subpage state; ui_sys_exit
- * just walks the list and calls reset_state() on each. If you add a new
- * subpage TU, register its reset_state() callback per the contract in
- * settings_internal.h — otherwise its cached lv_obj_t* will dangle.
+ *   widgets: menu, quit_btn            — destroyed via lv_obj_del then nulled
+ *            settings_main_page, settings_exit_btn
+ *                                       — nulled (deleted with the menu /
+ *                                         owned by the status bar)
+ *   arrays:  main_page_group_items[], subpage_items[], settings_shortcuts[]
+ *                                       — cleared, counts reset to 0
+ *   group:   s_group                   — not owned (the app group); kept
+ *   settings: local_param               — flushed to NVS (hw_set_user_setting),
+ *                                         then theme_init() rebuilds the theme
+ *                                         (and the chrome) if a style/font changed
+ *   subpages: ui_sys_exit calls each subpage namespace's reset_state() by
+ *             hand (info, datetime, connectivity, notes_sec, hub, weather,
+ *             telegram, notes_sync, imu_debug) to null its cached state. The
+ *             display, fonts, storage and home_apps subpages cache no LVGL
+ *             pointers and have none.
+ * Each settings_X.cpp is responsible for its own subpage state. If you add a
+ * subpage TU that caches lv_obj_t* / timers, give it a reset_state() and add
+ * the call to ui_sys_exit — otherwise its cached pointers will dangle.
  */
 #include "../ui_define.h"
 #include "../hal/notes_crypto.h"
@@ -23,12 +31,9 @@
 #include "../core/system.h"
 #include "../core/input_profile.h"
 #include "app_registry.h"
-#include "../ui_list_picker.h"
 #include "settings_internal.h"
-#include <vector>
 
 using std::string;
-using std::vector;
 
 // weather_city_match / weather_*  and  timezone_*  forward decls all live
 // in apps/settings_internal.h (shared with the split-out settings_*.cpp).
@@ -50,8 +55,9 @@ user_setting_params_t local_param;
 static lv_obj_t *quit_btn = NULL;
 static lv_obj_t *settings_main_page = NULL;
 static lv_obj_t *settings_exit_btn = NULL;
-
-void ui_sys_exit(lv_obj_t *parent);
+// The focus group the settings widgets live in (the app group, IS.4) —
+// captured from lv_group_get_default() on entry.
+static lv_group_t *s_group = NULL;
 
 #define MAX_MAIN_PAGE_ITEMS 24
 static lv_obj_t *main_page_group_items[MAX_MAIN_PAGE_ITEMS];
@@ -69,7 +75,7 @@ static void add_main_page_group_item(lv_obj_t *obj)
     if (main_page_group_count < MAX_MAIN_PAGE_ITEMS) {
         main_page_group_items[main_page_group_count++] = obj;
     }
-    lv_group_add_obj(menu_g, obj);
+    lv_group_add_obj(s_group, obj);
 }
 
 // --- Main-page keyboard shortcuts ---------------------------------------
@@ -175,12 +181,12 @@ void unregister_subpage_items_for(lv_obj_t *page)
 
 static void restore_main_page_group()
 {
-    lv_group_remove_all_objs(menu_g);
+    lv_group_remove_all_objs(s_group);
     if (settings_exit_btn) {
-        lv_group_add_obj(menu_g, settings_exit_btn);
+        lv_group_add_obj(s_group, settings_exit_btn);
     }
     for (uint8_t i = 0; i < main_page_group_count; i++) {
-        lv_group_add_obj(menu_g, main_page_group_items[i]);
+        lv_group_add_obj(s_group, main_page_group_items[i]);
     }
     if (settings_exit_btn) {
         lv_group_focus_obj(settings_exit_btn);
@@ -190,16 +196,16 @@ static void restore_main_page_group()
 // External linkage — shared with the split-out settings_*.cpp files.
 void activate_subpage_group(lv_obj_t *page)
 {
-    lv_group_remove_all_objs(menu_g);
+    lv_group_remove_all_objs(s_group);
     // Status bar back is the visible "<" on subpages — its callback pops to
     // root. Keep it keyboard-navigable and initially focused.
     if (settings_exit_btn) {
-        lv_group_add_obj(menu_g, settings_exit_btn);
+        lv_group_add_obj(s_group, settings_exit_btn);
     }
     for (uint8_t i = 0; i < subpage_item_count; i++) {
         if (subpage_items[i].page == page &&
             !lv_obj_has_flag(subpage_items[i].obj, LV_OBJ_FLAG_HIDDEN)) {
-            lv_group_add_obj(menu_g, subpage_items[i].obj);
+            lv_group_add_obj(s_group, subpage_items[i].obj);
         }
     }
     if (settings_exit_btn) {
@@ -515,6 +521,23 @@ void settings_refresh_token_labels(lv_obj_t *tok_label, lv_obj_t *note_label,
 #endif
 }
 
+lv_obj_t *settings_muted_label(lv_obj_t *parent)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_obj_set_style_text_color(l, UI_COLOR_MUTED, 0);
+    return l;
+}
+
+lv_obj_t *settings_button_row(lv_obj_t *page, const char *icon, const char *txt,
+                              lv_event_cb_t cb)
+{
+    lv_obj_t *btn = create_button(page, icon, txt, cb);
+    register_subpage_group_obj(page, btn);
+    return btn;
+}
+
 lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_txt,
                               lv_event_cb_t cb, int32_t btn_width)
 {
@@ -542,20 +565,17 @@ lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_t
     return btn;
 }
 
-void ui_sys_enter(lv_obj_t *parent)
+static void ui_sys_enter(lv_obj_t *parent)
 {
     INPUT_PROF_SPAN("ui_sys_enter");
     if (menu != NULL) return;
-    menu_g = lv_group_get_default();
+    s_group = lv_group_get_default();
 
     enable_keyboard();
 
     hw_get_user_setting(local_param);
 
-    menu = lv_menu_create(parent);
-    lv_menu_set_mode_root_back_button(menu, LV_MENU_ROOT_BACK_BUTTON_DISABLED);
-    lv_obj_set_size(menu, LV_PCT(100), LV_PCT(100));
-    lv_obj_center(menu);
+    menu = create_menu(parent, nullptr);
 
     // Suppress the menu's built-in header back button: LVGL re-un-hides it on
     // each subpage, so a plain HIDDEN flag on the header doesn't stick. Zero
@@ -629,14 +649,12 @@ void ui_sys_enter(lv_obj_t *parent)
     }
 
 #ifdef USING_TOUCHPAD
-    quit_btn = create_floating_button([](lv_event_t *e) {
-        settings_exit_cb(e);
-    }, NULL);
+    quit_btn = create_floating_button(settings_exit_cb, NULL);
 #endif
 }
 
 
-void ui_sys_exit(lv_obj_t *parent)
+static void ui_sys_exit()
 {
     info_cfg::reset_state();
     ui_hide_back_button();
@@ -647,7 +665,6 @@ void ui_sys_exit(lv_obj_t *parent)
     // and hangs the device. Keyboard is a system-level resource; leave it on
     // across app switches. Sleep path (ui_pause_timers) still disables it.
     if (menu) {
-        lv_obj_clean(menu);
         lv_obj_del(menu);
         menu = NULL;
     }
@@ -682,15 +699,13 @@ void ui_sys_exit(lv_obj_t *parent)
     memset(settings_shortcuts, 0, sizeof(settings_shortcuts));
 }
 
-#include "app_registry.h"
-
 namespace {
 class SysApp : public core::App {
 public:
     SysApp() : core::App("Settings") {}
     void onStart(lv_obj_t *parent) override { ui_sys_enter(parent); }
     void onStop() override {
-        ui_sys_exit(getRoot());
+        ui_sys_exit();
         core::App::onStop();
     }
 };

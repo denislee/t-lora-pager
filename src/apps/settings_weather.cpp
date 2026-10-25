@@ -15,20 +15,6 @@ static lv_obj_t *g_city_label = nullptr;
 static lv_obj_t *g_status_label = nullptr;
 static std::vector<weather_city_match> g_search_results;
 
-#ifdef ARDUINO
-static void city_search_teardown();   // defined with the async block below
-#endif
-
-void reset_state()
-{
-    g_city_label = nullptr;
-    g_status_label = nullptr;
-    g_search_results.clear();
-#ifdef ARDUINO
-    city_search_teardown();
-#endif
-}
-
 static void refresh_label()
 {
     if (!g_city_label) return;
@@ -61,7 +47,7 @@ static void city_picked_cb(int index, void *ud)
 }
 
 // Open the city picker over the current g_search_results (which city_picked_cb
-// indexes into). Shared by the async drain and the emulator path.
+// indexes into).
 static void open_city_picker()
 {
     std::vector<std::string> labels;
@@ -71,13 +57,12 @@ static void open_city_picker()
     ui_list_picker_open("Pick a city", labels, city_picked_cb, nullptr);
 }
 
-#ifdef ARDUINO
 // §2.17: the geocoding lookup is a blocking HTTPS call; running it inline froze
 // the LVGL thread (dead back button) for the request duration. Run it on a
-// core::OneShotJob worker and deliver the result via its drain timer — same
+// core::OneShotJob worker and deliver the result on the LVGL thread — same
 // lifecycle contract as the Telegram-favorites fetch: the worker touches only
-// its own heap result (never the widget tree), and city_search_teardown()
-// kills the drain before the subpage widgets are freed.
+// its own heap result (never the widget tree), and reset_state() detaches it
+// before the subpage widgets are freed.
 struct CitySearchResult {
     std::vector<weather_city_match> matches;
     bool ok = false;
@@ -97,11 +82,13 @@ static void city_search_done(CitySearchResult &res)
 
 static core::OneShotJob<CitySearchResult> g_search_job(city_search_done);
 
-static void city_search_teardown()
+void reset_state()
 {
+    g_city_label = nullptr;
+    g_status_label = nullptr;
+    g_search_results.clear();
     g_search_job.teardown();
 }
-#endif // ARDUINO
 
 // Text-prompt OK: query the open-meteo geocoding API for matches, then open
 // a modal list of the server-accepted names. We never store a city that the
@@ -120,7 +107,6 @@ static void search_entered_cb(const char *text, void *ud)
     }
 
     set_status("Searching...", UI_COLOR_ACCENT);
-#ifdef ARDUINO
     // Geocode off-thread so the back button stays live; city_search_done
     // opens the picker (or shows the error) once the worker finishes.
     using Job = core::OneShotJob<CitySearchResult>;
@@ -137,18 +123,6 @@ static void search_entered_cb(const char *text, void *ud)
     } else if (started == Job::Start::Failed) {
         set_status("task spawn fail", lv_palette_main(LV_PALETTE_RED));
     }
-#else
-    // Emulator: no worker/HTTPS — resolve synchronously (the stub returns fast).
-    lv_refr_now(NULL);
-    std::string err;
-    g_search_results.clear();
-    if (!weather_search_cities(q.c_str(), g_search_results, err)) {
-        set_status(("Search failed: " + (err.empty() ? std::string("err") : err)).c_str(),
-                   lv_palette_main(LV_PALETTE_RED));
-        return;
-    }
-    open_city_picker();
-#endif
 }
 
 static void btn_set_city_cb(lv_event_t *e)
@@ -178,20 +152,13 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_text_color(g_city_label, UI_COLOR_MUTED, 0);
     refresh_label();
 
-    lv_obj_t *b1 = create_button(sub_page, LV_SYMBOL_KEYBOARD,
-                                 "Set city", btn_set_city_cb);
-    register_subpage_group_obj(sub_page, b1);
+    settings_button_row(sub_page, LV_SYMBOL_KEYBOARD, "Set city", btn_set_city_cb);
 
-    lv_obj_t *b2 = create_button(sub_page, LV_SYMBOL_REFRESH,
-                                 "Use auto (IP)", btn_clear_city_cb);
-    register_subpage_group_obj(sub_page, b2);
+    settings_button_row(sub_page, LV_SYMBOL_REFRESH, "Use auto (IP)", btn_clear_city_cb);
 
     // Status line for search feedback ("Searching...", errors, "Saved").
-    g_status_label = lv_label_create(sub_page);
-    lv_label_set_long_mode(g_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_status_label, LV_PCT(100));
+    g_status_label = settings_muted_label(sub_page);
     lv_label_set_text(g_status_label, "");
-    lv_obj_set_style_text_color(g_status_label, UI_COLOR_MUTED, 0);
 }
 
 } // namespace weather_cfg

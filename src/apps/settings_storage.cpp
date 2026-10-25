@@ -46,23 +46,32 @@ namespace {
 // is enough.
 ui_loading_t storage_loader = {};
 
-void storage_progress_cb(int cur, int total, const char *name)
+// LVGL thread: show one progress step in the loader (if it is open).
+void apply_progress(int cur, int total, const char *name)
 {
     if (!storage_loader.overlay) return;
     if (total > 0) {
         ui_loading_set_progress(&storage_loader, cur, total, name);
     } else {
-        ui_loading_set_indeterminate(&storage_loader, name ? name : "Working...");
+        ui_loading_set_indeterminate(&storage_loader,
+                                     (name && *name) ? name : "Working...");
     }
+}
 
-    // Every bulk caller (copy-to-hub/SD, prune, encrypt/decrypt-all) runs the
-    // whole-corpus loop synchronously on the LVGL task and calls this cb once
-    // per file. On a large corpus that keeps IDLE0/IDLE1 off the CPU long
-    // enough to panic the task watchdog — not just stutter. Throttle the screen
-    // flush AND the IDLE yield to a >100 ms window, exactly like ui_journal.cpp's
-    // report(): the widget values above already update every call, so the bar
-    // stays accurate; vTaskDelay(1) costs one tick but guarantees IDLE runs and
-    // feeds the watchdog.
+void storage_progress_cb(int cur, int total, const char *name)
+{
+    if (!storage_loader.overlay) return;
+    apply_progress(cur, total, name);
+
+    // The synchronous Storage-subpage callers (copy-to-SD, prune) run the
+    // whole-corpus loop on the LVGL task and call this cb once per file (the
+    // copy-to-phone/hub and Notes Security bulk operations run on workers and
+    // use storage_progress_post instead). On a large corpus that keeps
+    // IDLE0/IDLE1 off the CPU long enough to panic the task watchdog — not
+    // just stutter. Throttle the screen flush AND the IDLE yield to a >100 ms
+    // window, exactly like ui_journal.cpp's report(): the widget values above
+    // already update every call, so the bar stays accurate; vTaskDelay(1)
+    // costs one tick but guarantees IDLE runs and feeds the watchdog.
     static uint32_t last_refr = 0;
     uint32_t now = lv_tick_get();
     if (lv_tick_elaps(last_refr) > 100) {
@@ -121,13 +130,7 @@ void storage_progress_drain(lv_timer_t *)
         name = g_storage_progress.name;
         g_storage_progress.dirty = false;
     }
-    if (!storage_loader.overlay) return;
-    if (total > 0) {
-        ui_loading_set_progress(&storage_loader, cur, total, name.c_str());
-    } else {
-        ui_loading_set_indeterminate(&storage_loader,
-                                     name.empty() ? "Working..." : name.c_str());
-    }
+    apply_progress(cur, total, name.c_str());
 }
 
 void storage_progress_start()
@@ -184,14 +187,14 @@ void storage_prune_now_cb(lv_event_t *) {
 
 struct CopyNotesResult { const char *title; std::string msg; };
 
-// Runs the copy off the LVGL thread — the phone path can wait up to 120 s per
-// batch, the hub path does one HTTP request per note (P7.20).
-static core::OneShotJob<CopyNotesResult> g_copy_job;
-
 static void copy_notes_done(CopyNotesResult &r) {
     hide_storage_loader();
     ui_msg_pop_up(r.title, r.msg.c_str());
 }
+
+// Runs the copy off the LVGL thread — the phone path can wait up to 120 s per
+// batch, the hub path does one HTTP request per note (P7.20).
+static core::OneShotJob<CopyNotesResult> g_copy_job(copy_notes_done);
 
 // "Copy Notes -> Phone": phone first (notes.sync target "phone", internal +
 // SD notes, internal wins a shared name); without a phone the existing hub
@@ -213,7 +216,6 @@ void storage_copy_notes_cb(lv_event_t *) {
     }
 
     show_storage_loader(phone ? "Copy Notes to Phone" : "Upload Notes via Hub");
-    g_copy_job.on_done(copy_notes_done);
 
     core::OneShotJob<CopyNotesResult>::Start st = g_copy_job.start(
         [phone]() -> CopyNotesResult * {
@@ -347,10 +349,19 @@ struct SecResult {
     ~SecResult() { hal::secret_scrub(old_pw); }
 };
 
-// Runs every Notes Security bulk operation (set/change/disable passphrase,
-// encrypt SD) off the LVGL thread (P7.7). Not torn down on settings exit: the
-// result popup must still land.
-static core::OneShotJob<SecResult> g_sec_job;
+// A heap copy of a passphrase shared by the prompt callback and the job's
+// work closure. The deleter scrubs and frees it when the last owner lets go,
+// so it is wiped exactly once on every path: the worker finishing, the job
+// refusing to start (busy / task-spawn failure), or the callback returning.
+using SecretPtr = std::shared_ptr<std::string>;
+
+SecretPtr make_secret(const std::string &s)
+{
+    return SecretPtr(new std::string(s), [](std::string *p) {
+        hal::secret_scrub(*p);
+        delete p;
+    });
+}
 
 void change_new_cb(const char *pw, void *ud);   // forward declaration
 
@@ -370,45 +381,41 @@ void sec_done(SecResult &r)
     if (r.to_main && g_sub_page) return_to_main();
 }
 
-bool start_sec_job(const char *title, std::function<SecResult *()> work)
+// Runs every Notes Security bulk operation (set/change/disable passphrase,
+// encrypt SD) off the LVGL thread (P7.7). Not torn down on settings exit: the
+// result popup must still land.
+static core::OneShotJob<SecResult> g_sec_job(sec_done);
+
+void start_sec_job(const char *title, std::function<SecResult *()> work)
 {
     if (g_sec_job.busy()) {
         ui_msg_pop_up("Notes Security", "Another operation is still running.");
-        return false;
+        return;
     }
     show_storage_loader(title);
     storage_progress_start();
-    g_sec_job.on_done(sec_done);
     auto st = g_sec_job.start(std::move(work), 10240, "notes_sec", 1);
     if (st == core::OneShotJob<SecResult>::Start::Failed) {
         storage_progress_stop();
         hide_storage_loader();
         ui_msg_pop_up("Notes Security", "Could not start the operation.");
-        return false;
     }
-    return true;
 }
 
 // --- Set passphrase flow ---
 void set_pw_cb(const char *pw, void *)
 {
     if (!pw) return;
-    std::string *p = new std::string(pw);
-    bool started = start_sec_job("Encrypting notes", [p]() -> SecResult * {
+    SecretPtr p = make_secret(pw);
+    start_sec_job("Encrypting notes", [p]() -> SecResult * {
         bool ok = notes_crypto_set_passphrase(p->c_str());
         if (ok) notes_crypto_encrypt_existing(storage_progress_post);
-        hal::secret_scrub(*p);
-        delete p;
         auto *r = new SecResult();
         r->msg = ok ? "Passphrase set. Notes are now encrypted."
                     : "Could not set passphrase.";
         r->to_main = ok;
         return r;
     });
-    if (!started) {
-        hal::secret_scrub(*p);
-        delete p;
-    }
 }
 
 // --- Change passphrase flow: ask old, then ask new (with confirm). ---
@@ -423,27 +430,17 @@ void change_new_cb(const char *pw, void *ud)
         hal::secret_scrub(ctx->old_pw);
         return;
     }
-    std::string *o = new std::string(ctx->old_pw);
-    std::string *n = new std::string(pw);
+    SecretPtr o = make_secret(ctx->old_pw);
+    SecretPtr n = make_secret(pw);
     hal::secret_scrub(ctx->old_pw);
-    bool started = start_sec_job("Re-encrypting notes", [o, n]() -> SecResult * {
+    start_sec_job("Re-encrypting notes", [o, n]() -> SecResult * {
         bool ok = notes_crypto_change_passphrase(o->c_str(), n->c_str(),
                                                  storage_progress_post);
-        hal::secret_scrub(*o);
-        delete o;
-        hal::secret_scrub(*n);
-        delete n;
         auto *r = new SecResult();
         r->msg = ok ? "Passphrase changed." : "Passphrase change failed.";
         r->to_main = true;
         return r;
     });
-    if (!started) {
-        hal::secret_scrub(*o);
-        delete o;
-        hal::secret_scrub(*n);
-        delete n;
-    }
 }
 
 void change_old_cb(const char *pw, void *)
@@ -452,8 +449,8 @@ void change_old_cb(const char *pw, void *)
     // Verify old passphrase up front so the user doesn't type a whole new
     // one first only to find out the old was wrong. The verify (one PBKDF2,
     // plus finishing an interrupted change) now runs on the worker.
-    std::string *p = new std::string(pw);
-    bool started = start_sec_job("Checking passphrase", [p]() -> SecResult * {
+    SecretPtr p = make_secret(pw);
+    start_sec_job("Checking passphrase", [p]() -> SecResult * {
         bool ok = notes_crypto_unlock(p->c_str());
         auto *r = new SecResult();
         if (ok) {
@@ -463,25 +460,17 @@ void change_old_cb(const char *pw, void *)
             r->msg = "Wrong current passphrase.";
             r->to_main = false;
         }
-        hal::secret_scrub(*p);
-        delete p;
         return r;
     });
-    if (!started) {
-        hal::secret_scrub(*p);
-        delete p;
-    }
 }
 
 // --- Disable flow ---
 void disable_pw_cb(const char *pw, void *)
 {
     if (!pw) return;
-    std::string *p = new std::string(pw);
-    bool started = start_sec_job("Decrypting notes", [p]() -> SecResult * {
+    SecretPtr p = make_secret(pw);
+    start_sec_job("Decrypting notes", [p]() -> SecResult * {
         NotesDisableResult res = notes_crypto_disable(p->c_str(), storage_progress_post);
-        hal::secret_scrub(*p);
-        delete p;
         auto *r = new SecResult();
         switch (res) {
         case NotesDisableResult::Ok:
@@ -501,10 +490,6 @@ void disable_pw_cb(const char *pw, void *)
         r->to_main = true;
         return r;
     });
-    if (!started) {
-        hal::secret_scrub(*p);
-        delete p;
-    }
 }
 
 // --- Sub-page wiring ---
@@ -571,27 +556,17 @@ void build_subpage_impl(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_text_color(lbl, UI_COLOR_MUTED, 0);
 
     if (!enabled) {
-        lv_obj_t *b = create_button(sub_page, LV_SYMBOL_KEYBOARD,
-                                    "Set passphrase", btn_set_cb);
-        register_subpage_group_obj(sub_page, b);
+        settings_button_row(sub_page, LV_SYMBOL_KEYBOARD, "Set passphrase", btn_set_cb);
     } else {
-        lv_obj_t *b1 = create_button(sub_page, LV_SYMBOL_REFRESH,
-                                     "Change passphrase", btn_change_cb);
-        register_subpage_group_obj(sub_page, b1);
+        settings_button_row(sub_page, LV_SYMBOL_REFRESH, "Change passphrase", btn_change_cb);
 
         if (unlocked) {
-            lv_obj_t *b2 = create_button(sub_page, LV_SYMBOL_CLOSE,
-                                         "Lock now", btn_lock_cb);
-            register_subpage_group_obj(sub_page, b2);
+            settings_button_row(sub_page, LV_SYMBOL_CLOSE, "Lock now", btn_lock_cb);
 
-            lv_obj_t *b_sd = create_button(sub_page, LV_SYMBOL_SD_CARD,
-                                           "Encrypt SD notes", btn_encrypt_sd_cb);
-            register_subpage_group_obj(sub_page, b_sd);
+            settings_button_row(sub_page, LV_SYMBOL_SD_CARD, "Encrypt SD notes", btn_encrypt_sd_cb);
         }
 
-        lv_obj_t *b3 = create_button(sub_page, LV_SYMBOL_TRASH,
-                                     "Disable encryption", btn_disable_cb);
-        register_subpage_group_obj(sub_page, b3);
+        settings_button_row(sub_page, LV_SYMBOL_TRASH, "Disable encryption", btn_disable_cb);
     }
 }
 

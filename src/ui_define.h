@@ -9,9 +9,8 @@
  *              ui/back_button.h — shared top-bar back button
  *
  * This header re-exports all of them plus the LVGL/Arduino/LilyGoLib
- * transitive bag that the older code relied on. It also still owns the
- * extern handles to the global panels and a few cross-module hooks that
- * don't have a better home yet.
+ * transitive bag that the older code relied on. It also still owns a few
+ * cross-module hooks that don't have a better home yet.
  */
 #pragma once
 
@@ -33,9 +32,7 @@
 #include "ui/modals.h"
 #include "ui/back_button.h"
 
-/* Cross-module globals + hooks that don't belong in a feature header. */
-extern lv_group_t *menu_g;
-
+/* Cross-module hooks that don't belong in a feature header. */
 lv_indev_t *lv_get_encoder_indev();
 lv_indev_t *lv_get_keyboard_indev();
 /* menu_show declared in core/system_hooks.h (via include above). */

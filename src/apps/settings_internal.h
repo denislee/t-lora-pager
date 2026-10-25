@@ -52,6 +52,12 @@ lv_obj_t *settings_kv_row(lv_obj_t *page, const char *key, const char *val,
 // Registered with `page`'s focus group. Returns the button.
 lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_txt,
                               lv_event_cb_t cb, int32_t btn_width = 60);
+// Muted, wrapping, full-width label (status / hint lines on a subpage).
+lv_obj_t *settings_muted_label(lv_obj_t *parent);
+// create_button row (icon + label, fires `cb` on click) registered with
+// `page`'s focus group. Returns the clickable button.
+lv_obj_t *settings_button_row(lv_obj_t *page, const char *icon, const char *txt,
+                              lv_event_cb_t cb);
 // Token row + notes-crypto note shared by the Telegram and Notes Sync
 // subpages. `display` is the masked token (hal::secret_mask_display) and
 // `encrypted` whether ciphertext is stored; the note (hardware only) says
@@ -62,7 +68,7 @@ void settings_refresh_token_labels(lv_obj_t *tok_label, lv_obj_t *note_label,
                                    const std::string &display, bool encrypted,
                                    const char *disabled_note,
                                    const char *ready_note);
-// Re-populate the menu_g nav group with the subpage's registered widgets
+// Re-populate the Settings focus group with the subpage's registered widgets
 // (skipping hidden ones). Used by subpages that toggle row visibility and
 // need the keyboard focus list rebuilt in-place (connectivity's WiFi/NFC
 // Test rows follow their toggle's state).
@@ -77,7 +83,7 @@ void invert_scroll_key_cb(lv_event_t *e);
 // this after applying the entered time).
 void settings_return_to_main_page();
 // toggle_child_focus_cb (row focus mirroring for custom row buttons, used by
-// the Storage subpage) is declared in ui/widgets.h.
+// the toggle/action rows and sliders) is declared in ui/widgets.h.
 // Drop any subpage_items entries for `page` from the focus-group tracking.
 // Notes Security calls this when rebuilding its page in place after a
 // passphrase op, so activate_subpage_group won't re-add freed widgets.
@@ -155,7 +161,7 @@ namespace info_cfg {
     void reset_state();
 }
 
-// Connectivity subpage — WiFi/BT/Radio/NFC/GPS/Speaker/Haptic toggles +
+// Connectivity subpage — WiFi/BT/Radio/NFC/Speaker/Haptic toggles +
 // "WiFi Networks", "Test Internet", "NFC Test" buttons (whose visibility
 // follows the corresponding toggle's state). reset_state() nulls cached
 // widget pointers so a subsequent ui_sys_enter doesn't touch stale LVGL

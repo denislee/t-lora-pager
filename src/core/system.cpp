@@ -21,8 +21,6 @@ LV_FONT_DECLARE(lv_font_montserrat_18);
 LV_FONT_DECLARE(lv_font_montserrat_28);
 LV_FONT_DECLARE(lv_font_montserrat_32);
 
-// Definition of global UI objects
-lv_group_t *menu_g = nullptr;
 
 namespace core {
 
@@ -74,9 +72,6 @@ void System::setupGlobalUI() {
     // group whose editing flag is cleared.
     _appGroup = lv_group_create();
     lv_group_set_wrap(_appGroup, false);
-    
-    // Set legacy global
-    menu_g = _menuGroup;
 
     // Set default group to menu group initially
     lv_group_set_default(_menuGroup);

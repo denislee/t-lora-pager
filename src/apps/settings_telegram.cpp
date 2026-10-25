@@ -8,7 +8,6 @@
  * notes crypto). This file is just the UI over `apps::tg_cfg_*`.
  */
 #include "../ui_define.h"
-#include "../hal/notes_crypto.h"
 #include "../core/one_shot_job.h"
 #include "app_registry.h"
 #include "settings_internal.h"
@@ -29,22 +28,18 @@ static lv_obj_t *g_parent_menu    = nullptr;
 // the result lands (P7.3).
 static core::OneShotJob<std::string> g_mask_job;
 
-#ifdef ARDUINO
 static void fav_async_teardown();   // defined with the async block below
-#endif
 
 void reset_state()
 {
-    // Kill the token-label drain before the widgets it writes into go away.
+    // Detach the token-label job before the widgets it writes into go away.
     g_mask_job.teardown();
     g_url_label = nullptr;
     g_tok_label = nullptr;
     g_note_label = nullptr;
     g_fav_sub_page = nullptr;
     g_parent_menu = nullptr;
-#ifdef ARDUINO
     fav_async_teardown();
-#endif
 }
 
 static void build_favorites_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
@@ -152,23 +147,13 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_flex_flow(status, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(status, 2, 0);
 
-    g_url_label = lv_label_create(status);
-    lv_label_set_long_mode(g_url_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_url_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_url_label, UI_COLOR_MUTED, 0);
+    g_url_label = settings_muted_label(status);
 
-    g_tok_label = lv_label_create(status);
-    lv_label_set_long_mode(g_tok_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_tok_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_tok_label, UI_COLOR_MUTED, 0);
+    g_tok_label = settings_muted_label(status);
 
-    lv_obj_t *b1 = create_button(sub_page, LV_SYMBOL_WIFI,
-                                 "Set URL", btn_set_url_cb);
-    register_subpage_group_obj(sub_page, b1);
+    settings_button_row(sub_page, LV_SYMBOL_WIFI, "Set URL", btn_set_url_cb);
 
-    lv_obj_t *b2 = create_button(sub_page, LV_SYMBOL_KEYBOARD,
-                                 "Set token", btn_set_token_cb);
-    register_subpage_group_obj(sub_page, b2);
+    settings_button_row(sub_page, LV_SYMBOL_KEYBOARD, "Set token", btn_set_token_cb);
 
     // Favorites: clicking opens a nested subpage that fetches the full chat
     // list from the bridge and lets the user star/unstar each chat. The
@@ -179,9 +164,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     // (which doesn't play well with a child btn inside the menu_cont).
     g_fav_sub_page = lv_menu_page_create(menu, NULL);
     lv_obj_set_user_data(g_fav_sub_page, (void*)build_favorites_subpage);
-    lv_obj_t *b3 = create_button(sub_page, LV_SYMBOL_EYE_OPEN,
-                                 "Favorites", btn_open_favorites_cb);
-    register_subpage_group_obj(sub_page, b3);
+    settings_button_row(sub_page, LV_SYMBOL_EYE_OPEN, "Favorites", btn_open_favorites_cb);
 
     // Per-channel notification toggles. The background poll (running even
     // when the Telegram app is closed) dispatches to these when it sees the
@@ -195,10 +178,7 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 
 #ifdef ARDUINO
     lv_obj_t *note_row = lv_menu_cont_create(sub_page);
-    g_note_label = lv_label_create(note_row);
-    lv_label_set_long_mode(g_note_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(g_note_label, LV_PCT(100));
-    lv_obj_set_style_text_color(g_note_label, UI_COLOR_MUTED, 0);
+    g_note_label = settings_muted_label(note_row);
 #endif
 
     // refresh_labels never decrypts on this thread (P7.3), so fill the labels now.
@@ -227,8 +207,7 @@ static void fav_toggle_cb(lv_event_t *e)
     if (label) lv_label_set_text(label, checked ? LV_SYMBOL_OK : LV_SYMBOL_PLUS);
 }
 
-// Build the per-chat favorite-toggle rows into `page`. Shared by the async
-// drain (hardware) and the synchronous emulator path.
+// Build the per-chat favorite-toggle rows into `page`.
 static void fav_build_rows(lv_obj_t *page,
                            const std::vector<std::pair<long long, std::string>> &chats)
 {
@@ -271,20 +250,19 @@ static void fav_build_rows(lv_obj_t *page,
     }
 }
 
-#ifdef ARDUINO
-// §2.17: the chat-list fetch is a blocking HTTPS GET; running it inline froze
-// the LVGL thread (dead back button) for the request duration. Mirror the
-// Weather/Telegram-app pattern: a core::OneShotJob worker runs the fetch and
-// hands a heap result back to its drain timer on the UI thread. The worker only
-// touches its own heap result (never the widget tree), so it is safe to outlive
-// the subpage; fav_async_teardown() kills the drain timer before the menu
-// objects are freed, so a late result never renders into a torn-down page.
+// §2.17: the chat-list fetch is a blocking HTTPS GET (or a phone round trip);
+// running it inline froze the LVGL thread (dead back button) for the request
+// duration. A core::OneShotJob worker runs the fetch and hands a heap result
+// back to the UI thread. The worker only touches its own heap result (never the
+// widget tree), so it is safe to outlive the subpage; fav_async_teardown()
+// detaches it before the menu objects are freed, so a late result never
+// renders into a torn-down page.
 struct FavFetchResult {
     std::vector<std::pair<long long, std::string>> chats;
     bool ok = false;
     std::string err;
 };
-static lv_obj_t *g_fav_status_lbl = nullptr;  // updated by the drain
+static lv_obj_t *g_fav_status_lbl = nullptr;  // updated by fav_fetch_done
 static lv_obj_t *g_fav_list_page  = nullptr;  // rows appended here
 
 static void fav_fetch_done(FavFetchResult &res)
@@ -299,7 +277,16 @@ static void fav_fetch_done(FavFetchResult &res)
         if (g_fav_status_lbl)
             lv_label_set_text_fmt(g_fav_status_lbl,
                 "%u chat(s) — tap to toggle favorite.", (unsigned)res.chats.size());
-        if (g_fav_list_page) fav_build_rows(g_fav_list_page, res.chats);
+        if (g_fav_list_page) {
+            fav_build_rows(g_fav_list_page, res.chats);
+            // The page's focus group was built when it opened, before these
+            // rows existed: rebuild it so the encoder/keyboard reach them
+            // (only while the page is still the one on screen).
+            if (g_parent_menu &&
+                lv_menu_get_cur_main_page(g_parent_menu) == g_fav_list_page) {
+                activate_subpage_group(g_fav_list_page);
+            }
+        }
     }
 }
 
@@ -307,14 +294,13 @@ static core::OneShotJob<FavFetchResult> g_fav_job(fav_fetch_done);
 
 static void fav_async_teardown()
 {
-    // Kill the drain first: it (and only it) touches the menu widgets, which
-    // ui_sys_exit frees right before calling reset_state. A worker still
-    // running is detached and frees its own result.
+    // Detach the job first: its delivery (and only it) touches the menu
+    // widgets, which ui_sys_exit frees right before calling reset_state. A
+    // worker still running has its result freed on arrival.
     g_fav_job.teardown();
     g_fav_status_lbl = nullptr;
     g_fav_list_page  = nullptr;
 }
-#endif // ARDUINO
 
 static void build_favorites_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 {
@@ -322,13 +308,9 @@ static void build_favorites_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_obj_set_style_pad_row(sub_page, 2, 0);
 
     lv_obj_t *status_row = lv_menu_cont_create(sub_page);
-    lv_obj_t *status_lbl = lv_label_create(status_row);
-    lv_label_set_long_mode(status_lbl, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(status_lbl, LV_PCT(100));
-    lv_obj_set_style_text_color(status_lbl, UI_COLOR_MUTED, 0);
+    lv_obj_t *status_lbl = settings_muted_label(status_row);
     lv_label_set_text(status_lbl, "Loading chats...");
 
-#ifdef ARDUINO
     // Fetch off-thread; fav_fetch_done fills in rows/errors on completion.
     g_fav_status_lbl = status_lbl;
     g_fav_list_page  = sub_page;
@@ -339,25 +321,7 @@ static void build_favorites_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
             return res;
         }, 8192, "tg_favs", 2) == core::OneShotJob<FavFetchResult>::Start::Failed) {
         lv_label_set_text(status_lbl, "task spawn fail");
-        return;
     }
-#else
-    // Emulator: no worker/HTTPS — resolve synchronously (the stub returns fast).
-    lv_refr_now(NULL);
-    std::vector<std::pair<long long, std::string>> chats;
-    std::string err;
-    if (!apps::tg_cfg_fetch_all_chats(chats, &err)) {
-        lv_label_set_text_fmt(status_lbl, "Fetch failed: %s", err.c_str());
-        return;
-    }
-    if (chats.empty()) {
-        lv_label_set_text(status_lbl, "Bridge returned no chats.");
-        return;
-    }
-    lv_label_set_text_fmt(status_lbl,
-        "%u chat(s) — tap to toggle favorite.", (unsigned)chats.size());
-    fav_build_rows(sub_page, chats);
-#endif
 }
 
 } // namespace telegram_cfg
