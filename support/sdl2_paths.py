@@ -17,11 +17,3 @@ if sys.platform.startswith("darwin"):
         env.Append(
             LIBPATH=os.path.dirname(sdl_lib[0])
         )
-    
-    
-#breakpoint()
-    
-#print('NewENV=====================================')
-#print(env.Dump())
-#print('DefaultENV=====================================')
-#print(DefaultEnvironment().Dump())

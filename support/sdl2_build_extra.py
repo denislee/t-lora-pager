@@ -21,6 +21,3 @@ env.AddTarget(
     description = "Build and execute",
     group="General"
 )
-
-#print('=====================================')
-#print(env.Dump())
