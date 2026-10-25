@@ -2,16 +2,18 @@
  * @file      link_rpc.h
  * @brief     PagerLink v1 RPC layer — REQ/RES/ERR/EVT dispatch with timeouts.
  *
- * Pure C++17: no Arduino / ESP-IDF headers, so this compiles on the host for
+ * Pure C++ (C++11 on the device, gnu++17 in native_test): no Arduino / ESP-IDF headers, so this compiles on the host for
  * the unit tests as well as on the pager. Implements the message-layer
  * behaviour of PROTOCOL.md §3 on top of the framing codec (link_frame.h) and
  * the JSON helpers (link_json.h): request/response correlation, event
  * fan-out, bulk DATA/ACK passthrough, request-id parity and allocation, and
  * per-request timeouts measured by the caller.
  *
- * NOT thread-safe. The owner — the link service task — serializes every call
- * into this object; on_message(), tick(), call(), disconnect() and the
- * handlers/callbacks they invoke all run on that one task.
+ * NOT thread-safe. The owner, link_service.cpp, serializes every call into
+ * this object under its g_mutex: on_message(), tick() and disconnect() run on
+ * the link (transport) task; call(), send_bulk() and emit() also run on worker
+ * tasks through service_call / service_send_bytes / service_accept_expect /
+ * service_emit. Handlers and callbacks run with that lock held.
  */
 #pragma once
 

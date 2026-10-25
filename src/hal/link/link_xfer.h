@@ -2,11 +2,14 @@
  * @file      link_xfer.h
  * @brief     PagerLink v1 bulk-transfer engine (PROTOCOL.md §4) + CRC-32.
  *
- * Pure C++17, no Arduino / ESP-IDF headers, so it is unit-tested on the host.
- * One XferSender or XferReceiver per transfer; the owner (handlers_fs.cpp on
- * the pager) feeds it the DATA / ACK payloads routed by Rpc::on_bulk() and
- * supplies the storage and send callbacks. Not thread-safe: like Rpc, every
- * call runs on the link service task.
+ * Pure C++ (C++11 on the device, gnu++17 in native_test), no Arduino / ESP-IDF headers, so
+ * it is unit-tested on the host. One XferSender or XferReceiver per transfer;
+ * the owner (handlers_fs.cpp for fs.read/fs.write, link_service.cpp for
+ * hw_link_send_bytes / hw_link_accept_*) feeds it the DATA / ACK payloads
+ * routed by Rpc::on_bulk() and supplies the storage and send callbacks. Not
+ * thread-safe: like Rpc, every call runs under the link service lock
+ * (link_service.cpp g_mutex), on the link task or on a worker inside a
+ * service_* entry point.
  *
  * Flow control:
  *  - Credits count DATA messages. The sender keeps at most `credits` DATA

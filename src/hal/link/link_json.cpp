@@ -2,7 +2,7 @@
  * @file      link_json.cpp
  * @brief     Implementation of the minimal PagerLink JSON writer/reader.
  *
- * Pure C++17, no Arduino / ESP-IDF headers (see link_json.h). The reader is a
+ * Pure C++ (C++11 on the device, gnu++17 in native_test), no Arduino / ESP-IDF headers (see link_json.h). The reader is a
  * recursive-descent validator over an owned copy of the input (parse) or a
  * borrowed one (parse_view, json_array_spans; P7.50); it records the raw text
  * span of every top-level member so values are decoded lazily.

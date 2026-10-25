@@ -2,9 +2,9 @@
  * @file      link_json.h
  * @brief     Minimal JSON writer/reader for PagerLink payloads (cJSON is not available in the emulator build).
  *
- * Pure C++17: no Arduino / ESP-IDF headers, so this compiles on the host for
+ * Pure C++ (C++11 on the device, gnu++17 in native_test): no Arduino / ESP-IDF headers, so this compiles on the host for
  * the unit tests as well as on the pager. The PagerLink envelopes exchanged
- * with the hub are small and shaped by our own code on both ends, so a full
+ * with the phone are small and shaped by our own code on both ends, so a full
  * JSON DOM (ArduinoJson, cJSON) is overkill — and cJSON is not linked into the
  * desktop emulator. This pair of small classes covers the two things the link
  * layer needs:

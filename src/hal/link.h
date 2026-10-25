@@ -43,9 +43,10 @@ bool hw_link_connected();
  */
 
 // Outcome of hw_link_call(). ok → `json` holds the RES result object. Not ok →
-// `code` is the PROTOCOL.md §3.4 code: the phone's ERR code, or the local
-// "timeout" / "disconnected" (no phone connected, or the link dropped while
-// waiting; HalError::LinkOffline).
+// `code` is the PROTOCOL.md §3.4 code: the phone's ERR code, or a local one:
+// "timeout", "disconnected" (no phone connected, or the link dropped while
+// waiting; HalError::LinkOffline) or "busy" (connected, but the request was
+// refused locally, e.g. too many pending).
 struct HwLinkResult {
     bool ok = false;
     std::string json;

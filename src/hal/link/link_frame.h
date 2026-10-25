@@ -2,7 +2,7 @@
  * @file      link_frame.h
  * @brief     PagerLink v1 framing codec — message header, segmentation and reassembly.
  *
- * Pure C++17: no Arduino / ESP-IDF headers, so this compiles on the host for
+ * Pure C++ (C++11 on the device, gnu++17 in native_test): no Arduino / ESP-IDF headers, so this compiles on the host for
  * the unit tests as well as on the pager. Mirrors the normative reference
  * implementation in protocol/tools/mkvectors.py (PROTOCOL.md §2-§4) and is
  * validated against the golden vectors in protocol/vectors/.

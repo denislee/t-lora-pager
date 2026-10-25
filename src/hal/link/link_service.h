@@ -52,7 +52,7 @@ struct TransportOps {
     std::string peer_name;
 };
 
-/** A transport connected: reset framing, (re)build the RPC and announce. */
+/** A transport connected: reset framing and (re)build the RPC. */
 void service_on_connect(const TransportOps &ops);
 /** One link-layer packet arrived from the transport. No-op when disconnected. */
 void service_on_packet(const uint8_t *pkt, size_t len);
