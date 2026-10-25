@@ -1,52 +1,66 @@
 /**
  * @file      one_shot_job.h
- * @brief     `core::OneShotJob<T>` — run one blocking call on a FreeRTOS
- *            worker and hand its heap result back to the LVGL thread.
+ * @brief     `core::OneShotJob<T>` — run one blocking call on a worker thread
+ *            and hand its heap result back to the LVGL thread.
  *
- * This is the {task handle, 100 ms drain timer, volatile done flag, heap
- * result swapped under the instance lock} scaffold that the weather, city
- * search, notes scan, internet checks and Telegram favourites each used to
- * hand-roll. The contract every one of those copies relied on:
+ * This is the {worker, done flag, heap result handed to the UI thread}
+ * scaffold that the weather, city search, notes scan, internet checks,
+ * Telegram and chat workers each used to hand-roll. The contract:
  *
  *  - The worker runs `work()` and touches nothing but its own locals and the
  *    heap result it returns — never the LVGL tree — so it is safe for it to
  *    outlive the app/page that started it.
- *  - The result is published under `core::ScopedInstanceLock`. Every method
- *    below runs on the LVGL thread inside `lv_timer_handler()`, which already
- *    holds that (non-recursive) lock, so none of them re-take it — doing so
- *    would self-deadlock.
- *  - `on_done(result)` runs on the LVGL thread from the drain timer, which the
- *    worker readies and wakes as it publishes (P7.47; the 100 ms period is only
- *    a fallback). The job deletes the result once the callback returns. A null
- *    result skips the callback.
+ *  - The worker hands the result to the LVGL thread with `core::ui_post`
+ *    (P7.47: the post wakes the display task, so delivery is immediate). Every
+ *    method below runs on the LVGL thread — `start`/`teardown`/`abandon`/`busy`
+ *    from LVGL callbacks, the delivery from `core::System::loop()` — so the job
+ *    state needs no lock of its own.
+ *  - `on_done(result)` runs on the LVGL thread; the job deletes the result once
+ *    the callback returns. A null result skips the callback.
  *  - `start()` while a worker is still running does not spawn a second one: it
- *    re-attaches the drain so that worker's result still lands (e.g. the app
- *    was left and re-opened mid-job).
- *  - `teardown()` stops the drain but never kills a running worker: it
- *    detaches it, so the worker frees its own result when it finishes instead
- *    of publishing it. A completed-but-undrained result is freed right away.
+ *    re-attaches, so that worker's result still lands (e.g. the app was left
+ *    and re-opened mid-job).
+ *  - `teardown()` never kills a running worker: it detaches it, so its result
+ *    is freed instead of delivered — unless a later `start()` re-attaches.
+ *  - `abandon()` drops the running worker for good (its result is freed when
+ *    it finishes, even if `start()` runs again), so the next `start()` spawns a
+ *    fresh worker right away. For cancel buttons and watchdogs.
  *
- * The job object must have static storage duration — the worker holds a
- * pointer to it for as long as it runs.
+ * The job object must have static storage duration — the worker and its
+ * posted delivery hold a pointer to it.
  *
- * Emulator (no FreeRTOS): `start()` runs `work()` inline and delivers
- * `on_done` synchronously before returning `Started`.
+ * Hardware: the worker is a FreeRTOS task (name, stack, priority, core as
+ * passed). Emulator: a detached pthread (the stack/priority/core arguments are
+ * ignored), so `work()` never blocks the LVGL thread there either (DC2.0.6:
+ * `hw_link_call` must not run on it). `one_shot_jobs_in_flight()` lets the
+ * emulator screenshot sweep wait for workers before it captures.
  */
 #pragma once
 
-#include <lvgl.h>
 #include <functional>
 #include <utility>
 
-#include "scoped_lock.h"
-#include "system_hooks.h"  // hw_lvgl_task_notify_wake (P7.47)
+#include "ui_post.h"
 
 #ifdef ARDUINO
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#else
+#include <atomic>
+#include <pthread.h>
+#include <unistd.h>
 #endif
 
 namespace core {
+
+#ifndef ARDUINO
+// Emulator: number of OneShotJob workers whose result has not been posted yet.
+inline std::atomic<int> &one_shot_jobs_in_flight()
+{
+    static std::atomic<int> n{0};
+    return n;
+}
+#endif
 
 template <typename T>
 class OneShotJob {
@@ -55,10 +69,20 @@ public:
     using Done = void (*)(T &result);     // LVGL thread; the job frees `result` afterwards
 
     enum class Start {
-        Started,    // a new worker was spawned (or, on the emulator, ran inline)
+        Started,    // a new worker was spawned
         Attached,   // a previous worker is still running; its result will land
-        Failed,     // the task could not be created; nothing is running
+        Failed,     // the worker could not be created; nothing is running
     };
+
+#ifdef ARDUINO
+    using Priority = UBaseType_t;
+    using CoreId   = BaseType_t;
+    static constexpr CoreId kAnyCore = tskNO_AFFINITY;
+#else
+    using Priority = unsigned;
+    using CoreId   = int;
+    static constexpr CoreId kAnyCore = -1;
+#endif
 
     OneShotJob() = default;
     explicit OneShotJob(Done cb) : done_cb_(cb) {}
@@ -67,121 +91,122 @@ public:
 
     void on_done(Done cb) { done_cb_ = cb; }
 
-#ifdef ARDUINO
-    // True while a worker is running or its drain is still pending.
-    bool busy() const { return task_ != nullptr || timer_ != nullptr; }
+    // True while a worker is running or its result is still being delivered.
+    bool busy() const { return running_; }
 
     Start start(Work work, uint32_t stack_bytes, const char *name,
-                UBaseType_t priority, BaseType_t core_id = tskNO_AFFINITY)
+                Priority priority, CoreId core_id = kAnyCore)
     {
-        if (task_ != nullptr) {
+        if (running_) {
             detached_ = false;         // re-adopt a worker a teardown() let go of
-            ensure_timer();
             return Start::Attached;
         }
-        done_ = false;
         detached_ = false;
-        if (result_) { delete result_; result_ = nullptr; }
-
-        Ctx *ctx = new Ctx{this, std::move(work)};
-        if (xTaskCreatePinnedToCore(trampoline, name, stack_bytes, ctx, priority,
-                                    &task_, core_id) != pdPASS) {
-            task_ = nullptr;
+        running_  = true;
+        Ctx *ctx = new Ctx{this, ++gen_, std::move(work)};
+        if (!spawn(ctx, stack_bytes, name, priority, core_id)) {
+            running_ = false;
             delete ctx;
             return Start::Failed;
         }
-        ensure_timer();
         return Start::Started;
     }
 
     void teardown()
     {
-        if (timer_) { lv_timer_delete(timer_); timer_ = nullptr; }
-        if (done_) {
-            done_ = false;
-            if (result_) { delete result_; result_ = nullptr; }
-        } else if (task_ != nullptr) {
-            detached_ = true;          // the worker frees its result on finish
-        }
+        if (running_) detached_ = true;   // its result is freed on arrival
     }
-#else
-    bool busy() const { return false; }
 
-    Start start(Work work, uint32_t stack_bytes, const char *name,
-                unsigned priority, int core_id = -1)
+    void abandon()
     {
-        (void)stack_bytes; (void)name; (void)priority; (void)core_id;
-        T *res = work();
-        if (res) {
-            if (done_cb_) done_cb_(*res);
-            delete res;
-        }
-        return Start::Started;
+        if (!running_) return;
+        ++gen_;                           // the running worker's delivery is now stale
+        running_  = false;
+        detached_ = false;
     }
-
-    void teardown() {}
-#endif
 
 private:
-#ifdef ARDUINO
     struct Ctx {
         OneShotJob *job;
+        unsigned    gen;
         Work        work;
     };
 
-    static void trampoline(void *arg)
+    // Worker thread.
+    static void run(Ctx *ctx)
     {
-        Ctx *ctx = static_cast<Ctx *>(arg);
         OneShotJob *job = ctx->job;
+        const unsigned gen = ctx->gen;
         T *res = ctx->work();
         delete ctx;
-        {
-            ScopedInstanceLock lock;
-            if (job->detached_) {
-                delete res;            // nobody is listening any more
-            } else {
-                if (job->result_) delete job->result_;
-                job->result_ = res;
-                job->done_ = true;
-                // P7.47: run the drain on the LVGL task's next pass instead of up to
-                // 100 ms later. Safe here: lv_timer_handler() runs under this same
-                // instance lock, so timer_ and lv_timer_ready() can't race the handler.
-                if (job->timer_) lv_timer_ready(job->timer_);
-                hw_lvgl_task_notify_wake();
-            }
-            job->detached_ = false;
-            job->task_ = nullptr;
+        // The post queue is bounded (32): if it is momentarily full, wait for
+        // the LVGL thread to drain it rather than lose the result (busy() would
+        // then never clear).
+        while (!ui_post([job, gen, res]() { job->deliver(gen, res); })) {
+#ifdef ARDUINO
+            vTaskDelay(pdMS_TO_TICKS(20));
+#else
+            usleep(20 * 1000);
+#endif
         }
-        vTaskDelete(NULL);
+#ifndef ARDUINO
+        one_shot_jobs_in_flight().fetch_sub(1);
+#endif
     }
 
-    static void drain_tick(lv_timer_t *t)
+    // LVGL thread (core::System::loop → ui_post_drain).
+    void deliver(unsigned gen, T *res)
     {
-        OneShotJob *job = static_cast<OneShotJob *>(lv_timer_get_user_data(t));
-        if (!job->done_) return;
-        job->done_ = false;
-        T *res = job->result_;
-        job->result_ = nullptr;
-        // Drop the timer before the callback so a callback that start()s the
-        // job again gets a fresh drain instead of having it deleted under it.
-        if (job->timer_) { lv_timer_delete(job->timer_); job->timer_ = nullptr; }
-        if (!res) return;
-        if (job->done_cb_) job->done_cb_(*res);
+        if (gen != gen_) {                // abandon()ed: nobody wants it
+            delete res;
+            return;
+        }
+        running_ = false;
+        const bool drop = detached_;
+        detached_ = false;
+        // running_ is already false, so a callback that start()s the job again
+        // spawns a fresh worker.
+        if (res && !drop && done_cb_) done_cb_(*res);
         delete res;
     }
 
-    void ensure_timer()
+#ifdef ARDUINO
+    static void trampoline(void *arg)
     {
-        if (!timer_) timer_ = lv_timer_create(drain_tick, 100, this);
+        run(static_cast<Ctx *>(arg));
+        vTaskDelete(NULL);
     }
 
-    TaskHandle_t  task_     = nullptr;
-    lv_timer_t   *timer_    = nullptr;
-    volatile bool done_     = false;
-    bool          detached_ = false;   // guarded by the instance lock
-    T            *result_   = nullptr; // guarded by the instance lock
+    static bool spawn(Ctx *ctx, uint32_t stack_bytes, const char *name,
+                      Priority priority, CoreId core_id)
+    {
+        return xTaskCreatePinnedToCore(trampoline, name, stack_bytes, ctx, priority,
+                                       nullptr, core_id) == pdPASS;
+    }
+#else
+    static void *thread_main(void *arg)
+    {
+        run(static_cast<Ctx *>(arg));
+        return nullptr;
+    }
+
+    static bool spawn(Ctx *ctx, uint32_t, const char *, Priority, CoreId)
+    {
+        one_shot_jobs_in_flight().fetch_add(1);
+        pthread_t th;
+        if (pthread_create(&th, nullptr, thread_main, ctx) != 0) {
+            one_shot_jobs_in_flight().fetch_sub(1);
+            return false;
+        }
+        pthread_detach(th);
+        return true;
+    }
 #endif
-    Done          done_cb_  = nullptr;
+
+    bool     running_  = false;
+    bool     detached_ = false;
+    unsigned gen_      = 0;
+    Done     done_cb_  = nullptr;
 };
 
 } // namespace core

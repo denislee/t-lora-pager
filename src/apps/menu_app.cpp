@@ -257,12 +257,12 @@ static void settings_click_cb(lv_event_t* e) {
 
 // ---- Internet check ('p' home shortcut) ----------------------------------
 // Quick TCP probe to 1.1.1.1:53 (mirrors Settings → Connectivity → Test
-// Internet). The probe blocks for up to 3 s, so it runs on a one-shot task
-// behind a modal spinner; a drain timer shows the rtt/error popup when it
+// Internet). The probe blocks for up to 3 s, so it runs on a OneShotJob
+// behind a modal spinner; its delivery shows the rtt/error popup when it
 // completes. The home screen stays live throughout instead of freezing.
 
-// Render the probe outcome. Shared by the async drain and the synchronous
-// fallbacks so the popup looks identical however the probe was run.
+// Render the probe outcome. Shared by the job's delivery and the synchronous
+// task-spawn-failure fallback so the popup looks identical either way.
 static void show_inet_result(bool ok, uint32_t rtt_ms, const std::string &err) {
     if (ok) {
         char rtt_buf[16];
@@ -280,7 +280,6 @@ static void show_inet_result(bool ok, uint32_t rtt_ms, const std::string &err) {
     }
 }
 
-#ifdef ARDUINO
 struct InetCheckResult {
     bool        ok = false;
     uint32_t    rtt_ms = 0;
@@ -289,7 +288,7 @@ struct InetCheckResult {
 
 static ui_loading_t s_inet_loading;
 
-// Drain callback (LVGL thread): close the spinner and show the popup.
+// Delivery (LVGL thread): close the spinner and show the popup.
 static void inet_check_done(InetCheckResult &r) {
     ui_loading_close(&s_inet_loading);
     show_inet_result(r.ok, r.rtt_ms, r.err);
@@ -298,20 +297,19 @@ static void inet_check_done(InetCheckResult &r) {
 // The 3 s TCP probe runs off the LVGL thread on this job.
 static core::OneShotJob<InetCheckResult> s_inet_job(inet_check_done);
 
-// Tear down the in-flight check's UI (drain timer + spinner). A worker still
-// running is detached and frees its own result. Called by MenuApp::onStop().
+// Tear down the in-flight check's UI (job delivery + spinner). A worker still
+// running is detached; its result is freed on arrival. Called by
+// MenuApp::onStop().
 static void inet_check_teardown() {
     s_inet_job.teardown();
     ui_loading_close(&s_inet_loading);
 }
-#endif
 
 static void run_internet_check() {
     if (!hw_get_wifi_connected()) {
         ui_result_show("Internet", "Wi-Fi is not connected.", nullptr, 0);
         return;
     }
-#ifdef ARDUINO
     if (s_inet_job.busy()) return;   // one check at a time
 
     ui_loading_open(&s_inet_loading, "Internet", "Checking 1.1.1.1...");
@@ -329,13 +327,6 @@ static void run_internet_check() {
         bool ok = hw_ping_internet(&rtt_ms, &err);
         show_inet_result(ok, rtt_ms, err);
     }
-#else
-    // Emulator: no FreeRTOS task; probe inline.
-    uint32_t rtt_ms = 0;
-    std::string err;
-    bool ok = hw_ping_internet(&rtt_ms, &err);
-    show_inet_result(ok, rtt_ms, err);
-#endif
 }
 
 // ---- Media controls (BLE HID transport keys to a paired phone) -----------
@@ -631,9 +622,7 @@ static void resume() {
 }
 
 void MenuApp::onStop() {
-#ifdef ARDUINO
     inet_check_teardown();   // cancel any in-flight internet-check UI (worker self-finishes)
-#endif
     // IS.3: keep the tiles; remember focus and pause the live state.
     lv_group_t* g = core::System::getInstance().getMenuGroup();
     s_last_focus = g ? lv_group_get_focused(g) : nullptr;

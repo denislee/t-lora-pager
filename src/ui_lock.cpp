@@ -129,7 +129,7 @@ static void unlock_submit(LockCtx *ctx, const char *p1)
     ui_loading_open(&ctx->loading, "Unlocking...", nullptr);
     /* Priority 1 = the LVGL loop's, so the loader keeps animating while both
      * cores derive (P7.2 runs T2 on the other core at the caller's priority).
-     * Emulator: runs inline and unlock_done has already fired on return. */
+     * (A thread on the emulator.) */
     auto st = s_unlock_job.start([pw, submit]() { return run_unlock(pw, submit); },
                                  8192, "unlock", 1);
     if (st == core::OneShotJob<UnlockResult>::Start::Failed) {

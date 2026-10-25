@@ -11,11 +11,13 @@
  *   - lv_obj_t*   menu, quit_btn   — destroyed via lv_obj_del / del_async
  *   - lv_obj_t*   main_page        — nulled (was child of menu, destroyed above)
  *   - lv_timer_t* tick_timer       — killed via kill_tick_timer()
- *   - s_notes_scan_job (SD scan worker + drain timer, core::OneShotJob)
- *                                    — teardown(): drain killed, an undrained
- *                                      result freed, a running worker left to
- *                                      finish and free its own result (it
- *                                      touches only a heap-local vector)
+ *   - s_notes_scan_job (SD scan worker, core::OneShotJob)
+ *                                    — teardown(): a running worker is left
+ *                                      to finish (it touches only a
+ *                                      heap-local vector) and its result is
+ *                                      freed on arrival unless a re-entry
+ *                                      re-attaches it
+ *   - s_notes_scan_pending           — cleared
  *   - active recording             — flushed via finalize_recording()
  *   - active playback              — stopped via hw_set_play_stop()
  *   - notes / selected_* / pending_rec_path — cleared
@@ -26,7 +28,6 @@
  */
 #include "../ui_define.h"
 #include "app_registry.h"
-#include "../core/app_manager.h"
 #include "../core/one_shot_job.h"
 #include "../core/spi_lock.h"
 #include "../hal/system.h"
@@ -39,8 +40,6 @@
 #ifdef ARDUINO
 #include <SD.h>
 #include <LilyGoLib.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 #endif
 
 LV_FONT_DECLARE(font_montserrat_48_subset);  // P7.51 src/fonts/font_montserrat_48_subset.c
@@ -80,7 +79,7 @@ static std::string pending_rec_path; // set while recording
 static bool        s_quick_record = false;
 
 static void ui_notes_enter(lv_obj_t *parent);
-static void ui_notes_exit(lv_obj_t *parent);
+static void ui_notes_exit();
 static void render_view();
 static void enter_list();
 static void enter_playback(const Note &n);
@@ -169,20 +168,10 @@ static void scan_notes(std::vector<Note> &out)
     });
 }
 
-// Synchronous scan straight into the `notes` global — used on the emulator
-// (no real SD, no background-task infra needed) and as the fallback if
-// spawning the background scan task fails.
-static void reload_notes()
-{
-    scan_notes(notes);
-}
-
 static bool                s_notes_scan_pending = false;  // gates the list view's "Loading..." row
 
-#ifdef ARDUINO
-// Drain callback (LVGL thread, instance mutex held by lv_timer_handler): swap
-// the freshly scanned list in and, if the list view is still on screen,
-// re-render it.
+// Job delivery (LVGL thread): swap the freshly scanned list in and, if the
+// list view is still on screen, re-render it.
 static void notes_scan_done(std::vector<Note> &result)
 {
     notes.swap(result);
@@ -195,8 +184,9 @@ static void notes_scan_done(std::vector<Note> &result)
 static core::OneShotJob<std::vector<Note>> s_notes_scan_job(notes_scan_done);
 
 // Kick a rescan of the notes directory off the LVGL thread. If a scan is
-// already in flight the job just re-attaches its drain. Hardware only — the
-// emulator scans synchronously in show_list_view().
+// already in flight (Attached: the app was left and re-entered mid-scan) the
+// job re-attaches, so its result still lands. Either way the list shows
+// "Loading..." until it does (DC2.0.7d).
 static void kick_notes_reload()
 {
     using Job = core::OneShotJob<std::vector<Note>>;
@@ -206,30 +196,20 @@ static void kick_notes_reload()
         scan_notes(*result);
         return result;
     }, 4096, "notes_scan", 1);
-    if (started == Job::Start::Started) {
-        s_notes_scan_pending = true;
-    } else if (started == Job::Start::Failed) {
-        s_notes_scan_pending = false;
-        reload_notes(); // fall back to a synchronous scan so the list isn't stuck empty
+    s_notes_scan_pending = started != Job::Start::Failed;
+    if (started == Job::Start::Failed) {
+        scan_notes(notes); // fall back to a synchronous scan so the list isn't stuck empty
     }
 }
-#endif
 
-// Switch to VIEW_LIST and (re)populate `notes`. On ARDUINO this paints the
-// list immediately with whatever `notes` already holds, then refreshes
-// asynchronously once the background SD scan completes (kick_notes_reload()
-// above). The emulator has no real SD or background-task infra, so it scans
-// synchronously *before* the single render.
+// Switch to VIEW_LIST and (re)populate `notes`: start the background SD scan,
+// then paint the list with whatever `notes` already holds (or "Loading...");
+// notes_scan_done re-renders once the scan completes.
 static void show_list_view()
 {
     current_view = VIEW_LIST;
-#ifdef ARDUINO
-    render_view();
     kick_notes_reload();
-#else
-    reload_notes();
     render_view();
-#endif
 }
 
 // --- list view ---------------------------------------------------------
@@ -745,26 +725,21 @@ static void ui_notes_enter(lv_obj_t *parent)
     }
 
 #ifdef USING_TOUCHPAD
-    quit_btn = create_floating_button([](lv_event_t *e) {
-        do_back();
-    }, NULL);
+    quit_btn = create_floating_button(exit_btn_cb, NULL);
 #endif
 }
 
-static void ui_notes_exit(lv_obj_t *parent)
+static void ui_notes_exit()
 {
     ui_hide_back_button();
     disable_keyboard();
     kill_tick_timer();
     finalize_recording();
     hw_set_play_stop();
-#ifdef ARDUINO
-    // Stop draining the bg scan, if any. A running worker is left to finish
-    // on its own (it never touches the UI tree) and frees its own result
-    // unless kick_notes_reload() re-attaches it on a later re-entry; an
-    // undrained result is dropped so a re-entry doesn't render stale data.
+    // Detach the bg scan, if any. A running worker is left to finish on its
+    // own (it never touches the UI tree); its result is freed on arrival
+    // unless kick_notes_reload() re-attaches it on a later re-entry.
     s_notes_scan_job.teardown();
-#endif
     s_notes_scan_pending = false;
     if (menu) {
         lv_obj_clean(menu);
@@ -794,7 +769,7 @@ public:
         ui_notes_enter(parent);
     }
     void onStop() override {
-        ui_notes_exit(getRoot());
+        ui_notes_exit();
         core::App::onStop();
     }
 private:

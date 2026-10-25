@@ -11,8 +11,10 @@
 #include "ui_define.h"
 #include "core/app_manager.h"
 #include "core/system.h"
+#include "core/one_shot_job.h"
 
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string>
 #include <vector>
@@ -20,11 +22,22 @@
 
 namespace {
 
+// OneShotJob workers run on threads on the emulator too (DC2.4.12): wait for
+// them in real time before each System::loop() drain, so their results land
+// on the same fake-clock frame every run and the shots stay deterministic.
+void wait_for_jobs()
+{
+    for (int i = 0; i < 5000 && core::one_shot_jobs_in_flight().load() > 0; i++) {
+        usleep(1000);
+    }
+}
+
 void pump(int ms)
 {
     for (int t = 0; t < ms; t += 16) {
         lv_tick_inc(16);
         lv_timer_handler();
+        wait_for_jobs();
         core::System::getInstance().loop();
     }
 }
