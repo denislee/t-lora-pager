@@ -136,12 +136,25 @@ void keyboard_task_fn(void *)
 #endif
             core::ScopedKbLock lock;
             INPUT_PROF(core::prof::kb_lock_wait(core::prof::now_us() - wait0));
+            bool prev_none = false;
             for (int i = 0; i < 16; ++i) {
                 char c = '\0';
                 int state = instance.kb.getKey(&c);
                 if (state != KB_PRESSED && state != KB_RELEASED) {
-                    break;
+                    // -1 is either "nothing pending" or an event the driver
+                    // swallowed (backspace release, modifiers). getKey()
+                    // clears the TCA8418 K_INT flag *before* popping the
+                    // event, so after a swallowed last event the flag (and
+                    // the INT line) stays asserted: the next keypress makes
+                    // no ISR edge and waits for the kFallbackMs poll — rapid
+                    // backspace taps lagged. One more call drains the next
+                    // event or, with the FIFO empty, clears K_INT; stop on
+                    // the second -1 in a row.
+                    if (prev_none) break;
+                    prev_none = true;
+                    continue;
                 }
+                prev_none = false;
                 if (state == KB_PRESSED) {
                     TickType_t now = xTaskGetTickCount();
                     // Backspace and Alt+Backspace: the vendor's

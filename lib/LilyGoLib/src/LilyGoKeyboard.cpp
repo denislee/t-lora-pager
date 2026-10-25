@@ -436,13 +436,11 @@ int LilyGoKeyboard::update(char *c)
     // Handling special keys
     int specialKeyResult = handleSpecialKeys(k, pressed, c);
     if (specialKeyResult != 0) {
-        Serial.println("return specialKeyResult");
         return specialKeyResult;
     }
 
     // Handling brightness adjustments
     if (handleBrightnessAdjustment(k, pressed)) {
-        Serial.println("return handleBrightnessAdjustment");
         return -1;
     }
 
