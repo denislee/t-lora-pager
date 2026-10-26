@@ -38,7 +38,7 @@
  *   state:   s_pending_send / _chat     — cleared
  *            s_view, s_current_chat_id  — V_NONE / 0
  *            s_chats, s_msgs            — cleared
- *            s_auth_header, s_base_url  — scrubbed / cleared
+ *            s_have_token, s_base_url  — cleared
  *   note:    s_bg_timer is the global background notifier (fast: 60 s / slow: 5 min)
  *            created once at boot by tg_begin_background_poll(); it is NOT torn
  *            down here.  onStart() snaps its period back to TG_BG_POLL_FAST_MS.
@@ -60,6 +60,7 @@
 #include "../hal/str_encode.h"
 #include "../hal/link.h"
 #include "../hal/link/link_json.h"
+#include "../hal/notes_crypto.h"
 #include "../hal/tg_link.h"
 #include "../core/app.h"
 #include "../core/app_manager.h"
@@ -155,7 +156,7 @@ struct Message {
 static lv_obj_t *s_root = nullptr;
 static lv_timer_t *s_timer = nullptr;
 static std::string s_base_url;
-static std::string s_auth_header;     // "Bearer <token>" or empty
+static bool s_have_token = false;   // a token_enc secret is stored (not decrypted here)
 
 enum View { V_NONE, V_LIST, V_CHAT, V_NOT_CONFIGURED };
 static View s_view = V_NONE;
@@ -236,9 +237,9 @@ static uint32_t s_bg_timer_period = 0;
 // --- foreground async worker state (§2.1) ---------------------------------
 enum FgOp { FG_FETCH_CHATS, FG_FETCH_MSGS, FG_SEND };
 
-// Handed to the worker (heap-owned by it, freed there). base_url/auth are
-// captured at kick time so the worker never reads s_base_url / s_auth_header,
-// which onStop scrubs and which may be gone before the worker finishes.
+// Handed to the worker (heap-owned by it, freed there). base_url is captured
+// at kick time; the worker fills auth itself via load_bridge_auth() (token
+// decrypt off the UI thread) and scrubs it.
 struct FgReq {
     FgOp        op;
     std::string base_url;
@@ -367,14 +368,15 @@ static void save_favorites()
 static void reload_config()
 {
     s_base_url = load_pref("url");
-    std::string tok = load_token_plain();
-    s_auth_header = tok.empty() ? std::string() : ("Bearer " + tok);
+    // Presence only: decrypting the bearer (a PBKDF2 on a key-cache miss)
+    // happens on the worker, in load_bridge_auth().
+    s_have_token = token_is_encrypted();
     if (!s_favorites_loaded) load_favorites();
 }
 
 static bool bridge_configured()
 {
-    return !s_base_url.empty() && !s_auth_header.empty();
+    return !s_base_url.empty() && s_have_token;
 }
 
 // Something to talk to: a bridge, or a phone (its own Telegram login).
@@ -1044,6 +1046,19 @@ static TgJobResult *tg_fg_task(FgReq *req)
 {
     TgJobResult *res = new TgJobResult();
     res->epoch = req->epoch;
+    std::string err;
+    if (!load_bridge_auth(req->base_url, req->auth, &err)) {
+        res->fg.op           = req->op;
+        res->fg.ok           = false;
+        res->fg.chat_id      = req->chat_id;
+        res->fg.unread_total = 0;
+        res->fg.marked_to    = 0;
+        res->fg.status       = err;
+        res->fg.status_color = lv_palette_main(LV_PALETTE_RED);
+        hal::secret_scrub(req->auth);
+        delete req;
+        return res;
+    }
     tg_run_fg(req, &res->fg);
     hal::secret_scrub(req->auth);
     delete req;
@@ -1056,7 +1071,6 @@ static FgReq *make_req(FgOp op)
     FgReq *r = new FgReq();
     r->op        = op;
     r->base_url  = s_base_url;
-    r->auth      = s_auth_header;   // "Bearer <token>"
     r->chat_id   = s_current_chat_id;
     r->mark_from = s_last_marked_msg_id;
     r->epoch     = s_fg_epoch;
@@ -1643,7 +1657,7 @@ public:
         // trigger the notes unlock modal before showing any app content.
         // ui_passphrase_unlock() fires the callback immediately when crypto
         // is disabled or already unlocked, so the common case is free.
-        if (s_auth_header.empty() && token_is_encrypted()) {
+        if (token_is_encrypted() && notes_crypto_is_enabled() && !notes_crypto_is_unlocked()) {
             common_page_prep();
             s_status_label = lv_label_create(s_root);
             lv_label_set_text(s_status_label, "Unlocking...");
@@ -1679,9 +1693,7 @@ public:
         s_msgs_holder = nullptr;
         s_chats.clear();
         s_msgs.clear();
-        // Wipe the plaintext bearer header; clear() keeps capacity, so we
-        // overwrite the buffer before release.
-        hal::secret_scrub(s_auth_header);
+        s_have_token = false;
         s_base_url.clear();
         core::App::onStop();
     }
