@@ -36,11 +36,7 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
-#if defined(CONFIG_NIMBLE_CPP_IDF)
-#include "os/os_mbuf.h"
-#else
-#include "nimble/porting/nimble/include/os/os_mbuf.h"
-#endif
+#include "nimble/porting/nimble/include/os/os_mbuf.h"  // NimBLE-Arduino layout
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
