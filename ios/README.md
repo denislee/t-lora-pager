@@ -26,25 +26,31 @@ services; it has no UIKit/SwiftUI imports and builds (and tests) without Xcode.
 ios/
   README.md                       this file
   project.yml                     XcodeGen spec (source of truth)
-  Makefile                        gen / test / test-linux / sim / device* / clean*
+  Makefile                        gen / test / test-linux / notes-e2e / sim / device* / clean*
   .swift-format                   swift-format style config
   Config/
     Base.xcconfig                 shared build settings
     Local.xcconfig.example        template for per-developer signing
   Resources/Info.plist            app Info.plist (build-setting variables)
   App/
-    PagerCompanionApp.swift       @main, injects PagerSession + TelegramAccount
+    PagerCompanionApp.swift       @main, injects PagerSession (+ its NotesModel) + TelegramAccount
     Session/PagerSession.swift    @MainActor ObservableObject link state
+    Notes/NotesModel.swift        Notes tab state: list, unlock, move to GitHub
+    Notes/KeychainSecretStore.swift  the GitHub PAT in the Keychain (this device only)
     Session/LocationProvider.swift  CoreLocation fix + city for weather "auto"
     Telegram/…                    TDLib JSON client + the phone's Telegram login
-    Features/RootView.swift       Dashboard / Telegram / Diagnostics tabs
+    Features/RootView.swift       Dashboard / Notes / Telegram / Diagnostics tabs
     Features/Dashboard/…          connection + sys.info
+    Features/Notes/…              note list + detail, unlock, sync sheets, GitHub settings
     Features/Telegram/…           api keys, phone/code/2FA login, log out
     Features/Diagnostics/…        ping + session log
   PagerKit/                       Swift package (no UIKit/SwiftUI)
     Sources/PagerKit/…            Transport (BLE, TCP) / Link / RPC / Model /
-                                  Services (sys, weather, tg + TDLib, chat, notes)
+                                  Services (sys, weather, tg + TDLib, chat, notes
+                                  sync + move engine, fs) / Notes (indexer,
+                                  cache, library, NoteCrypto, GitBlob, account)
     Tests/PagerKitTests/…         XCTest (reads ../../protocol/vectors)
+  NotesE2E/                       notes viewer + move checks against the emulator
 ```
 
 ## Generate and open
@@ -94,7 +100,15 @@ checkout still generates and builds (unsigned, Simulator-only).
   ```
 
   `test-linux` mounts the repo root, so it sees the vectors the same way the
-  macOS run does.
+  macOS run does. PagerKit depends on `apple/swift-crypto` 3.x (`Crypto` +
+  `_CryptoExtras`) for notes decryption and git blob hashing, so the first run
+  fetches and builds it.
+
+- Against the running emulator (Linux, Docker):
+
+  ```sh
+  make -C ios notes-e2e   # ios/NotesE2E: listing order, both sync triggers, edit during verify
+  ```
 
 ## Simulator ↔ emulator
 
@@ -130,6 +144,32 @@ go run ./cmd/pagerlink smoke
 
 `smoke` walks every Phase‑1 method and error path over the TCP transport.
 
+## Notes
+
+The **Notes** tab (shown when the pager advertises `"fs"`, or offline when a
+cached list exists) lists every `/notes/*.txt` on internal flash and the SD
+card in the pager Journal's order (internal wins a name clash, name
+descending). Plain notes show their text; encrypted ones (`Salted__`) stay
+locked until **Unlock notes** takes the notes passphrase, which is held in
+memory only and dropped on **Lock** or when the app leaves the foreground.
+Decryption happens on the phone (`NoteCrypto`, OpenSSL `enc` /
+PBKDF2-SHA256 10000); plaintext never crosses the link. The list and the raw
+bytes are cached under `Caches/notes` (ciphertext stays ciphertext) for
+offline reading; **Clear cached notes** in the GitHub settings wipes it.
+
+**Sync moves notes to GitHub.** Set the repo (`owner/name`), branch and a
+fine-grained token with `contents:write` under the Notes tab's gear (the token
+goes to the Keychain, this device only, and is never sent to the pager; a repo
+configured on the pager before has to be entered here once). **Sync to
+GitHub**, and the pager's own Notes Sync button while the phone is connected,
+upload every note in one commit, read the tree of that commit back, and delete
+from the pager exactly the notes GitHub shows with the git blob SHA of the
+bytes pulled, using a conditional `fs.delete` (size + CRC, cap
+`fs.delete.if`) so a note edited meanwhile stays. Nothing on GitHub is
+overwritten: a name already there with other content goes up as
+`<stem>~<sha7>.txt`. Encrypted notes reach GitHub as their ciphertext. A
+pager without `fs.delete.if` gets uploads only.
+
 ## Telegram
 
 The app can hold its own Telegram login (TDLib, via the `TDLibFramework`
@@ -153,6 +193,11 @@ falls back to the bridge the pager sends, if any.
   encrypted rx/tx characteristics. State restoration is not wired yet, and
   hardware acceptance is still open (`HUB_REMOVAL_PLAN.md` W15). See
   `IOS_COMPANION_PLAN.md` §7.
+- **Notes tab (viewer + move to GitHub):** PagerKit parts tested on Linux
+  (`make test-linux`, `make notes-e2e` against the emulator); the SwiftUI
+  views, `NotesModel` wiring and Keychain store have not been built with Xcode
+  or run in the Simulator / on hardware yet (`IOS_NOTES_VIEWER_PLAN.md` W8,
+  W9, W15).
 - **The app target builds on macOS** (`make gen && make sim`, Xcode 26, no
   warnings under strict concurrency). `TCPTransportTests` drives
   `TCPTransport` + `LinkSession` against a loopback-socket pager: connect

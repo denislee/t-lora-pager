@@ -32,6 +32,8 @@ pio test -e native_test
 make protocol-test                   # vectors fresh + Unity + Go + PagerKit (Docker swift)
 # The emulator serves PagerLink on 127.0.0.1:7600 (PAGERLINK_PORT, 0 disables):
 (cd tools/pagerlink && go run ./cmd/pagerlink smoke)
+# Notes viewer + move-to-GitHub end to end (iOS PagerKit vs the running emulator, Docker):
+make -C ios notes-e2e
 
 # Screenshot sweep: every app, Settings subpage and shared modal in every
 # UI style x dark mode, as PPM under <dir>/<style>-<light|dark>/ (exit = failures).

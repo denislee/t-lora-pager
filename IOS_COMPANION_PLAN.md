@@ -638,7 +638,8 @@ leaves the pager in plaintext.
 - **Encrypted notes:** by default the file service returns raw ciphertext
   (`hw_read_internal_bytes_raw` / `hw_read_sd_bytes_raw`) and marks
   `protected:true`. It never decrypts on behalf of the phone. An option to
-  serve plaintext while the pager is unlocked is decision D5.
+  serve plaintext while the pager is unlocked was decision D5, resolved as
+  phone-side decryption instead (`NoteCrypto`, `IOS_NOTES_VIEWER_PLAN.md`).
 - The phone stores no pager files outside its sandbox caches. "Forget
   device" clears caches and the bond.
 - Location is only sent to the pager on request (`loc.get`) or inside a
@@ -692,7 +693,7 @@ Bench matrix (pager + real iPhone):
 | D2 | Where the iOS codebase lives | **Decided:** in this repository, under `ios/`, with the shared spec and vectors in `protocol/` (§3.2) |
 | D3 | Minimum iOS version | iOS 17 (Observation, modern concurrency); covers iPhone XS and later |
 | D4 | Pairing: passkey (`DISPLAY_ONLY`) vs Just Works + app-level code | Passkey: OS-level MITM protection, nothing custom to get wrong |
-| D5 | Encrypted notes: ciphertext only, or plaintext while unlocked; port `notes_crypto` to Swift? | Ciphertext only in v1; Swift port in Phase 5 if wanted |
+| D5 | Encrypted notes: ciphertext only, or plaintext while unlocked; port `notes_crypto` to Swift? | **Resolved (2026-10-26, `IOS_NOTES_VIEWER_PLAN.md`): Swift port, phone-side decrypt, read-only.** The pager keeps serving ciphertext only; PagerKit `NoteCrypto` (swift-crypto) decrypts on the phone after the user enters the passphrase there |
 | D6 | Weather source on phone | Open-Meteo (code parity with firmware); WeatherKit optional |
 | D7 | Boards for v1 | Pager first; S3/Ultra get the link for free but UI/bench work later |
 
