@@ -105,7 +105,7 @@ Commands:
   stat <vol> <path>              show file metadata (fs.stat)
   get <vol> <path> <local-file>  download a file (fs.read)
   put <local-file> <vol> <path> [-f]  upload a file (fs.write; -f overwrites)
-  rm <vol> <path>                delete a file or directory (fs.delete)
+  rm <vol> <path> [--if-size N] [--if-crc CRC]  delete (fs.delete; --if-* only if unchanged)
   mkdir <vol> <path>             create a directory (fs.mkdir)
   mv <vol> <from> <to>           rename a file or directory (fs.rename)
 `)

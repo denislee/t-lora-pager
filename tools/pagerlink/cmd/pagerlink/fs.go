@@ -101,6 +101,15 @@ func rpcCode(err error) string {
 	return ""
 }
 
+// rpcMsg returns err's ERR message, or "" for a non-RPC error.
+func rpcMsg(err error) string {
+	var re *pagerlink.RPCError
+	if errors.As(err, &re) {
+		return re.Msg
+	}
+	return ""
+}
+
 // cmdLS lists a directory, one entry per line: "d name" for a directory and
 // "- size name" for a file.
 func cmdLS(c *pagerlink.Client, timeout time.Duration, args []string) int {
@@ -177,13 +186,50 @@ func cmdPut(c *pagerlink.Client, timeout time.Duration, args []string) int {
 	return 0
 }
 
-// cmdRM deletes a file or directory (recursively, on the pager).
+// cmdRM deletes a file or directory (recursively, on the pager). With
+// --if-size/--if-crc the pager deletes only if the file still matches (cap
+// fs.delete.if); otherwise it answers ERR invalid_argument "changed" and
+// deletes nothing.
 func cmdRM(c *pagerlink.Client, timeout time.Duration, args []string) int {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: pagerlink rm <vol> <path>")
+	badUsage := func() int {
+		fmt.Fprintln(os.Stderr, "usage: pagerlink rm <vol> <path> [--if-size N] [--if-crc CRC]")
 		return 2
 	}
-	return callOne(c, timeout, "fs.delete", map[string]any{"vol": args[0], "path": args[1]})
+	var size, crc uint32
+	var hasSize, hasCRC bool
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		var dst *uint32
+		switch args[i] {
+		case "--if-size":
+			dst, hasSize = &size, true
+		case "--if-crc":
+			dst, hasCRC = &crc, true
+		default:
+			pos = append(pos, args[i])
+			continue
+		}
+		i++
+		if i >= len(args) {
+			return badUsage()
+		}
+		n, err := strconv.ParseUint(args[i], 0, 32)
+		if err != nil {
+			return badUsage()
+		}
+		*dst = uint32(n)
+	}
+	if len(pos) < 2 {
+		return badUsage()
+	}
+	params := map[string]any{"vol": pos[0], "path": pos[1]}
+	if hasSize {
+		params["size"] = size
+	}
+	if hasCRC {
+		params["crc32"] = crc
+	}
+	return callOne(c, timeout, "fs.delete", params)
 }
 
 // cmdMkdir creates a directory.
@@ -208,7 +254,9 @@ func cmdMV(c *pagerlink.Client, timeout time.Duration, args []string) int {
 // smokeFS exercises the fs.* file service: directory creation, a 1 MiB
 // round-trip, metadata and listing, every negative control the handlers name, a
 // rejected CRC, the evt.fs.changed notification, and the guarantee that a
-// dropped upload never leaves a .part behind.
+// dropped upload never leaves a .part behind. It also covers the conditional
+// fs.delete precondition (cap fs.delete.if): a stale size or CRC is refused with
+// "changed" and leaves the file in place.
 //
 // The dropped-upload step deliberately closes the link (the emulator serves one
 // client at a time) and reconnects, so the returned client may differ from c.
@@ -286,6 +334,10 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 	}
 	pass = report(ok, "fs.rename big.bin -> big2.bin, old name gone") && pass
 
+	// f2. Conditional fs.delete (cap fs.delete.if): a stale size or CRC is refused
+	// with "changed" and the file stays; a matching one deletes it.
+	pass = smokeCondDelete(c, timeout, dir) && pass
+
 	// g. Path sandbox: each of these must be rejected before any I/O.
 	pass = smokeSandbox(c, timeout, dir) && pass
 
@@ -346,6 +398,103 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 	pass = report(ok, "fs.delete %s removes it", dir) && pass
 
 	return c, pass
+}
+
+// smokeCondDelete exercises the conditional fs.delete precondition (cap
+// fs.delete.if): the pager must refuse a stale size or CRC with "changed"
+// without deleting anything, refuse a precondition on a directory, and delete
+// only while the file still has the given size and whole-file CRC-32.
+func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) bool {
+	pass := true
+
+	// a. The pager advertises the capability the rest of this section relies on.
+	var hello struct {
+		Caps []string `json:"caps"`
+	}
+	res, err := c.Call("sys.hello",
+		map[string]any{"proto": 1, "app": "pagerlink-smoke", "caps": []string{"sys"}}, timeout)
+	if err == nil {
+		err = json.Unmarshal(res, &hello)
+	}
+	if err != nil {
+		fmt.Printf("       sys.hello: %v\n", err)
+	}
+	pass = report(err == nil && slices.Contains(hello.Caps, "fs.delete.if"),
+		"sys.hello caps include fs.delete.if") && pass
+
+	// b. Write the file the deletes below act on.
+	body := []byte("conditional delete\n")
+	path := dir + "/cond.txt"
+	if err := c.WriteFile("int", path, body, false, timeout); err != nil {
+		fmt.Printf("       fs.write: %v\n", err)
+		report(false, "fs.write %s", path)
+		return false
+	}
+	crc := crc32.ChecksumIEEE(body)
+
+	// c. A stale CRC is refused with "changed" and the file survives.
+	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path,
+		"size": uint32(len(body)), "crc32": crc ^ 1}, timeout)
+	_, serr := c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
+	ok := rpcCode(err) == "invalid_argument" && rpcMsg(err) == "changed" && serr == nil
+	if !ok {
+		fmt.Printf("       fs.delete stale crc32: %v, fs.stat %v\n", err, serr)
+	}
+	pass = report(ok, "fs.delete stale crc32 -> changed, file kept") && pass
+
+	// d. A stale size is refused the same way.
+	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path,
+		"size": uint32(len(body) + 1), "crc32": crc}, timeout)
+	_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
+	ok = rpcCode(err) == "invalid_argument" && rpcMsg(err) == "changed" && serr == nil
+	if !ok {
+		fmt.Printf("       fs.delete stale size: %v, fs.stat %v\n", err, serr)
+	}
+	pass = report(ok, "fs.delete stale size -> changed, file kept") && pass
+
+	// e. A precondition on a directory is refused, and the directory stays.
+	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": dir,
+		"size": uint32(0), "crc32": uint32(0)}, timeout)
+	_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": dir}, timeout)
+	ok = rpcCode(err) == "invalid_argument" && serr == nil
+	if !ok {
+		fmt.Printf("       fs.delete dir with precondition: %v, fs.stat %v\n", err, serr)
+	}
+	pass = report(ok, "fs.delete precondition on a directory -> invalid_argument") && pass
+
+	// f. The matching size and CRC do delete it.
+	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path,
+		"size": uint32(len(body)), "crc32": crc}, timeout)
+	_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
+	ok = err == nil && rpcCode(serr) == "invalid_argument"
+	if !ok {
+		fmt.Printf("       fs.delete matching: %v, fs.stat %v\n", err, serr)
+	}
+	pass = report(ok, "fs.delete matching size+crc32 removes it") && pass
+
+	// g. Without a precondition fs.delete still deletes unconditionally.
+	err = c.WriteFile("int", path, body, false, timeout)
+	if err != nil {
+		fmt.Printf("       fs.write: %v\n", err)
+	}
+	ok = err == nil
+	if ok {
+		_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path}, timeout)
+		if err != nil {
+			fmt.Printf("       fs.delete: %v\n", err)
+		}
+		ok = err == nil
+	}
+	if ok {
+		_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
+		if rpcCode(serr) != "invalid_argument" {
+			fmt.Printf("       fs.stat: got %v, want invalid_argument\n", serr)
+		}
+		ok = rpcCode(serr) == "invalid_argument"
+	}
+	pass = report(ok, "fs.delete without precondition unchanged") && pass
+
+	return pass
 }
 
 // smokeSandbox checks that fs.* rejects paths trying to escape the volume root,

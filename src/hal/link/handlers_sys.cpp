@@ -69,6 +69,7 @@ void register_sys_handlers(Rpc &rpc) {
             .begin_array()
             .str_val("sys")
             .str_val("fs")
+            .str_val("fs.delete.if")  // fs.delete honours size/crc32 (§6.1)
             .str_val("weather")
             .end_array()
             .key("mtu")

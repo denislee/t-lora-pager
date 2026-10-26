@@ -28,6 +28,8 @@ constexpr uint32_t NOTES_SYNC_STALL_MS = 120000;
 struct NotesSyncSummary {
     int uploaded = 0;
     int already = 0;
+    int deleted = 0;  // moved: the phone verified them on GitHub and deleted them here
+    int kept = 0;     // verified-not or changed since the pull, still here
     std::vector<std::string> errors;  // names the phone reported as failed
 };
 

@@ -552,8 +552,39 @@ bool handle_delete(const JsonObject &params, JsonWriter &result, RpcError &err) 
     if (!get_vol(params, v, err) || !get_path(params, "path", path, err)) return false;
     if (path == "/") return fail(err, HalError::InvalidArgument, "bad path");
 
+    /* Optional precondition (cap "fs.delete.if", PROTOCOL.md §6.1): delete only
+     * if the file still has this size and whole-file CRC-32. The phone moves a
+     * note to GitHub and then deletes exactly the bytes it verified there; the
+     * check lives here so no pager-side save can slip between check and remove. */
+    const bool want_size = params.has("size");
+    const bool want_crc = params.has("crc32");
+    uint32_t if_size = 0;
+    uint32_t if_crc = 0;
+    if ((want_size && !get_uint32(params, "size", if_size)) ||
+        (want_crc && !get_uint32(params, "crc32", if_crc))) {
+        return fail(err, HalError::InvalidArgument, "bad precondition");
+    }
+
     VolEntry st;
     if (!vol_stat(v, path, st)) return fail(err, HalError::InvalidArgument, "not found");
+    if (want_size || want_crc) {
+        if (st.dir) return fail(err, HalError::InvalidArgument, "not a file");
+        if (want_size && st.size != if_size) return fail(err, HalError::InvalidArgument, "changed");
+        if (want_crc) {
+            /* Fresh, not cached: a stale cache hit here would delete an edit.
+             * A save in flight, or one that lands during the pass, may leave
+             * the bytes we hashed out of date, so treat it as a change. */
+            const uint32_t gen = hw_get_filesystem_generation();
+            vol_crc_forget(v, path);
+            uint32_t crc = 0;
+            if (!vol_file_crc(v, path, st.size, st.mtime, crc)) {
+                return fail(err, HalError::InternalError, "io error");
+            }
+            if (crc != if_crc || hw_save_pending() || hw_get_filesystem_generation() != gen) {
+                return fail(err, HalError::InvalidArgument, "changed");
+            }
+        }
+    }
     close_files_under(v, path);
     if (!vol_remove(v, path)) return fail(err, HalError::InternalError, "io error");
     hw_set_filesystem_dirty(true);

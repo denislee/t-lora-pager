@@ -195,9 +195,15 @@ HalResult<NotesSyncSummary> notes_link_sync(const std::vector<NoteEntry> &files,
 
             int64_t uploaded = 0;
             int64_t already = 0;
+            int64_t deleted = 0;
+            int64_t kept = 0;
             bool done = false;
             eo.get_int("uploaded", uploaded);
             eo.get_int("already", already);
+            // A move-capable phone also reports these (PROTOCOL.md §6); an
+            // older one leaves them out and they stay 0.
+            eo.get_int("deleted", deleted);
+            eo.get_int("kept", kept);
             eo.get_bool("done", done);
 
             std::vector<std::string> names;
@@ -206,6 +212,8 @@ HalResult<NotesSyncSummary> notes_link_sync(const std::vector<NoteEntry> &files,
 
             std::string line = "uploaded=" + std::to_string(uploaded) +
                                " already=" + std::to_string(already) +
+                               " deleted=" + std::to_string(deleted) +
+                               " kept=" + std::to_string(kept) +
                                " errors=" + std::to_string(names.size());
             if (!names.empty()) {
                 line += " (";
@@ -220,6 +228,8 @@ HalResult<NotesSyncSummary> notes_link_sync(const std::vector<NoteEntry> &files,
             if (done) {
                 summary.uploaded += static_cast<int>(uploaded);
                 summary.already += static_cast<int>(already);
+                summary.deleted += static_cast<int>(deleted);
+                summary.kept += static_cast<int>(kept);
                 for (std::string &nm : names) summary.errors.push_back(std::move(nm));
                 break;  // this job is complete, move to the next batch
             }

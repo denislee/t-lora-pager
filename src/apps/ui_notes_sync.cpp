@@ -8,6 +8,9 @@
  *      with the internal /notes manifest (vol "int", targets ["github"]).
  *      The phone holds repo/branch/PAT (D-H2) and pulls the raw bytes with
  *      fs.read, so this path needs no GitHub config, no Wi-Fi and no unlock.
+ *      A move-capable phone then deletes each note it verified on GitHub
+ *      with a conditional fs.delete (size + crc32, cap "fs.delete.if"), so
+ *      the notes leave the pager; the totals carry deleted/kept.
  *      Works in the emulator.
  *   2. Hardware only, no phone, hub enabled → the hub flow below, unchanged
  *      until the hub is deleted (H4.2, gated on BLE hardware: D-H1):
@@ -397,7 +400,7 @@ static void run_sync_bg()
 
     // 3. Have the hub run the additive GitHub push. We still hand it the
     //    file manifest in-band so a single round-trip covers the whole sync.
-    bg_log_append("[hub] delegating push to lilyhub...");
+    bg_log_append("[hub] Uploads via Local Hub (notes stay here)");
     std::string herr;
     if (!try_hub_sync(cfg, local, &herr)) {
         bg_log_appendf("[hub] failed: %s", herr.c_str());
@@ -413,7 +416,7 @@ static void run_sync_bg()
 // Wi-Fi or unlock needed here (D-H2): encrypted notes travel as ciphertext.
 static void run_phone_sync()
 {
-    bg_log_append("[phone] syncing via the phone...");
+    bg_log_append("[phone] Moves notes to GitHub via your phone");
     std::vector<NoteEntry> files;
     std::string err;
     if (!notes_link_manifest(false, files, err)) {
@@ -427,8 +430,9 @@ static void run_phone_sync()
         bg_log_appendf("[phone] failed: %s", err.empty() ? hal_error_string(r.error()) : err.c_str());
         return;
     }
-    bg_log_appendf("[phone] uploaded=%d already=%d errors=%u", r.value().uploaded,
-                   r.value().already, (unsigned)r.value().errors.size());
+    bg_log_appendf("[phone] uploaded=%d already=%d deleted=%d kept=%d errors=%u",
+                   r.value().uploaded, r.value().already, r.value().deleted, r.value().kept,
+                   (unsigned)r.value().errors.size());
 }
 
 // Worker body: phone first, then (hardware only) the hub, else an error.
