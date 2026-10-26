@@ -170,27 +170,6 @@ private final class NotesFs: @unchecked Sendable {
     }
 }
 
-/// A lock-protected clock the test advances by hand, standing in for wall time
-/// in `NotesSyncService`'s remote-listing TTL.
-private final class ClockBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var instant: ContinuousClock.Instant
-
-    init() { instant = ContinuousClock.now }
-
-    var now: ContinuousClock.Instant {
-        lock.lock()
-        defer { lock.unlock() }
-        return instant
-    }
-
-    func advance(by duration: Duration) {
-        lock.lock()
-        defer { lock.unlock() }
-        instant = instant.advanced(by: duration)
-    }
-}
-
 /// Collects `evt.notes.sync` params from a session's events, shared between the
 /// consuming task and the test under a lock.
 private final class NotesCollector: @unchecked Sendable {
@@ -714,7 +693,7 @@ final class NotesSyncServiceTests: XCTestCase {
         await pager.stop()
     }
 
-    func testGitHubTargetSkipsExistingAndCommitsRest() async throws {
+    func testGitHubTargetUploadsMissingAndCountsExisting() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
         let fs = NotesFs()
         let existing = Array("existing".utf8)
@@ -725,16 +704,13 @@ final class NotesSyncServiceTests: XCTestCase {
         fs.set("int", "/notes/salted.txt", raw)
         await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
 
-        let mock = MockGitHub()
-        mock.notesFiles = ["already.txt"]
-        let server = StubServer { mock.respond($0) }
-        let backend = GitHubNotesBackend(
-            config: { GitHubNotesConfig(repo: "octocat/vault", branch: "main", token: "tok") },
-            session: StubURLProtocol.session(server),
-            baseBackoff: .milliseconds(1)
-        )
+        let repo = FakeGitHubRepo()
+        repo.seed(["already.txt": existing])
+        let (backend, _) = FakeGitHubRepo.backend(repo)
 
-        let notes = NotesSyncService(session: phone, github: backend, phoneDirectory: nil)
+        // No `fs.delete.if`: the move uploads and verifies but deletes nothing.
+        let notes = NotesSyncService(session: phone, github: backend, phoneDirectory: nil,
+                                     pagerCaps: [])
         await notes.register()
 
         async let events = NotesSyncServiceTests.collectNotes(pager, timeout: .seconds(5))
@@ -755,151 +731,22 @@ final class NotesSyncServiceTests: XCTestCase {
         XCTAssertEqual(last?["uploaded"]?.intValue, 2)
         XCTAssertEqual(last?["already"]?.intValue, 1)
         XCTAssertEqual(last?["errors"], JSONValue.array([]))
+        XCTAssertEqual(last?["deleted"]?.intValue, 0)
+        XCTAssertEqual(last?["kept"]?.intValue, 3)
 
-        XCTAssertFalse(fs.asked("int", "/notes/already.txt"), "an existing name must not be pulled")
-        XCTAssertEqual(mock.blobCalls, 2)
-        let blobBytes = mock.blobContents.compactMap { Data(base64Encoded: $0) }.map { Array($0) }
-        XCTAssertEqual(Set(blobBytes), Set([hello, raw]))
-        XCTAssertEqual(Set(mock.lastTreeEntries.map { $0.path }), Set(["notes/new.txt", "notes/salted.txt"]))
-        XCTAssertEqual(mock.commitCalls, 1)
-        XCTAssertEqual(mock.refCalls, 1)
-
-        await phone.stop()
-        await pager.stop()
-    }
-
-    // MARK: - Remote listing cache and local phone copies
-
-    /// P7.57: a large manifest arrives as several `notes.sync` batches; one
-    /// remote listing serves the batches that follow within the TTL.
-    func testRemoteListingCachedAcrossJobs() async throws {
-        let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
-        let one = Array("one".utf8)
-        let two = Array("two".utf8)
-        fs.set("int", "/notes/one.txt", one)
-        fs.set("int", "/notes/two.txt", two)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
-
-        let mock = MockGitHub()
-        let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
-        let notes = NotesSyncService(session: phone, github: backend, phoneDirectory: nil)
-        await notes.register()
-
-        let first = try await pager.call("notes.sync", params: [
-            "targets": ["github"],
-            "files": [
-                ["name": "one.txt", "size": .number(Double(one.count)), "mtime": 0,
-                 "crc32": .number(Double(CRC32.checksum(one)))],
-            ],
-        ], timeout: .seconds(5))
-        await notes.wait(job: first["job"]?.intValue ?? 0)
-
-        let second = try await pager.call("notes.sync", params: [
-            "targets": ["github"],
-            "files": [
-                ["name": "two.txt", "size": .number(Double(two.count)), "mtime": 0,
-                 "crc32": .number(Double(CRC32.checksum(two)))],
-            ],
-        ], timeout: .seconds(5))
-        await notes.wait(job: second["job"]?.intValue ?? 0)
-
-        XCTAssertEqual(mock.listCalls, 1, "one listing serves both jobs")
-        XCTAssertEqual(mock.commitCalls, 2, "each job still commits its own files")
-        XCTAssertEqual(Set(mock.lastTreeEntries.map { $0.path }), ["notes/two.txt"])
+        let remote = repo.notes()
+        XCTAssertEqual(remote["already.txt"] ?? [], existing)
+        XCTAssertEqual(remote["new.txt"] ?? [], hello)
+        XCTAssertEqual(remote["salted.txt"] ?? [], raw, "the Salted__ note goes up byte for byte")
+        XCTAssertEqual(repo.commitPosts, 1)
+        XCTAssertTrue(fs.asked("int", "/notes/already.txt"),
+                      "an existing note is pulled too: the move hashes its bytes")
 
         await phone.stop()
         await pager.stop()
     }
 
-    func testRemoteListingRefreshedAfterTTL() async throws {
-        let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
-        let one = Array("one".utf8)
-        let two = Array("two".utf8)
-        fs.set("int", "/notes/one.txt", one)
-        fs.set("int", "/notes/two.txt", two)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
-
-        let mock = MockGitHub()
-        let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
-        let clock = ClockBox()
-        let notes = NotesSyncService(session: phone, github: backend, phoneDirectory: nil,
-                                     now: { clock.now })
-        await notes.register()
-
-        let first = try await pager.call("notes.sync", params: [
-            "targets": ["github"],
-            "files": [
-                ["name": "one.txt", "size": .number(Double(one.count)), "mtime": 0,
-                 "crc32": .number(Double(CRC32.checksum(one)))],
-            ],
-        ], timeout: .seconds(5))
-        await notes.wait(job: first["job"]?.intValue ?? 0)
-        XCTAssertEqual(mock.listCalls, 1)
-
-        // Past `defaultRemoteNamesTTL` (120 s) the listing must be refetched.
-        clock.advance(by: .seconds(121))
-
-        let second = try await pager.call("notes.sync", params: [
-            "targets": ["github"],
-            "files": [
-                ["name": "two.txt", "size": .number(Double(two.count)), "mtime": 0,
-                 "crc32": .number(Double(CRC32.checksum(two)))],
-            ],
-        ], timeout: .seconds(5))
-        await notes.wait(job: second["job"]?.intValue ?? 0)
-
-        XCTAssertEqual(mock.listCalls, 2, "the cached listing expired")
-
-        await phone.stop()
-        await pager.stop()
-    }
-
-    func testCommittedNamesSkipNextJob() async throws {
-        let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
-        let bytes = Array("new".utf8)
-        fs.set("int", "/notes/new.txt", bytes)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
-
-        let mock = MockGitHub()
-        let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
-        let notes = NotesSyncService(session: phone, github: backend, phoneDirectory: nil)
-        await notes.register()
-
-        let params: [String: JSONValue] = [
-            "targets": ["github"],
-            "files": [
-                ["name": "new.txt", "size": .number(Double(bytes.count)), "mtime": 0,
-                 "crc32": .number(Double(CRC32.checksum(bytes)))],
-            ],
-        ]
-
-        async let firstEvents = NotesSyncServiceTests.collectNotes(pager, timeout: .seconds(5))
-        let first = try await pager.call("notes.sync", params: params, timeout: .seconds(5))
-        await notes.wait(job: first["job"]?.intValue ?? 0)
-        _ = await firstEvents
-        XCTAssertEqual(mock.commitCalls, 1)
-
-        async let secondEvents = NotesSyncServiceTests.collectNotes(pager, timeout: .seconds(5))
-        let second = try await pager.call("notes.sync", params: params, timeout: .seconds(5))
-        await notes.wait(job: second["job"]?.intValue ?? 0)
-        let collected = await secondEvents
-
-        // The names job 1 committed were added to the cached listing, so job 2
-        // sees new.txt as already there and does not pull it again.
-        let last = collected.last
-        XCTAssertEqual(last?["already"]?.intValue, 1)
-        XCTAssertEqual(last?["uploaded"]?.intValue, 0)
-        XCTAssertEqual(last?["errors"], JSONValue.array([]))
-        XCTAssertEqual(fs.reads("int", "/notes/new.txt"), 1, "pulled once, by job 1")
-        XCTAssertEqual(mock.listCalls, 1, "job 2 reused the listing")
-        XCTAssertEqual(mock.commitCalls, 1, "nothing new to commit")
-
-        await phone.stop()
-        await pager.stop()
-    }
+    // MARK: - Local phone copies
 
     func testPhoneTargetSkipsMatchingLocalCopy() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()

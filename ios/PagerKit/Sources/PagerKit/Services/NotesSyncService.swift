@@ -395,23 +395,29 @@ public struct GitHubNotesBackend: NotesRemote {
     }
 }
 
-/// Answers the pager's `notes.sync` (PROTOCOL.md §6) on one `LinkSession`.
+/// Answers the pager's `notes.sync` (PROTOCOL.md §6) on one `LinkSession`, and
+/// runs the app's "Sync to GitHub" (`move`), both through one engine.
 ///
-/// The request is answered at once with `{job}`; a background task then pulls
-/// each manifest file it needs with `fs.read` (`vol` defaulting to `"int"`,
-/// path `/notes/<name>`), checks the bytes against the manifest's `size` and
-/// `crc32` — the raw on-disk bytes, so an encrypted note is compared and
-/// delivered as its `Salted__` ciphertext, never decrypted — and delivers them:
-/// `"github"` through `github` in one commit at the end (names already in the
-/// repo count as `already` and are not even pulled), `"phone"` as files in
-/// `phoneDirectory`. Progress goes out as `evt.notes.sync` after every file and
-/// once more with `done:true`, shaped like the mock phone's `emitNotes`.
+/// Target `"github"` **moves** the notes (IOS_NOTES_VIEWER_PLAN.md §3.6): list
+/// the repo's `notes/` with blob SHAs, pull every note with `fs.read` (raw
+/// on-disk bytes, so an encrypted note is its `Salted__` ciphertext, never
+/// decrypted) and hash it as a git blob, upload what the repo lacks in one
+/// commit (a name taken by other bytes goes up as `<stem>~<sha7>.txt`; nothing
+/// on GitHub is overwritten), read the tree of that commit back, and delete
+/// from the pager — with `fs.delete`'s size + CRC precondition — exactly the
+/// notes whose blob SHA it shows. Anything short of that keeps the note on the
+/// pager (`deletable`). Target `"phone"` stores the pulled bytes in
+/// `phoneDirectory` and never deletes.
+///
+/// The pager's request is answered at once with `{job}`; progress goes out as
+/// `evt.notes.sync` (cumulative counts, `deleted`/`kept` included) and once
+/// more with `done:true`. Runs are serialised: a second trigger waits for the
+/// first to finish.
 public actor NotesSyncService {
     /// Idle bound per file pull.
     public static let defaultReadTimeout: Duration = .seconds(60)
-    /// How long one remote listing serves later jobs (P7.57): the pager sends
-    /// a large manifest as several `notes.sync` batches back to back.
-    public static let defaultRemoteNamesTTL: Duration = .seconds(120)
+    /// The capability a pager advertises when `fs.delete` honours size/crc32.
+    public static let conditionalDeleteCap = "fs.delete.if"
 
     private struct Entry {
         let name: String
@@ -420,45 +426,35 @@ public actor NotesSyncService {
         let vol: String
     }
 
+    /// One note to move; `expect` is the pager manifest's size + CRC.
+    private struct MoveInput {
+        let vol: String
+        let name: String
+        let expect: (size: UInt32, crc32: UInt32)?
+    }
+
     private let session: LinkSession
     private let github: (any NotesRemote)?
     private let phoneDirectory: URL?
     private let readTimeout: Duration
+    private let canDelete: Bool
+    private let files: FileService
     private var job = 0
     private var running: [Int: Task<Void, Never>] = [:]
-    private let remoteNamesTTL: Duration
-    private let now: @Sendable () -> ContinuousClock.Instant
-    private var remoteCache: (key: String, names: Set<String>, at: ContinuousClock.Instant)?
+    /// The last queued run; the next one starts after it (serialised triggers).
+    private var tail: Task<Void, Never>?
 
+    /// `pagerCaps` are the pager's `sys.hello` caps: without
+    /// `"fs.delete.if"` a move uploads and verifies but deletes nothing.
     public init(session: LinkSession, github: (any NotesRemote)?, phoneDirectory: URL?,
-                readTimeout: Duration = NotesSyncService.defaultReadTimeout,
-                remoteNamesTTL: Duration = NotesSyncService.defaultRemoteNamesTTL,
-                now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
+                pagerCaps: [String] = [],
+                readTimeout: Duration = NotesSyncService.defaultReadTimeout) {
         self.session = session
         self.github = github
         self.phoneDirectory = phoneDirectory
         self.readTimeout = readTimeout
-        self.remoteNamesTTL = remoteNamesTTL
-        self.now = now
-    }
-
-    /// The remote's names, from a listing younger than `remoteNamesTTL` for
-    /// the same repo and branch when there is one.
-    private func remoteNames(_ github: any NotesRemote) async throws -> Set<String> {
-        let key = github.cacheKey
-        if let key, let cache = remoteCache, cache.key == key, now() - cache.at < remoteNamesTTL {
-            return cache.names
-        }
-        let names = try await github.existingNames()
-        if let key { remoteCache = (key, names, now()) }
-        return names
-    }
-
-    /// Record names a commit just added, so a cached listing stays current.
-    private func remember(_ added: [String], key: String?) {
-        guard let key, var cache = remoteCache, cache.key == key else { return }
-        cache.names.formUnion(added)
-        remoteCache = cache
+        self.canDelete = pagerCaps.contains(Self.conditionalDeleteCap)
+        self.files = FileService(session: session, timeout: .seconds(15))
     }
 
     /// Install the `notes.sync` handler on the session.
@@ -472,6 +468,32 @@ public actor NotesSyncService {
     /// Wait for a job's background work (tests).
     public func wait(job: Int) async {
         await running[job]?.value
+    }
+
+    /// The app's "Sync to GitHub": move `notes` (every note on both volumes,
+    /// the unmerged `NotesIndexer.Scan.all`). Waits for any run in progress.
+    /// Cancelling before the commit changes nothing; after it, the commit
+    /// stands and the remaining notes stay on the pager for the next run.
+    public func move(_ notes: [NoteEntry],
+                     progress: @escaping @Sendable (NotesMoveProgress) async -> Void = { _ in })
+        async -> NotesMoveResult {
+        let inputs = notes.map { MoveInput(vol: $0.vol, name: $0.name, expect: nil) }
+        return await serialized { service in await service.runMove(inputs, progress: progress) }
+    }
+
+    /// Run `body` after every run queued before it.
+    private func serialized<T: Sendable>(_ body: @escaping @Sendable (NotesSyncService) async -> T) async -> T {
+        let previous = tail
+        let work = Task { () -> T in
+            await previous?.value
+            return await body(self)
+        }
+        tail = Task { _ = await work.value }
+        return await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
+        }
     }
 
     func start(_ params: JSONValue) throws -> JSONValue {
@@ -496,62 +518,252 @@ public actor NotesSyncService {
 
         job += 1
         let id = job
+        let wanted = targets
+        let manifest = entries
         running[id] = Task { [weak self] in
-            await self?.run(job: id, targets: targets, files: entries)
+            guard let self else { return }
+            await self.serialized { service in
+                await service.run(job: id, targets: wanted, files: manifest)
+            }
+            await self.finished(id)
         }
         return ["job": .number(Double(id))]
     }
 
-    private func run(job: Int, targets: Set<String>, files: [Entry]) async {
-        defer { running[job] = nil }
-        let wantGitHub = targets.contains("github")
-        let wantPhone = targets.contains("phone")
-        var uploaded = 0
-        var already = 0
-        var errors: [String] = []
-
-        var remote: Set<String>?
-        if wantGitHub, let github {
-            remote = try? await remoteNames(github)
-        }
-
-        var queue: [NoteFile] = []
-        for file in files {
-            switch await deliver(file, remote: remote, github: wantGitHub, phone: wantPhone) {
-            case .error: errors.append(file.name)
-            case .already: already += 1
-            case .uploaded: uploaded += 1
-            case .queued(let note): queue.append(note)
-            }
-            await emit(job, uploaded, already, errors, done: false)
-        }
-
-        if !queue.isEmpty, let github {
-            let result = await github.commit(queue)
-            uploaded += result.uploaded
-            errors.append(contentsOf: result.errors.map(\.name))
-            let failed = Set(result.errors.map(\.name))
-            remember(queue.map(\.name).filter { !failed.contains($0) }, key: github.cacheKey)
-        }
-        await emit(job, uploaded, already, errors, done: true)
+    private func finished(_ job: Int) {
+        running[job] = nil
     }
 
-    private enum Outcome {
+    private func run(job: Int, targets: Set<String>, files: [Entry]) async {
+        var phoneErrors: [String] = []
+        var phoneStored = 0
+        var phoneAlready = 0
+        if targets.contains("phone") {
+            for file in files {
+                switch await deliverToPhone(file) {
+                case .error: phoneErrors.append(file.name)
+                case .already: phoneAlready += 1
+                case .stored: phoneStored += 1
+                }
+                if !targets.contains("github") {
+                    await emit(job, phase: "upload", uploaded: phoneStored, already: phoneAlready,
+                               errors: phoneErrors, done: false)
+                }
+            }
+        }
+        guard targets.contains("github") else {
+            await emit(job, phase: "upload", uploaded: phoneStored, already: phoneAlready,
+                       errors: phoneErrors, done: true)
+            return
+        }
+
+        let inputs = files.map { MoveInput(vol: $0.vol, name: $0.name, expect: ($0.size, $0.crc32)) }
+        let pullErrors = phoneErrors
+        // The pager fails a job after 120 s without an event, so every phase
+        // and every file reports.
+        let result = await runMove(inputs) { [weak self] step in
+            guard let self else { return }
+            let phase: String
+            switch step {
+            case .listing, .pulling: phase = "pull"
+            case .committing: phase = "commit"
+            case .verifying: phase = "verify"
+            case .deleting, .deleted: phase = "delete"
+            }
+            await self.emit(job, phase: phase, uploaded: 0, already: 0, errors: pullErrors, done: false)
+        }
+        await emit(job, phase: "done", uploaded: result.uploaded, already: result.already,
+                   deleted: result.deleted, kept: result.kept.count,
+                   errors: phoneErrors + result.errors.map(\.name), done: true)
+    }
+
+    // MARK: - The move engine (§3.6)
+
+    private func runMove(_ inputs: [MoveInput],
+                         progress: @Sendable (NotesMoveProgress) async -> Void) async -> NotesMoveResult {
+        var out = NotesMoveResult()
+        out.canDelete = canDelete
+        func fail(_ input: MoveInput, _ reason: String) {
+            out.errors.append(NotesMoveIssue(vol: input.vol, name: input.name, reason: reason))
+        }
+        guard let github else {
+            inputs.forEach { fail($0, "github not configured") }
+            return out
+        }
+        if inputs.isEmpty { return out }
+
+        // 1. Remote listing, always fresh. A truncated or failed listing
+        // aborts before anything is pulled.
+        await progress(.listing)
+        let remote: [String: String]
+        do {
+            remote = try await github.existingBlobs()
+        } catch {
+            let reason = GitHubNotesBackend.describe(error)
+            inputs.forEach { fail($0, reason) }
+            return out
+        }
+
+        // 2 + 3. Pull and hash every note, then classify it against the repo
+        // and the uploads planned so far. From here a note's identity is the
+        // bytes pulled.
+        var pulled: [PulledNote] = []
+        var uploads: [NoteFile] = []
+        var planned = remote
+        for (index, input) in inputs.enumerated() {
+            if Task.isCancelled {
+                inputs[index...].forEach { fail($0, Self.keepCancelled) }
+                return out
+            }
+            await progress(.pulling(done: index, total: inputs.count))
+            guard GitHubNotesBackend.safeName(input.name) else {
+                fail(input, "invalid name")
+                continue
+            }
+            let bytes: [UInt8]
+            do {
+                (bytes, _) = try await session.readFile(vol: input.vol, path: "/notes/" + input.name,
+                                                        timeout: readTimeout)
+            } catch {
+                fail(input, "read: \(GitHubNotesBackend.describe(error))")
+                continue
+            }
+            let crc = CRC32.checksum(bytes)
+            if let expect = input.expect,
+               UInt32(exactly: bytes.count) != expect.size || crc != expect.crc32 {
+                // The manifest describes the raw on-disk bytes; the note
+                // changed after the pager built it.
+                fail(input, "changed since the manifest")
+                continue
+            }
+            guard let size = UInt32(exactly: bytes.count) else {
+                fail(input, "too large")
+                continue
+            }
+            let sha = GitBlob.sha1(bytes)
+            var remoteName = input.name
+            var upload = false
+            if let existing = planned[remoteName], existing != sha {
+                remoteName = Self.conflictName(input.name, sha: sha)
+                guard GitHubNotesBackend.safeName(remoteName) else {
+                    fail(input, "invalid name")
+                    continue
+                }
+            }
+            switch planned[remoteName] {
+            case sha?: break // already there (or already planned) byte for byte
+            case nil: upload = true
+            case _?:
+                fail(input, "name clash at \(remoteName)")
+                continue
+            }
+            if upload {
+                planned[remoteName] = sha
+                uploads.append(NoteFile(name: remoteName, bytes: bytes))
+            }
+            pulled.append(PulledNote(vol: input.vol, name: input.name, size: size, crc32: crc,
+                                     sha: sha, remoteName: remoteName, upload: upload))
+        }
+        await progress(.pulling(done: inputs.count, total: inputs.count))
+        if Task.isCancelled {
+            // Nothing committed, nothing deleted.
+            for note in pulled {
+                out.kept.append(NotesMoveIssue(vol: note.vol, name: note.name, reason: Self.keepCancelled))
+            }
+            return out
+        }
+
+        // 4. One commit for everything new. A failed commit means nothing is
+        // deleted, not even the notes already in the repo.
+        var facts = MoveFacts(canDelete: canDelete)
+        var blobFailures: [String: String] = [:]
+        if !uploads.isEmpty {
+            await progress(.committing)
+            let committed = await github.commit(uploads)
+            if let sha = committed.commitSHA {
+                out.commitSHA = sha
+                for error in committed.errors { blobFailures[error.name] = error.error }
+            } else {
+                facts.commitFailure = committed.errors.first?.error ?? "no commit"
+            }
+        }
+
+        // 5. Verify against the tree of the commit just made (pinned, not the
+        // branch head), or a fresh listing when nothing needed uploading.
+        if facts.commitFailure == nil {
+            await progress(.verifying)
+            do {
+                if let sha = out.commitSHA {
+                    facts.verified = try await github.blobs(atCommit: sha)
+                } else {
+                    facts.verified = try await github.existingBlobs()
+                }
+            } catch {
+                facts.verifyFailure = GitHubNotesBackend.describe(error)
+            }
+        }
+
+        var toDelete: [PulledNote] = []
+        for note in pulled {
+            if note.upload, let failure = blobFailures[note.remoteName] {
+                out.errors.append(NotesMoveIssue(vol: note.vol, name: note.name, reason: failure))
+                continue
+            }
+            if note.upload {
+                if out.commitSHA != nil { out.uploaded += 1 }
+            } else {
+                out.already += 1
+            }
+            switch Self.deletable(note, facts) {
+            case .delete: toDelete.append(note)
+            case .keep(let reason):
+                out.kept.append(NotesMoveIssue(vol: note.vol, name: note.name, reason: reason))
+            }
+        }
+
+        // 6. Delete, one at a time, only if the pager still holds exactly the
+        // bytes pulled. A link drop stops here; the next run finds the rest
+        // as already in the repo and deletes them then.
+        var stop: String?
+        for (index, note) in toDelete.enumerated() {
+            if stop == nil, Task.isCancelled { stop = Self.keepCancelled }
+            if let stop {
+                out.kept.append(NotesMoveIssue(vol: note.vol, name: note.name, reason: stop))
+                continue
+            }
+            await progress(.deleting(done: index, total: toDelete.count))
+            do {
+                try await files.delete(vol: note.vol, path: "/notes/" + note.name,
+                                       ifSize: note.size, ifCRC: note.crc32)
+                out.deleted += 1
+                await progress(.deleted(vol: note.vol, name: note.name))
+            } catch let error as RPCError where error.isChanged {
+                out.kept.append(NotesMoveIssue(vol: note.vol, name: note.name, reason: Self.keepChanged))
+            } catch let error as RPCError where error.code == "disconnected" || error.code == "timeout" {
+                stop = Self.keepLinkDropped
+                out.kept.append(NotesMoveIssue(vol: note.vol, name: note.name, reason: Self.keepLinkDropped))
+            } catch {
+                out.errors.append(NotesMoveIssue(vol: note.vol, name: note.name,
+                                                 reason: "delete: \(GitHubNotesBackend.describe(error))"))
+            }
+        }
+        if !toDelete.isEmpty { await progress(.deleting(done: toDelete.count, total: toDelete.count)) }
+        return out
+    }
+
+    // MARK: - Target "phone"
+
+    private enum PhoneOutcome {
         case error
         case already
-        case uploaded
-        case queued(NoteFile)
+        case stored
     }
 
-    /// Pull, check and deliver one manifest entry.
-    private func deliver(_ file: Entry, remote: Set<String>?, github wantGitHub: Bool,
-                         phone wantPhone: Bool) async -> Outcome {
-        guard GitHubNotesBackend.safeName(file.name), !(wantGitHub && remote == nil) else { return .error }
-        let inRepo = wantGitHub && remote?.contains(file.name) == true
+    /// Pull, check and store one manifest entry in the phone folder.
+    private func deliverToPhone(_ file: Entry) async -> PhoneOutcome {
+        guard GitHubNotesBackend.safeName(file.name) else { return .error }
         // A phone copy with the manifest's size and CRC32 needs no pull (P7.63).
-        let onPhone = wantPhone && phoneHas(file)
-        if (inRepo || !wantGitHub) && (onPhone || !wantPhone) { return .already }
-
+        if phoneHas(file) { return .already }
         let bytes: [UInt8]
         do {
             (bytes, _) = try await session.readFile(vol: file.vol, path: "/notes/" + file.name, timeout: readTimeout)
@@ -563,10 +775,7 @@ public actor NotesSyncService {
         guard UInt32(exactly: bytes.count) == file.size, CRC32.checksum(bytes) == file.crc32 else {
             return .error
         }
-        if wantPhone, !onPhone, !store(file.name, bytes) { return .error }
-        if inRepo { return .already }
-        if wantGitHub { return .queued(NoteFile(name: file.name, bytes: bytes)) }
-        return .uploaded
+        return store(file.name, bytes) ? .stored : .error
     }
 
     /// The phone folder already holds `file` byte for byte.
@@ -588,15 +797,18 @@ public actor NotesSyncService {
         }
     }
 
-    private func emit(_ job: Int, _ uploaded: Int, _ already: Int, _ errors: [String], done: Bool) async {
-        let params: JSONValue = [
+    private func emit(_ job: Int, phase: String, uploaded: Int, already: Int,
+                      deleted: Int? = nil, kept: Int? = nil, errors: [String], done: Bool) async {
+        var params: [String: JSONValue] = [
             "job": .number(Double(job)),
-            "phase": "upload",
+            "phase": .string(phase),
             "uploaded": .number(Double(uploaded)),
             "already": .number(Double(already)),
             "errors": .array(errors.map { .string($0) }),
             "done": .bool(done),
         ]
-        await session.emit("evt.notes.sync", params: params)
+        if let deleted { params["deleted"] = .number(Double(deleted)) }
+        if let kept { params["kept"] = .number(Double(kept)) }
+        await session.emit("evt.notes.sync", params: .object(params))
     }
 }
