@@ -55,6 +55,10 @@ static QueueHandle_t rotaryMsg;
 static TaskHandle_t  rotaryHandler = NULL;
 static EventGroupHandle_t  rotaryTaskFlag = NULL;
 static void rotaryTask(void *p);
+// [LOCAL PATCH DC2.4.27c] Optional firmware hook (src/hal/rotary_task.cpp):
+// takes a rotary event straight to the LVGL-side queue and returns true, or
+// returns false (not ready yet) so the event goes to rotaryMsg as before.
+extern "C" bool lilygo_rotary_event(const RotaryMsg_t *msg) __attribute__((weak));
 extern void setupMSC(lock_callback_t lock_cb, lock_callback_t ulock_cb, bool use_sd);
 
 bool LilyGoLoRaPager::getMSCPreferSD()
@@ -525,7 +529,10 @@ uint32_t LilyGoLoRaPager::begin(uint32_t disable_hw_init)
     rotaryTaskFlag = xEventGroupCreate();
 
     // Create a rotary encoder processing task
-    xTaskCreate(rotaryTask, "rotary", 2 * 1024, NULL, 10, &rotaryHandler);
+    // [LOCAL PATCH DC2.4.27c] 3 KB, was 2 KB: lilygo_rotary_event() runs the
+    // firmware's input wake (CPU boost + LVGL notify) on this stack now that
+    // the firmware's own 3 KB rotary_reader relay task is gone.
+    xTaskCreate(rotaryTask, "rotary", 3 * 1024, NULL, 10, &rotaryHandler);
 
     BOOT_MARK("begin end");
     return devices_probe;
@@ -1492,7 +1499,11 @@ static void rotaryTask(void *p)
                 msg.dir = ROTARY_DIR_NONE;
                 break;
             }
-            xQueueSend(rotaryMsg, (void *)&msg, portMAX_DELAY);
+            // [LOCAL PATCH DC2.4.27c] One hop to the firmware's queue when
+            // its hook is installed; the vendor queue otherwise.
+            if (!(lilygo_rotary_event && lilygo_rotary_event(&msg))) {
+                xQueueSend(rotaryMsg, (void *)&msg, portMAX_DELAY);
+            }
         }
         // Poll fast (2 ms) while the display is on for responsive scrolling and
         // clicks. During fake-sleep (display off) the only event that matters is

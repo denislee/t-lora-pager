@@ -32,7 +32,7 @@ void ui_pause_timers();
 void ui_resume_timers();
 
 // Fake-sleep task-coordination notifies. During fake-sleep the LVGL,
-// keyboard, rotary and charge tasks block instead of polling; these unblock
+// keyboard and charge tasks block instead of polling; these unblock
 // them the moment the state changes so wake/overlay latency stays low
 // without a busy poll. All are no-ops on the emulator build.
 //   - hw_lvgl_task_notify_wake(): the display is coming back (ui_resume_timers)
@@ -40,14 +40,10 @@ void ui_resume_timers();
 //   - hw_keyboard_task_notify_wake(): the display is coming back
 //     (ui_resume_timers); the keyboard task should resume scanning at once so
 //     the first keypress after wake isn't delayed.
-//   - hw_rotary_task_notify_wake(): the display is coming back
-//     (ui_resume_timers); the rotary task should resume polling at once so
-//     the first scroll/click after wake isn't delayed.
 //   - hw_charge_task_on_fake_sleep_enter(): fake-sleep was entered
 //     (ui_pause_timers); the charge task should start watching VBUS.
 void hw_lvgl_task_notify_wake();
 void hw_keyboard_task_notify_wake();
-void hw_rotary_task_notify_wake();
 void hw_charge_task_on_fake_sleep_enter();
 //   - hw_ble_kb_task_notify_wake(): the display is coming back
 //     (ui_resume_timers); the BLE keepalive task should resume so conn-params

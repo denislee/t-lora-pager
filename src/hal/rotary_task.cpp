@@ -1,6 +1,6 @@
 /**
  * @file      rotary_task.cpp
- * @brief     High-priority rotary reader task + LVGL indev bridge.
+ * @brief     Rotary encoder -> LVGL indev bridge.
  *
  * Why this exists: the stock LVGL encoder read_cb (LV_Helper_v9.cpp's
  * `lv_encoder_read`) calls `instance.getRotary()` from the LVGL task.
@@ -12,19 +12,17 @@
  *     stop reaching LVGL — the symptom users see is "scroll wheel
  *     stutters / freezes for 1–2 s, then catches up."
  *
- * Fix (same pattern as keyboard_task): spin up a dedicated task that
- * drains `instance.getRotary()` — a pure xQueueReceive that does NOT
- * need the instance mutex — into our own queue, and replace the LVGL
- * encoder indev's read_cb with one that pops non-blockingly. While the
- * LVGL task is blocked on the mutex, our reader keeps filling the
- * queue; as soon as LVGL runs again, it drains everything in one
- * timer cycle (via `continue_reading`).
+ * Fix: the vendor rotaryTask hands every detent/click to
+ * lilygo_rotary_event() below, which pushes it onto our own queue and
+ * wakes the LVGL task; the LVGL encoder indev's read_cb pops that queue
+ * non-blockingly. While the LVGL task is blocked on the mutex the queue
+ * keeps filling; as soon as LVGL runs again, it drains everything in one
+ * timer cycle (via `continue_reading`). DC2.4.27c: this used to be two
+ * hops (vendor queue -> our rotary_reader task -> our queue); the relay
+ * task and its 3 KB stack are gone, ordering is unchanged (one FIFO).
  *
- * While the display is off (fake-sleep), this task blocks on a task notify
- * instead of polling — mirroring keyboard_task's fake-sleep handling.
- * ui_resume_timers() kicks it via hw_rotary_task_notify_wake() so the first
- * scroll/click after wake isn't delayed, and the timeout bounds latency if a
- * notify is ever missed.
+ * In fake sleep the vendor task emits nothing (scrolls are dropped and a
+ * click needs the display on), so there is nothing to park any more.
  */
 #include "rotary_task.h"
 
@@ -45,45 +43,16 @@
 
 namespace {
 
-constexpr UBaseType_t kTaskPriority = configMAX_PRIORITIES - 2;
-constexpr BaseType_t  kTaskCore     = 0;   // Opposite of Arduino loopTask / LVGL task (core 1).
-constexpr UBaseType_t kQueueDepth   = 16;  // Burst of fast clicks while LVGL is briefly blocked.
+constexpr UBaseType_t kQueueDepth = 16;  // Burst of fast clicks while LVGL is briefly blocked.
 
 QueueHandle_t s_event_queue = nullptr;
-TaskHandle_t  s_task        = nullptr;
 
 void enqueue_event(const RotaryMsg_t &ev)
 {
-    // Drop the oldest pending event when full — stalling the reader would
-    // back-pressure onto the vendor rotaryTask, which sends with
-    // portMAX_DELAY.
+    // Drop the oldest pending event when full — never stall the vendor
+    // rotaryTask, which also samples the encoder and the button.
     hal::queue_send_drop_oldest(s_event_queue, ev);
     hw_input_event_wake();
-}
-
-void rotary_task_fn(void *)
-{
-    for (;;) {
-        // While the display is off (fake-sleep) the vendor rotaryTask drops
-        // every scroll notch and never enqueues a center-press, so getRotary()
-        // would just wake us at 20 Hz to receive nothing. Block on a task
-        // notify instead of polling — ui_resume_timers() kicks us via
-        // hw_rotary_task_notify_wake() so the first scroll/click after wake
-        // isn't delayed, and the timeout bounds latency if a notify is ever
-        // missed. Hold-to-wake is detected by the vendor task, not here, so
-        // resuming a little later after wake costs nothing.
-        if (hal::park_if_fake_sleep()) continue;
-
-        // instance.getRotary() blocks up to 50 ms on the vendor's
-        // rotaryMsg queue. That's fine here — this task has no other
-        // job and does not hold the instance mutex. On real scroll
-        // activity we return immediately with an event; on idle we
-        // just loop every 50 ms.
-        RotaryMsg_t msg = instance.getRotary();
-        if (msg.dir != ROTARY_DIR_NONE || msg.centerBtnPressed) {
-            enqueue_event(msg);
-        }
-    }
 }
 
 bool is_word_boundary_char(char c)
@@ -212,7 +181,16 @@ void rotary_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
 
 }  // namespace
 
-void hw_rotary_task_notify_wake() { hal::notify_task(s_task); }
+// Vendor rotaryTask hook (lib/LilyGoLib LilyGo_LoRa_Pager.cpp, weak there).
+// Runs on the vendor task for each detent/click; false until
+// hw_rotary_task_start() has created the queue, so early events stay on the
+// vendor queue for the stock read_cb.
+extern "C" bool lilygo_rotary_event(const RotaryMsg_t *msg)
+{
+    if (!s_event_queue || !msg) return false;
+    enqueue_event(*msg);
+    return true;
+}
 
 #ifdef INPUT_PROFILE
 void hw_rotary_inject(int dir, bool center)
@@ -227,7 +205,7 @@ void hw_rotary_inject(int dir, bool center)
 
 void hw_rotary_task_start()
 {
-    if (s_task) return;
+    if (s_event_queue) return;
     if (!instance.hasEncoder()) return;
 
     s_event_queue = xQueueCreate(kQueueDepth, sizeof(RotaryMsg_t));
@@ -237,21 +215,18 @@ void hw_rotary_task_start()
     }
 
     // Steal LVGL's encoder read_cb so LVGL drains our queue instead of
-    // blocking on instance.getRotary() under the instance mutex.
+    // blocking on instance.getRotary() under the instance mutex. Events the
+    // vendor task hands over before the swap wait in our queue for it.
     if (lv_indev_t *enc = lv_get_encoder_indev()) {
         lv_indev_set_read_cb(enc, rotary_read_cb);
     } else {
-        log_w("rotary_task: no LVGL encoder indev found; polling will still run");
+        log_w("rotary_task: no LVGL encoder indev found");
     }
-
-    hal::start_pinned_task(rotary_task_fn, "rotary_reader", 3072,
-                           kTaskPriority, kTaskCore, &s_task, "rotary_task");
 }
 
 #else  // emulator, or a board without the rotary encoder
 
 void hw_rotary_task_start() {}
-void hw_rotary_task_notify_wake() {}
 #ifdef INPUT_PROFILE
 void hw_rotary_inject(int, bool) {}
 #endif

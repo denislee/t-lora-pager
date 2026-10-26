@@ -490,7 +490,7 @@ void report_tick() {
     // Stack high-water marks (minimum free since task start), P7.49. By name:
     // the 2.0.17 SDK has no trace facility, so no uxTaskGetSystemState.
     static const char *const kTasks[] = {
-        "lvgl", "kb_reader", "rotary_reader", "rotary", "charge_ind",
+        "lvgl", "kb_reader", "rotary", "charge_ind",
         "nfc_reader", "link", "ble_kb_ka", "nimble_host", "loopTask",
         "ssh_app", "app/play", "app/rec", "note_save", "prof_console",
     };

@@ -74,13 +74,12 @@ void ui_resume_timers()
     hw_power_up_all();
     enable_keyboard();
     lv_display_trigger_activity(NULL);
-    // Kick the LVGL, keyboard, rotary and BLE keepalive tasks out of their
-    // fake-sleep blocks so the first frame, keypress, scroll/click and BLE
-    // conn-param re-apply after wake happen immediately rather than after
-    // the idle-poll fallback.
+    // Kick the LVGL, keyboard and BLE keepalive tasks out of their
+    // fake-sleep blocks so the first frame, keypress and BLE conn-param
+    // re-apply after wake happen immediately rather than after the
+    // idle-poll fallback.
     hw_lvgl_task_notify_wake();
     hw_keyboard_task_notify_wake();
-    hw_rotary_task_notify_wake();
     hw_ble_kb_task_notify_wake();
 }
 
