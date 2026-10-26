@@ -97,6 +97,23 @@ void weather_cache_save_forecast(const std::string &key, const ForecastCache &in
     bump_generation();
 }
 
+// Drop the cached location and forecast without changing the generation: the
+// next load misses on both keys and the caller re-fetches.
+void weather_cache_clear()
+{
+    Preferences p;
+    if (!p.begin(WEATHER_PREFS_NS, false)) return;
+    p.remove("ver");
+    p.remove("key");
+    p.remove("loc");
+    p.remove("lat");
+    p.remove("lon");
+    p.remove("fcv");
+    p.remove("fck");
+    p.remove("fcd");
+    p.end();
+}
+
 #else  // !ARDUINO — process-local store (emulator, native tests)
 
 namespace {
@@ -149,6 +166,15 @@ void weather_cache_save_forecast(const std::string &key, const ForecastCache &in
     // Outside g_mu: the hook runs on this task and may call straight back
     // into the cache (the Weather app's re-render reads it).
     bump_generation();
+}
+
+void weather_cache_clear()
+{
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_geo_set = false;
+    g_fc_set = false;
+    g_geo_key.clear();
+    g_fc_key.clear();
 }
 
 #endif

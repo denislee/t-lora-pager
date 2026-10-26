@@ -63,6 +63,9 @@ std::string weather_cache_key(const std::string &user_city);
 // for a different source than `want_key`.
 bool weather_cache_load_geo(const std::string &want_key, GeoData &out);
 void weather_cache_save_geo(const std::string &key, const GeoData &in);
+// Drop the cached location and forecast (both keys), e.g. when the user
+// picks a different city.
+void weather_cache_clear();
 
 // Forecast cache, same keying rules as the location cache.
 bool weather_cache_load_forecast(const std::string &want_key, ForecastCache &out);

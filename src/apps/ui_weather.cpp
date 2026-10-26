@@ -426,38 +426,70 @@ static bool fetch_geo_ip(GeoData &out, std::string &err)
     return parse_geo(body, out, err);
 }
 
-static bool fetch_geo_city(const std::string &city, GeoData &out, std::string &err)
+// Percent-encode the query (may contain UTF-8), then ask the geocoding API
+// for at most `count` matching cities. weather_city_match lives in
+// settings_internal.h.
+static bool geocode_search(const char *query, int count,
+                           std::vector<weather_city_match> &out, std::string &err)
 {
-    // Percent-encode the city (may contain UTF-8) for the query string.
-    std::string enc = hal::url_encode(city);
-    char direct_url[256];
-    snprintf(direct_url, sizeof(direct_url),
-        "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&format=json",
-        enc.c_str());
+    out.clear();
+    if (!query || !*query) { err = "empty query"; return false; }
+
+    char url[384];
+    snprintf(url, sizeof(url),
+        "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=%d&format=json",
+        hal::url_encode(query).c_str(), count);
+
     std::string body;
-    if (!hw_http_get_string(direct_url, body, &err)) return false;
+    if (!hw_http_get_string(url, body, &err)) return false;
 
     cJSON *j = cJSON_Parse(body.c_str());
-    if (!j) { err = "geo parse"; return false; }
+    if (!j) { err = "search parse"; return false; }
 
     cJSON *results = cJSON_GetObjectItemCaseSensitive(j, "results");
-    if (!cJSON_IsArray(results) || cJSON_GetArraySize(results) == 0) {
-        cJSON_Delete(j);
-        err = "city not found";
-        return false;
+    if (!cJSON_IsArray(results)) { cJSON_Delete(j); err = "no matches"; return false; }
+
+    int n = cJSON_GetArraySize(results);
+    for (int i = 0; i < n; ++i) {
+        cJSON *r = cJSON_GetArrayItem(results, i);
+        cJSON *nm  = cJSON_GetObjectItemCaseSensitive(r, "name");
+        cJSON *a1  = cJSON_GetObjectItemCaseSensitive(r, "admin1");
+        cJSON *cc  = cJSON_GetObjectItemCaseSensitive(r, "country");
+        cJSON *lat = cJSON_GetObjectItemCaseSensitive(r, "latitude");
+        cJSON *lon = cJSON_GetObjectItemCaseSensitive(r, "longitude");
+        if (!cJSON_IsString(nm) || !cJSON_IsNumber(lat) || !cJSON_IsNumber(lon)) continue;
+
+        weather_city_match m;
+        m.name  = nm->valuestring;
+        m.lat   = lat->valuedouble;
+        m.lon   = lon->valuedouble;
+        m.label = m.name;
+        if (cJSON_IsString(a1) && a1->valuestring && *a1->valuestring &&
+            strcmp(a1->valuestring, nm->valuestring) != 0) {
+            m.label += ", ";
+            m.label += a1->valuestring;
+        }
+        if (cJSON_IsString(cc) && cc->valuestring && *cc->valuestring) {
+            m.label += ", ";
+            m.label += cc->valuestring;
+        }
+        out.push_back(std::move(m));
     }
-    cJSON *r0 = cJSON_GetArrayItem(results, 0);
-    cJSON *lat_j = cJSON_GetObjectItemCaseSensitive(r0, "latitude");
-    cJSON *lon_j = cJSON_GetObjectItemCaseSensitive(r0, "longitude");
-    if (!cJSON_IsNumber(lat_j) || !cJSON_IsNumber(lon_j)) {
-        cJSON_Delete(j);
-        err = "geo coords";
-        return false;
-    }
-    out.lat = lat_j->valuedouble;
-    out.lon = lon_j->valuedouble;
-    out.location = weather_sanitize_ascii(city);
     cJSON_Delete(j);
+    if (out.empty()) { err = "no matches"; return false; }
+    return true;
+}
+
+static bool fetch_geo_city(const std::string &city, GeoData &out, std::string &err)
+{
+    std::vector<weather_city_match> m;
+    if (!geocode_search(city.c_str(), 1, m, err)) {
+        if (err == "no matches") err = "city not found";
+        return false;
+    }
+    out.lat = m[0].lat;
+    out.lon = m[0].lon;
+    out.location = weather_sanitize_ascii(city);
     return true;
 }
 
@@ -1024,15 +1056,9 @@ void weather_set_user_city(const char *city)
     // Drop the cached lat/lon *and* the cached forecast: they belong to the
     // old source (weather_cache_load_geo/_forecast would refuse them on the
     // key check anyway), so the next fetch resolves the new one from scratch.
-    p.remove("ver");
-    p.remove("key");
-    p.remove("loc");
-    p.remove("lat");
-    p.remove("lon");
-    p.remove("fcv");
-    p.remove("fck");
-    p.remove("fcd");
+    // The HAL cache owns those keys — see weather_cache_clear().
     p.end();
+    weather_cache_clear();
 #else
     (void)city;
 #endif
@@ -1049,21 +1075,12 @@ void weather_set_user_location(const char *city, double lat, double lon)
         weather_set_user_city("");
         return;
     }
-    Preferences p;
-    if (!p.begin(WEATHER_PREFS_NS, false)) return;
-    p.putString("user_city", city);
-    p.putInt("ver", WEATHER_CACHE_VER);
-    p.putString("key", city);       // must match `key` built in do_fetch()
-    p.putString("loc", city);       // displayed location label
-    p.putFloat("lat", (float)lat);
-    p.putFloat("lon", (float)lon);
-    // The new location shares the NVS namespace with any leftover forecast
-    // from the previous city; drop it so the next fetch starts clean rather
-    // than briefly rendering the old city's forecast under the new label.
-    p.remove("fcv");
-    p.remove("fck");
-    p.remove("fcd");
-    p.end();
+    weather_set_user_city(city);            // stores user_city, drops the old cache
+    GeoData g;
+    g.location = city;
+    g.lat = lat;
+    g.lon = lon;
+    weather_cache_save_geo(weather_cache_key(city), g);   // key must match do_fetch()
 #else
     (void)city; (void)lat; (void)lon;
 #endif
@@ -1079,51 +1096,7 @@ bool weather_search_cities(const char *query,
 {
     out.clear();
 #ifdef ARDUINO
-    if (!query || !*query) { err = "empty query"; return false; }
-
-    char url[384];
-    snprintf(url, sizeof(url),
-        "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=10&format=json",
-        hal::url_encode(query).c_str());
-
-    std::string body;
-    if (!hw_http_get_string(url, body, &err)) return false;
-
-    cJSON *j = cJSON_Parse(body.c_str());
-    if (!j) { err = "search parse"; return false; }
-
-    cJSON *results = cJSON_GetObjectItemCaseSensitive(j, "results");
-    if (!cJSON_IsArray(results)) { cJSON_Delete(j); err = "no matches"; return false; }
-
-    int n = cJSON_GetArraySize(results);
-    for (int i = 0; i < n; ++i) {
-        cJSON *r = cJSON_GetArrayItem(results, i);
-        cJSON *nm  = cJSON_GetObjectItemCaseSensitive(r, "name");
-        cJSON *a1  = cJSON_GetObjectItemCaseSensitive(r, "admin1");
-        cJSON *cc  = cJSON_GetObjectItemCaseSensitive(r, "country");
-        cJSON *lat = cJSON_GetObjectItemCaseSensitive(r, "latitude");
-        cJSON *lon = cJSON_GetObjectItemCaseSensitive(r, "longitude");
-        if (!cJSON_IsString(nm) || !cJSON_IsNumber(lat) || !cJSON_IsNumber(lon)) continue;
-
-        weather_city_match m;
-        m.name  = nm->valuestring;
-        m.lat   = lat->valuedouble;
-        m.lon   = lon->valuedouble;
-        m.label = m.name;
-        if (cJSON_IsString(a1) && a1->valuestring && *a1->valuestring &&
-            strcmp(a1->valuestring, nm->valuestring) != 0) {
-            m.label += ", ";
-            m.label += a1->valuestring;
-        }
-        if (cJSON_IsString(cc) && cc->valuestring && *cc->valuestring) {
-            m.label += ", ";
-            m.label += cc->valuestring;
-        }
-        out.push_back(std::move(m));
-    }
-    cJSON_Delete(j);
-    if (out.empty()) { err = "no matches"; return false; }
-    return true;
+    return geocode_search(query, 10, out, err);
 #else
     (void)query;
     err = "emulator unsupported";
