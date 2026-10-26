@@ -109,7 +109,7 @@ void run_chat_step(const std::string &mode, const std::string &text, size_t pcm_
  * Notes step of test.callback: seed /notes on the int and sd volumes, then run
  * the notes sync (mode "github") or the copy-to-phone path (mode "phone")
  * against the phone and report {step:"notes", ok, code, msg, uploaded, already,
- * errors, seeded} as evt.test.result. `seeded` maps each seeded path to its
+ * deleted, kept, errors, seeded} as evt.test.result. `seeded` maps each seeded path to its
  * bytes in lowercase hex, so the caller can recompute the CRCs the phone sees.
  */
 void run_notes_step(const std::string &mode) {
@@ -206,6 +206,10 @@ void run_notes_step(const std::string &mode) {
         .int_val(r.is_ok() ? r.value().uploaded : 0)
         .key("already")
         .int_val(r.is_ok() ? r.value().already : 0)
+        .key("deleted")
+        .int_val(r.is_ok() ? r.value().deleted : 0)
+        .key("kept")
+        .int_val(r.is_ok() ? r.value().kept : 0)
         .key("errors")
         .int_val(r.is_ok() ? static_cast<int64_t>(r.value().errors.size()) : 0)
         .key("seeded")

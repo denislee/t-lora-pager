@@ -3,7 +3,7 @@ import Foundation
 import FoundationNetworking
 #endif
 
-@testable import PagerKit
+import PagerKit
 
 // MARK: - Fake GitHub repo
 

@@ -50,7 +50,7 @@ LEGACY_DEVICE = $(shell command -v ios-deploy >/dev/null 2>&1 && \
 m = [re.search(r'Found (\S+) .*?, iphoneos, [^,]*, (\d+)\.(\d+)', l) for l in sys.stdin]; \
 print(next((f'{x.group(1)} {x.group(2)}.{x.group(3)}' for x in m if x and int(x.group(2)) < 17), ''))")
 
-.PHONY: gen test test-linux sim device device-run device-console device-log clean clean-device help
+.PHONY: gen test test-linux notes-e2e sim device device-run device-console device-log clean clean-device help
 
 # Regenerate PagerCompanion.xcodeproj from project.yml. The .xcodeproj is not
 # committed, so run this after any change to project.yml or to the file layout.
@@ -65,6 +65,12 @@ test:
 # package can read ../../protocol/vectors/*.json.
 test-linux:
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(REPO):/repo -w /repo/ios/PagerKit swift:6.0-jammy swift test
+
+# Notes viewer + move-to-GitHub end to end against the running emulator
+# (`.pio/build/emulator_lora_pager/program`, TCP 7600) with an in-process fake
+# GitHub. Linux/Docker; host networking reaches 127.0.0.1:7600.
+notes-e2e:
+	docker run --rm --network host --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(REPO):/repo -w /repo/ios/NotesE2E swift:6.0-jammy swift run
 
 # Build the app for the iOS Simulator (no signing required).
 sim:
@@ -141,7 +147,7 @@ clean-device:
 	rm -rf $(DD)
 
 clean:
-	rm -rf PagerKit/.build DerivedData
+	rm -rf PagerKit/.build NotesE2E/.build DerivedData
 
 help:
 	@echo "PagerCompanion — iOS companion app"
@@ -150,6 +156,7 @@ help:
 	@echo "  make gen         - generate PagerCompanion.xcodeproj from project.yml"
 	@echo "  make test        - run PagerKit tests on this host (macOS: swift test)"
 	@echo "  make test-linux  - run PagerKit tests on Linux in Docker (swift:6.0-jammy)"
+	@echo "  make notes-e2e   - notes viewer/move checks against the running emulator (Docker)"
 	@echo "  make sim         - build for the iOS Simulator (xcodebuild)"
 	@echo "  make device      - build, sign and install on the connected iPhone"
 	@echo "                     (DEVICE_TYPE=iPad, or DEVICE=<udid> to pick one)"
