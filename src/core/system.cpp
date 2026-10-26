@@ -11,6 +11,7 @@
 #include "ui_post.h"
 #include "../ui_define.h"
 #include "../hal/hub.h"
+#include "../hal/storage.h"
 
 #include "../apps/menu_app.h"
 
@@ -301,7 +302,7 @@ void System::setupGlobalUI() {
             lv_obj_set_style_text_color(obj, c, 0);
         };
 
-        bool sd_online = (HW_SD_ONLINE & hw_get_device_online());
+        bool sd_online = hw_sd_online();
         if (sd_online) {
             lv_obj_add_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
         } else {

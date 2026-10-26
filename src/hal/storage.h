@@ -7,6 +7,8 @@
 #include "types.h"
 
 void hw_mount_sd();
+// True while the SD card is mounted (HW_SD_ONLINE in the device probe).
+bool hw_sd_online();
 // SD total/used/free; cached and re-read only after a filesystem-generation
 // bump or a mount/unmount (P7.28).
 void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free);

@@ -762,7 +762,7 @@ static void ensure_chat_dir()
 {
     static bool s_chat_dir_ok = false;
     if (s_chat_dir_ok) return;
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return;
+    if (!hw_sd_online()) return;
     SD.mkdir(CHAT_DIR); // no-op if it already exists
     s_chat_dir_ok = true;
 }
@@ -777,7 +777,7 @@ static void mic_btn_cb(lv_event_t *)
             log_append("err: ", "no microphone");
             return;
         }
-        if (!(HW_SD_ONLINE & hw_get_device_online())) {
+        if (!hw_sd_online()) {
             log_append("err: ", "SD card not mounted");
             return;
         }

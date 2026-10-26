@@ -61,7 +61,7 @@ static inline void wait_pending_save_in_dir(const char *) {}
 static void ensure_notes_dir()
 {
     if (!FFat.exists(NOTES_DIR)) FFat.mkdir(NOTES_DIR);
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         core::ScopedSpiLock lock;
         if (!SD.exists(NOTES_DIR)) SD.mkdir(NOTES_DIR);
     }
@@ -142,7 +142,7 @@ void hw_get_storage_info(uint64_t &total, uint64_t &used, uint64_t &free)
     free = 0;
 #if defined(ARDUINO)
 #if defined(HAS_SD_CARD_SOCKET)
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         // Sample both keys before the read, so a write or remount that lands
         // during it leaves the cache keyed to the older state (re-read next time).
         const uint32_t epoch = s_sd_info_epoch.load();
@@ -208,6 +208,11 @@ void hw_mount_sd()
     }
     hw_storage_info_invalidate();
 #endif
+}
+
+bool hw_sd_online()
+{
+    return (HW_SD_ONLINE & hw_get_device_online()) != 0;
 }
 
 static std::atomic<void (*)()> s_sd_unmount_hook{nullptr};
@@ -369,7 +374,7 @@ bool hw_delete_file(const char *path)
     wait_pending_save_for(str);
 
     bool res_sd = false;
-    bool sd_online = (HW_SD_ONLINE & hw_get_device_online());
+    bool sd_online = hw_sd_online();
     if (sd_online) {
         core::ScopedSpiLock lock;
         res_sd = SD.remove(str);
@@ -426,7 +431,7 @@ bool hw_delete_path(const char *path, bool use_sd)
     wait_pending_save_under(buf);
     std::string str(buf); // delete_path_recursive uses std::string children list
     if (use_sd) {
-        if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
+        if (!hw_sd_online()) return false;
         core::ScopedSpiLock lock;
         return delete_path_recursive(SD, str);
     }
@@ -449,7 +454,7 @@ bool hw_delete_path(const char *path, bool use_sd)
 static File open_preferred(const char *path, core::MaybeSpiLock &lock, bool sd_first)
 {
     auto open_sd = [&]() -> File {
-        if (!(HW_SD_ONLINE & hw_get_device_online())) return File();
+        if (!hw_sd_online()) return File();
         lock.acquire();
         File f = SD.open(path, FILE_READ);
         if (!f) lock.release();
@@ -531,7 +536,7 @@ bool hw_read_sd_bytes_raw(const char *path, std::vector<uint8_t> &buf)
 {
     buf.clear();
 #ifdef ARDUINO
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
+    if (!hw_sd_online()) return false;
     char str[256];
     normalize_path(path, str, sizeof(str));
     wait_pending_save_for(str);
@@ -549,7 +554,7 @@ bool hw_read_sd_stream(const char *path, size_t chunk_bytes,
 {
 #ifdef ARDUINO
     if (!sink || chunk_bytes == 0) return false;
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
+    if (!hw_sd_online()) return false;
     char str[256];
     normalize_path(path, str, sizeof(str));
     wait_pending_save_for(str);
@@ -639,7 +644,7 @@ void hw_get_sd_txt_files(std::vector<std::string> &list)
     list.clear();
 #ifdef ARDUINO
     wait_pending_save();
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         std::vector<std::string> names;
         {
             core::ScopedSpiLock lock;
@@ -741,7 +746,7 @@ void hw_list_sd_entries(std::vector<HwDirEntry> &list, const char *filter_ext,
         normalize_path(dirname, dir, sizeof(dir));
         wait_pending_save_in_dir(dir);
     }
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         core::ScopedSpiLock lock;
         list_entries(list, SD, dirname, filter_ext);
     }
@@ -818,10 +823,10 @@ void hw_prune_internal_storage(void (*cb)(int, int, const char *))
     }
 
     // SD is required — without it we'd be deleting the only copy.
-    bool sd_online = (HW_SD_ONLINE & hw_get_device_online());
+    bool sd_online = hw_sd_online();
     if (!sd_online) {
         hw_mount_sd();
-        sd_online = (HW_SD_ONLINE & hw_get_device_online());
+        sd_online = hw_sd_online();
     }
     if (!sd_online) {
         if (cb) cb(0, 0, "SD unavailable; eviction skipped.");
@@ -948,7 +953,7 @@ static bool save_preferred_file_impl(const char *path, const char *content, std:
         *error = "Cannot write to Internal.";
     }
 
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         INPUT_PROF_SPAN("save.sd");
         core::ScopedSpiLock lock;
         hal::fs_write_all(SD, str, payload.data(), payload.size());
@@ -1182,7 +1187,7 @@ void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t
     list_files(infos, FFat, NOTES_DIR, ".txt", cb);
 
     // Scan SD if available
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         std::vector<std::string> sd_infos;
         {
             core::ScopedSpiLock lock;
@@ -1223,7 +1228,7 @@ bool hw_save_preferred_bytes(const char *path, const uint8_t *buf, size_t len, s
     if (!ok && error) *error = "Cannot write to Internal.";
 
     // Redundant save to SD if available
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         core::ScopedSpiLock lock;
         hal::fs_write_all(SD, str, buf, len);
     }

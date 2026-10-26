@@ -118,7 +118,7 @@ bool remove_recursive(fs::FS &fs, const std::string &path) {
 
 bool vol_available(Vol v) {
     if (v == Vol::Int) return true;
-    return (HW_SD_ONLINE & hw_get_device_online()) != 0;
+    return hw_sd_online();
 }
 
 bool vol_list(Vol v, const std::string &dir, std::vector<VolEntry> &out) {

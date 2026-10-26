@@ -608,15 +608,6 @@ static bool raw_remove(const ProtFile &pf)
 #endif
 }
 
-static bool sd_online()
-{
-#ifdef ARDUINO
-    return (HW_SD_ONLINE & hw_get_device_online()) != 0;
-#else
-    return false;
-#endif
-}
-
 /* Protected names on FFat and/or SD, grouped by name (P7.7): notes/<leaf>.txt
  * from hw_get_internal_txt_files / hw_get_sd_txt_files (same NOTES_DIR walk,
  * same path form) plus the journal index at each root. The SD card is mounted
@@ -639,8 +630,8 @@ static void enumerate_names(std::vector<nc_migrate::NameCopies> &out,
     }
 #ifdef ARDUINO
     if (want_sd) {
-        if (!sd_online()) hw_mount_sd();
-        if (sd_online()) {
+        if (!hw_sd_online()) hw_mount_sd();
+        if (hw_sd_online()) {
             std::vector<std::string> txt;
             hw_get_sd_txt_files(txt);
             for (auto &p : txt) {
@@ -757,7 +748,7 @@ static bool settle_staged(bool roll_forward,
         enumerate_names(walked, true, true);
         known = &walked;
     }
-    if (pending_touches_sd() && !sd_online()) complete = false;   /* retry with the card in */
+    if (pending_touches_sd() && !hw_sd_online()) complete = false;   /* retry with the card in */
 
     for (const auto &n : *known) {
         for (int v = 0; v < 2; v++) {
@@ -1066,7 +1057,7 @@ static bool read_preferred_header(const char *path, uint8_t out[8 + NC_SALT_LEN]
         f.close();
         return ok;
     }
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return false;
+    if (!hw_sd_online()) return false;
     core::ScopedSpiLock lock;
     f = SD.open(path, FILE_READ);
     if (!f) return false;
@@ -1223,8 +1214,8 @@ bool notes_crypto_encrypt_sd(int *scanned, int *encrypted,
 #ifdef ARDUINO
     std::string pw = session_passphrase();
     if (pw.empty()) return false;
-    if (!sd_online()) hw_mount_sd();
-    if (!sd_online()) { scrub(pw); return false; }
+    if (!hw_sd_online()) hw_mount_sd();
+    if (!hw_sd_online()) { scrub(pw); return false; }
 
     int n = encrypt_plain_names(pw, false, true, scanned, cb);
     if (encrypted) *encrypted = n;

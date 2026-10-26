@@ -47,7 +47,7 @@ bool hw_copy_all_notes_to_hub(int *copied, int *failed, std::string *error,
     hw_get_internal_txt_files(internal_names);
 
     std::vector<std::string> sd_names;
-    if (HW_SD_ONLINE & hw_get_device_online()) {
+    if (hw_sd_online()) {
         hw_get_sd_txt_files(sd_names);
     }
 
@@ -120,10 +120,10 @@ bool hw_copy_internal_to_sd(int *copied, int *failed, std::string *error, void (
     if (failed) *failed = 0;
 #ifdef ARDUINO
     hw_save_flush();  // IS.2: copy the note a background save is still writing
-    if (!(HW_SD_ONLINE & hw_get_device_online())) {
+    if (!hw_sd_online()) {
         // Attempt to mount before giving up.
         hw_mount_sd();
-        if (!(HW_SD_ONLINE & hw_get_device_online())) {
+        if (!hw_sd_online()) {
             if (error) *error = "SD card not available.";
             return false;
         }
