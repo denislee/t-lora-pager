@@ -438,10 +438,11 @@ void hw_connectivity_init()
 #endif
 }
 
-void hw_load_setting()
+// DC2.4.24: one set of defaults for the hardware and the emulator, so the
+// emulator (and the UI_SHOTS sweep) renders with the fonts and levels the
+// device starts with. Only the NVS load below is hardware-only.
+static void load_default_settings()
 {
-#ifdef ARDUINO
-    // Initialize with defaults first
     user_setting.brightness_level = 8;  // P4.1/P4.3: half of the pager's 16-step AW9364 clamp
     user_setting.keyboard_bl_level = 80;
     user_setting.disp_timeout_second = 60; // P4.1: 60 s enables auto-sleep out of the box
@@ -478,7 +479,12 @@ void hw_load_setting()
     user_setting.cpu_freq_mhz = 240;
     user_setting.msc_prefer_sd = 1;
     user_setting.prune_internal = 0;
+}
 
+void hw_load_setting()
+{
+    load_default_settings();
+#ifdef ARDUINO
     prefs.begin(NVS_NAME);
     const size_t stored_size = prefs.getBytesLength(NVS_NAME);
     constexpr size_t kVersionedSize = sizeof(SettingsHeader) + sizeof(user_setting_params_t);
@@ -515,15 +521,6 @@ void hw_load_setting()
     if (needs_save) {
         save_user_setting_nvs();
     }
-#else
-    user_setting.brightness_level = 8;   // P4.1/P4.3: match hardware default
-    user_setting.keyboard_bl_level = 255;
-    user_setting.disp_timeout_second = 60; // P4.1: 60 s enables auto-sleep out of the box
-    user_setting.charger_current = 1000;
-    user_setting.charger_enable = true;
-    user_setting.nfc_enable = 0;
-    user_setting.speaker_enable = 0;
-    user_setting.haptic_enable = 1;
 #endif
 }
 

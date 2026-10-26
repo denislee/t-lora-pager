@@ -64,6 +64,9 @@ typedef enum {
 #ifndef DEVICE_CHARGE_STEPS
 #define DEVICE_CHARGE_STEPS         1
 #endif
+#ifndef DEVICE_CHARGE_CURRENT_RECOMMEND
+#define DEVICE_CHARGE_CURRENT_RECOMMEND 1000  // an hw_set_charger_current_level() step
+#endif
 #define USING_RADIO_NAME            "SX12XX"
 
 // Hardware online status bit definitions
