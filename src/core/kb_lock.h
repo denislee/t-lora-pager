@@ -7,8 +7,7 @@
  * keyboard (`instance.kb`), the XL9555 expander behind `instance.powerControl()`
  * and `instance.io`, the BQ25896 charger (`instance.ppm`) / AXP PMU, the
  * BQ27220 gauge, the RTC, the audio codec's control port, and the IMU.
- * `core::ScopedKbLock` is kept as an alias so the keyboard call sites did not
- * have to change. The file keeps its old name for the same reason.
+ * The file keeps its old name so its includers did not have to change.
  *
  * Why every user needs it, writes included: arduino-esp32's HAL lock covers
  * each Wire transaction, but a read's bytes are then taken from Wire's shared
@@ -56,6 +55,5 @@ public:
 };
 
 // Pre-P7.45 name; the same lock.
-using ScopedKbLock = ScopedI2cLock;
 
 } // namespace core

@@ -317,9 +317,9 @@ void hw_get_monitor_params(monitor_params_t &params)
     // its shared rxBuffer unlocked, so a kb_reader poll landing in that window
     // made the gauge read come up short and readBytes() block for its full
     // timeout (measured: 1012 ms, ~1 in 20 link-task reads). Serialise the
-    // whole sweep with the keyboard lock (order instance -> kb is allowed);
+    // whole sweep with the I2C lock (order instance -> i2c is allowed);
     // this also guards s_cached_monitor_params against concurrent callers.
-    core::ScopedKbLock kb_lock;
+    core::ScopedI2cLock kb_lock;
 
     params = monitor_params_t{};
 

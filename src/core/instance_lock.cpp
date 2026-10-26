@@ -38,9 +38,7 @@ void instance_lock_init()
 void instanceLockTake()
 {
     if (s_instance_mutex == nullptr) return;
-#ifdef INPUT_PROFILE
-    uint64_t t0 = core::prof::now_us();
-#endif
+    INPUT_PROF_T0(t0);
     if (xSemaphoreTake(s_instance_mutex, portMAX_DELAY) != pdTRUE) {
         log_e("instanceLockTake: xSemaphoreTake failed");
         assert(0);

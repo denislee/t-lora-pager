@@ -4,6 +4,7 @@
  */
 #include "secrets.h"
 #include "notes_crypto.h"
+#include "pbkdf2_sha256.h"  // secure_wipe
 #include "str_encode.h"
 
 #include <cstring>
@@ -302,8 +303,7 @@ void secret_purge_legacy(const char *ns, const char *legacy_key)
 void secret_scrub(std::string &s)
 {
     if (s.empty()) return;
-    volatile char *p = &s[0];
-    for (size_t i = 0; i < s.size(); i++) p[i] = 0;
+    secure_wipe(&s[0], s.size());
     s.clear();
     s.shrink_to_fit();
 }

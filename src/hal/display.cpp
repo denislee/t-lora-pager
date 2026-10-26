@@ -21,7 +21,7 @@ void hw_set_disp_backlight(uint8_t level)
 void hw_set_kb_backlight(uint8_t level)
 {
 #if defined(ARDUINO) && defined(USING_INPUT_DEV_KEYBOARD)
-    core::ScopedKbLock lock;
+    core::ScopedI2cLock lock;
     instance.kb.setBrightness(level);
 #endif
 }
@@ -39,7 +39,7 @@ uint16_t hw_get_disp_max_brightness()
 void hw_enable_keyboard()
 {
 #if defined(ARDUINO)
-    core::ScopedKbLock lock;
+    core::ScopedI2cLock lock;
 #if defined(ARDUINO_T_LORA_PAGER)
     instance.initKeyboard();
 #endif
@@ -61,7 +61,7 @@ void hw_disable_keyboard()
 {
 #if defined(ARDUINO)
 #if defined(ARDUINO_T_LORA_PAGER)
-    core::ScopedKbLock lock;
+    core::ScopedI2cLock lock;
     instance.kb.end();
 #endif
 #endif
@@ -75,7 +75,7 @@ bool hw_has_keyboard()
 void hw_set_keyboard_read_callback(void(*read)(int state, char &c))
 {
 #if defined(ARDUINO) && defined(USING_INPUT_DEV_KEYBOARD)
-    core::ScopedKbLock lock;
+    core::ScopedI2cLock lock;
     instance.kb.setCallback(read);
 #endif
 }

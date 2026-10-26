@@ -87,10 +87,8 @@ void lvgl_task_fn(void *)
         uint32_t next;
         {
             core::ScopedInstanceLock lock;
-#ifdef INPUT_PROFILE
-            core::prof::frame_begin();
-            uint64_t f0 = core::prof::now_us();
-#endif
+            INPUT_PROF(core::prof::frame_begin());
+            INPUT_PROF_T0(f0);
             next = lv_timer_handler();
             INPUT_PROF(core::prof::frame(core::prof::now_us() - f0));
             apply_boot_backlight();

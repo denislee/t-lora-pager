@@ -299,7 +299,7 @@ static void test_wipe(void)
     uint8_t buf[32];
     memset(buf, 0xAA, sizeof(buf));
 
-    hal::pbkdf2_sha256_wipe(buf, sizeof(buf));
+    hal::secure_wipe(buf, sizeof(buf));
 
     for (size_t i = 0; i < sizeof(buf); ++i) {
         TEST_ASSERT_EQUAL_HEX8(0x00, buf[i]);

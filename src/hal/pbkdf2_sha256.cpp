@@ -133,7 +133,7 @@ void stream_final(Sha256Stream *s, uint32_t out[8])
 
 }  // namespace
 
-void pbkdf2_sha256_wipe(void *buf, size_t n)
+void secure_wipe(void *buf, size_t n)
 {
     /* Calling memset through a volatile function pointer stops the compiler
      * from proving the store dead and dropping it. */
@@ -156,8 +156,8 @@ void pbkdf2_sha256_init(Pbkdf2Sha256Ctx *ctx, const uint8_t *pw, size_t pw_len)
         stream_update(&s, pw, pw_len);
         stream_final(&s, d);
         for (int i = 0; i < 8; i++) store_be32(key + 4 * i, d[i]);
-        pbkdf2_sha256_wipe(&s, sizeof(s));
-        pbkdf2_sha256_wipe(d, sizeof(d));
+        secure_wipe(&s, sizeof(s));
+        secure_wipe(d, sizeof(d));
     } else if (pw_len > 0) {
         memcpy(key, pw, pw_len);
     }
@@ -170,9 +170,9 @@ void pbkdf2_sha256_init(Pbkdf2Sha256Ctx *ctx, const uint8_t *pw, size_t pw_len)
     memcpy(ctx->ostate, IV256, sizeof(ctx->ostate));
     sha256_compress(ctx->ostate, blk, W);
 
-    pbkdf2_sha256_wipe(key, sizeof(key));
-    pbkdf2_sha256_wipe(blk, sizeof(blk));
-    pbkdf2_sha256_wipe(W, sizeof(W));
+    secure_wipe(key, sizeof(key));
+    secure_wipe(blk, sizeof(blk));
+    secure_wipe(W, sizeof(W));
 }
 
 void pbkdf2_sha256_block(const Pbkdf2Sha256Ctx *ctx,
@@ -204,7 +204,7 @@ void pbkdf2_sha256_block(const Pbkdf2Sha256Ctx *ctx,
         stream_update(&st, salt, salt_len);
         stream_update(&st, idx, sizeof(idx));
         stream_final(&st, s);
-        pbkdf2_sha256_wipe(&st, sizeof(st));
+        secure_wipe(&st, sizeof(st));
     }
     for (int i = 0; i < 8; i++) ob[i] = s[i];
     memcpy(s, ctx->ostate, sizeof(s));
@@ -224,12 +224,12 @@ void pbkdf2_sha256_block(const Pbkdf2Sha256Ctx *ctx,
 
     for (int i = 0; i < 8; i++) store_be32(out + 4 * i, t[i]);
 
-    pbkdf2_sha256_wipe(W, sizeof(W));
-    pbkdf2_sha256_wipe(ib, sizeof(ib));
-    pbkdf2_sha256_wipe(ob, sizeof(ob));
-    pbkdf2_sha256_wipe(s, sizeof(s));
-    pbkdf2_sha256_wipe(u, sizeof(u));
-    pbkdf2_sha256_wipe(t, sizeof(t));
+    secure_wipe(W, sizeof(W));
+    secure_wipe(ib, sizeof(ib));
+    secure_wipe(ob, sizeof(ob));
+    secure_wipe(s, sizeof(s));
+    secure_wipe(u, sizeof(u));
+    secure_wipe(t, sizeof(t));
 }
 
 bool pbkdf2_hmac_sha256(const uint8_t *pw, size_t pw_len,
@@ -254,8 +254,8 @@ bool pbkdf2_hmac_sha256(const uint8_t *pw, size_t pw_len,
         off += take;
     }
 
-    pbkdf2_sha256_wipe(&ctx, sizeof(ctx));
-    pbkdf2_sha256_wipe(blk, sizeof(blk));
+    secure_wipe(&ctx, sizeof(ctx));
+    secure_wipe(blk, sizeof(blk));
     return true;
 }
 

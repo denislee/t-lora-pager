@@ -73,17 +73,13 @@ void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info)
 
 void setup()
 {
-#ifdef INPUT_PROFILE
     // BT.1: read the RTC timer before anything else (and before the vendor
     // begin() switches the slow clock to the 32 kHz crystal).
-    core::prof::boot_pre_app();
-#endif
+    INPUT_PROF(core::prof::boot_pre_app());
     hw_set_cpu_freq(240);
 
     Serial.begin(115200);
-#ifdef INPUT_PROFILE
-    core::prof::boot_mark("setup");
-#endif
+    INPUT_PROF(core::prof::boot_mark("setup"));
 
     core::instance_lock_init();
     core::kb_lock_init();
@@ -118,9 +114,7 @@ void setup()
     instance.begin(disable_flags);
 
     beginLvglHelper(instance);
-#ifdef INPUT_PROFILE
-    core::prof::boot_mark("lvgl helper");
-#endif
+    INPUT_PROF(core::prof::boot_mark("lvgl helper"));
 
     // Arm the SNTP and WiFi event callbacks BEFORE connectivity bring-up —
     // hw_connectivity_init() (called near the end of setup(), after the LVGL
@@ -142,15 +136,11 @@ void setup()
     tzset();
 
     hw_init();
-#ifdef INPUT_PROFILE
-    core::prof::boot_mark("hw_init");
-#endif
+    INPUT_PROF(core::prof::boot_mark("hw_init"));
 
     apps::register_all();
     core::System::getInstance().init();
-#ifdef INPUT_PROFILE
-    core::prof::boot_mark("ui init");
-#endif
+    INPUT_PROF(core::prof::boot_mark("ui init"));
 
     // Passphrase-protected notes: if the session is locked, put an unlock
     // modal on top of the UI before rendering starts. The modal has no cancel
@@ -171,9 +161,7 @@ void setup()
     // so the boot-time NTP sync path is unaffected; the NFC task tolerates
     // discovery starting late (same as a runtime toggle from Settings).
     hw_connectivity_init();
-#ifdef INPUT_PROFILE
-    core::prof::boot_mark("connectivity");
-#endif
+    INPUT_PROF(core::prof::boot_mark("connectivity"));
 
     Serial.println("Start done. run main loop");
 }
@@ -270,6 +258,7 @@ void loop()
         // disp_timeout_second, brightness_level and keyboard_bl_level are
         // cached in the same pass so the dim ladder and auto-sleep see the
         // current setting without a second struct copy per tick.
+        static bool     settings_primed = false;  // DC2.4.27b: boot can be < 1 s
         static uint32_t last_settings_refresh_ms = 0;
         static uint32_t cached_active_freq = 240;
         static uint8_t  cached_disp_timeout_sec = 0;
@@ -277,7 +266,8 @@ void loop()
         static uint8_t  cached_kb_brightness = 8;    // P4.3: user keyboard level
 
         uint32_t now_ms = millis();
-        if (cached_active_freq == 0 || now_ms - last_settings_refresh_ms > 1000) {
+        if (!settings_primed || now_ms - last_settings_refresh_ms > 1000) {
+            settings_primed = true;
             user_setting_params_t settings;
             hw_get_user_setting(settings);
             cached_active_freq       = settings.cpu_freq_mhz;

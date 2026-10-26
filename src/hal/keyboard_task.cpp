@@ -14,7 +14,7 @@
  * into a queue. We then replace the keypad indev's read_cb with one that
  * only drains the queue — zero I2C work on the LVGL task.
  *
- * Lock behaviour: reads take core::ScopedKbLock (kb_lock.h), a keyboard-only
+ * Lock behaviour: reads take core::ScopedI2cLock (kb_lock.h), the Wire bus
  * mutex, NOT the instance mutex the LVGL task holds for each whole frame — so
  * keys are read and queued even while a long frame (app build, save, flush)
  * runs, and applied in one burst when it ends (continue_reading), same as the
@@ -131,10 +131,8 @@ void keyboard_task_fn(void *)
         // thrash the mutex on bursts (fast typing can emit several events
         // per poll).
         {
-#ifdef INPUT_PROFILE
-            uint64_t wait0 = core::prof::now_us();
-#endif
-            core::ScopedKbLock lock;
+            INPUT_PROF_T0(wait0);
+            core::ScopedI2cLock lock;
             INPUT_PROF(core::prof::kb_lock_wait(core::prof::now_us() - wait0));
             bool prev_none = false;
             for (int i = 0; i < 16; ++i) {
@@ -290,7 +288,7 @@ void hw_keyboard_flush_queue()
     if (!s_event_queue) return;
     // Under the keyboard lock so the reader can't be mid-burst between
     // dequeue-able events and its held-char update.
-    core::ScopedKbLock lock;
+    core::ScopedI2cLock lock;
     xQueueReset(s_event_queue);
     s_held_char = '\0';
 }
@@ -299,7 +297,7 @@ void hw_keyboard_flush_queue()
 void hw_keyboard_inject(int state, char c)
 {
     if (!s_event_queue) return;
-    core::ScopedKbLock lock;
+    core::ScopedI2cLock lock;
     enqueue_event({state, c});
 }
 #endif
@@ -336,7 +334,7 @@ void hw_keyboard_task_start()
     // handle goes stale, and the vendor's begin()/end() cycle re-attaches/detaches the ISR so no spurious
     // notifies can reach a dead handle between end() and the next begin().
     {
-        core::ScopedKbLock lock;
+        core::ScopedI2cLock lock;
         instance.kb.setNotifyTask(s_task);
     }
 }

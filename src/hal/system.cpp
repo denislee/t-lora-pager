@@ -196,7 +196,6 @@ struct SettingsHeader {
 #include <LilyGoLib.h>
 #include <esp_mac.h>
 #include <esp_sntp.h>
-#include <esp_heap_caps.h>
 #include <WiFi.h>
 #include <Preferences.h>
 #include "driver/rtc_io.h"
@@ -359,10 +358,6 @@ void hw_init()
     });
 #endif //USING_INPUT_DEV_KEYBOARD
 
-
-#endif
-
-#ifdef ARDUINO
 #if defined(USING_PPM_MANAGE)
     // DC2.3.20: the vendor initPMU() starts the BQ25896 ADC in continuous
     // mode, but nothing reads an ADC result: charge state comes from status
@@ -384,14 +379,7 @@ void hw_init()
     hw_set_gps_powered(false);
     hw_set_speaker_enable(user_setting.speaker_enable);
     hw_set_haptic_enable(user_setting.haptic_enable);
-#endif
 
-    // 80 % charge-limit check every minute while awake (the charge task covers
-    // fake sleep), plus once now.
-    lv_timer_create(charge_limit_timer_cb, 60000, NULL);
-    hw_apply_charge_limit();
-
-#ifdef ARDUINO
     // BT.11: the backlight stays off (AW9364 begin() leaves it at 0) until the
     // LVGL task has flushed the first frame.
     hw_lvgl_task_set_boot_backlight(user_setting.brightness_level);
@@ -420,6 +408,10 @@ void hw_init()
     hw_keyboard_task_start();
 #endif
 
+    // 80 % charge-limit check every minute while awake (the charge task covers
+    // fake sleep), plus once now.
+    lv_timer_create(charge_limit_timer_cb, 60000, NULL);
+    hw_apply_charge_limit();
 }
 
 // Applies the four connectivity toggles from the already-loaded user_setting.
@@ -908,7 +900,7 @@ void hw_deep_sleep_wheel_wake()
 #ifdef HAS_SD_CARD_SOCKET
     hw_sd_unmount_for_sleep();  // P7.34, see hw_low_power_loop()
 #endif
-    core::ScopedKbLock kb_lock;  // sleep() calls kb.end()
+    core::ScopedI2cLock kb_lock;  // sleep() calls kb.end()
     instance.sleep((WakeupSource_t)(WAKEUP_SRC_ROTARY_BUTTON));
 #else
     hw_shutdown();
@@ -942,7 +934,7 @@ void hw_low_power_loop()
     hw_sd_unmount_for_sleep();
 #endif
     {
-        core::ScopedKbLock kb_lock;  // lightSleep()/sleep() call kb.end()/begin()
+        core::ScopedI2cLock kb_lock;  // lightSleep()/sleep() call kb.end()/begin()
         if (user_setting.sleep_mode == 1) {
             hw_sleep();
         } else {

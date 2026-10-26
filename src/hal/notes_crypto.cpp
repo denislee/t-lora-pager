@@ -25,7 +25,6 @@
 #include <SD.h>
 #include <esp_random.h>
 #include <mbedtls/aes.h>
-#include <mbedtls/platform_util.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -96,15 +95,7 @@ static std::atomic<bool> s_prewarm_running{false};
 struct PrewarmLock { PrewarmLock() {} ~PrewarmLock() {} };
 #endif
 
-static void zeroize(void *buf, size_t n)
-{
-#ifdef ARDUINO
-    mbedtls_platform_zeroize(buf, n);
-#else
-    volatile uint8_t *p = (volatile uint8_t *)buf;
-    while (n--) *p++ = 0;
-#endif
-}
+static inline void zeroize(void *buf, size_t n) { hal::secure_wipe(buf, n); }
 
 /* Wipe the primed slot. Callers must hold prewarm_mutex(). */
 static void prewarm_clear_locked()
@@ -1156,11 +1147,7 @@ static std::string session_passphrase()
     return g_unlocked ? g_passphrase : std::string();
 }
 
-static void scrub(std::string &s)
-{
-    if (!s.empty()) zeroize(&s[0], s.size());
-    s.clear();
-}
+static inline void scrub(std::string &s) { hal::secret_scrub(s); }
 
 /* Encrypt the plaintext copies of every protected name under `pw` (P7.7):
  * the 8-byte probe skips copies that are already `enc` blobs without reading

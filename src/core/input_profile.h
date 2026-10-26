@@ -28,7 +28,7 @@ uint64_t now_us();
 // before the give.
 void lock_acquired(uint64_t wait_us);
 void lock_released();
-// Keyboard reader's own lock wait (after IS.1 it takes core::ScopedKbLock).
+// Keyboard reader's own lock wait (core::ScopedI2cLock since IS.1 / P7.45).
 void kb_lock_wait(uint64_t wait_us);
 // Key enqueue->dequeue latency, recorded by the LVGL keypad read_cb.
 void key_latency(uint64_t us);
@@ -70,7 +70,10 @@ private:
 #define INPUT_PROF_CAT(a, b) INPUT_PROF_CAT2(a, b)
 #define INPUT_PROF_SPAN(name) ::core::prof::Span INPUT_PROF_CAT(input_prof_span_, __LINE__)(name)
 #define INPUT_PROF(stmt) do { stmt; } while (0)
+// Declare `uint64_t var = now_us()` for a later INPUT_PROF(... now_us() - var).
+#define INPUT_PROF_T0(var) uint64_t var = ::core::prof::now_us()
 #else
 #define INPUT_PROF_SPAN(name) ((void)0)
 #define INPUT_PROF(stmt) ((void)0)
+#define INPUT_PROF_T0(var) ((void)0)
 #endif

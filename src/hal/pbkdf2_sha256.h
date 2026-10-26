@@ -24,8 +24,8 @@
 namespace hal {
 
 /* HMAC-SHA256 key schedule for one passphrase: the SHA-256 chaining states
- * after absorbing (K ^ ipad) and (K ^ opad). Secret: wipe with
- * pbkdf2_sha256_wipe() when done. */
+ * after absorbing (K ^ ipad) and (K ^ opad). Secret: wipe with secure_wipe()
+ * when done. */
 struct Pbkdf2Sha256Ctx {
     uint32_t istate[8];
     uint32_t ostate[8];
@@ -51,7 +51,9 @@ bool pbkdf2_hmac_sha256(const uint8_t *pw, size_t pw_len,
                         uint32_t iterations,
                         uint8_t *out, size_t out_len);
 
-/* Wipe `n` bytes in a way the compiler cannot elide. */
-void pbkdf2_sha256_wipe(void *buf, size_t n);
+/* Wipe `n` bytes in a way the compiler cannot elide. The project's one
+ * secure-wipe primitive (DC2.4.27b): notes_crypto and hal::secret_scrub()
+ * use it too. */
+void secure_wipe(void *buf, size_t n);
 
 }  // namespace hal
