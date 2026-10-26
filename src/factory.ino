@@ -28,17 +28,12 @@ extern "C" void lilygo_request_fake_sleep_toggle();
 #endif
 
 #include "hal/timezone.h"
-
-
-/* Defined in ui_lock.cpp — shows the unlock modal if crypto is enabled and
- * the session is locked. No-op otherwise. */
-void ui_device_lock_enforce();
+#include "ui/modals.h"  // ui_device_lock_enforce (ui_lock.cpp)
 
 // Callback function (gets called when time adjusts via NTP)
 static void time_available(struct timeval *t)
 {
     Serial.println("Got time adjustment from NTP!");
-    // printLocalTime();
     if (instance.getDeviceProbe() & HW_RTC_ONLINE) {
         core::ScopedI2cLock i2c;  // P7.45
         instance.rtc.hwClockWrite();

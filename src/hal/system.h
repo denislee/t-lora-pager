@@ -29,11 +29,11 @@ void hw_set_date_time(struct tm &timeinfo);
 // Cheap wall-clock read for frequently-polled *display* use (the status-bar
 // clock, once per second). Reads the ESP32 system clock via
 // time()/localtime_r instead of hitting the external RTC over I2C, so it
-// does not contend the instance mutex with the 10 ms keyboard task. The
-// system clock is the correct source of truth here: hw_init() seeds it from
-// the RTC at boot, and NTP/GPS/manual sets keep both in step. This firmware
-// never deep-sleeps (fake/light sleep preserves the system clock), so the
-// value stays valid across sleep. Use hw_get_date_time() when the RTC is the
+// does not contend the I2C bus with the 10 ms keyboard reader. The system
+// clock is the correct source of truth here: hw_init() seeds it from the RTC
+// at boot, and NTP/GPS/manual sets keep both in step. Fake and light sleep
+// preserve the system clock; a deep sleep (sleep_mode 1, the wheel hold)
+// reboots and re-seeds it from the RTC, so the value stays valid. Use hw_get_date_time() when the RTC is the
 // authority (settings, one-off timestamps).
 void hw_get_wall_clock(struct tm &timeinfo);
 
@@ -96,7 +96,8 @@ void hw_get_heap_stats(heap_stats_t &s);
 // the Arduino API (which doesn't exist there).
 void     hw_set_cpu_freq(uint32_t mhz);
 
-// P6.11 — called from the keyboard/rotary reader tasks on every input event.
+// P6.11 — called from the keyboard reader task and the vendor rotary task's
+// event hook on every input event.
 // Restores the user's active CPU frequency immediately (loop() drops to 80 MHz
 // after 2 s idle and only restores it on its own 50 ms tick, so the click that
 // opens an app used to build and render at a third of the speed), and stamps
@@ -110,7 +111,7 @@ uint32_t hw_ms_since_input();
 // current radio state. Single owner for a rule that used to be duplicated
 // (and could drift) between hw_power_down_all() and factory.ino's loop():
 // BLE and WiFi both need >= 80 MHz, so return 80 while either link is up;
-// otherwise return the deep idle floor. Cheap — two bool reads.
+// otherwise return the deep idle floor. Cheap — four link-state reads.
 uint32_t hw_fake_sleep_target_freq();
 
 // UI helper exposed from factory/ui_main for HAL-layer callers.

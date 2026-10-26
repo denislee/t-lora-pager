@@ -45,7 +45,7 @@ void nfc_task_fn(void *)
         // display is in fake-sleep, where hw_power_down_all() cuts the NFC
         // rail — loopNFCReader() would only early-return on !_nfc_running, so
         // taking the instance mutex 10×/s to reach that return is pure
-        // contention with the keyboard/LVGL tasks. Block on a task notify
+        // contention with the LVGL task. Block on a task notify
         // instead; hw_start_nfc_discovery() kicks us via
         // hw_nfc_task_notify_wake(), and the timeout bounds latency if a
         // notify is ever missed (e.g. discovery already active on wake).

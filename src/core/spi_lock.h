@@ -5,7 +5,8 @@
  *
  * Distinct from `core::ScopedInstanceLock` (scoped_lock.h):
  *  - `ScopedInstanceLock`  → our own top-level mutex, coordinating the LVGL
- *                            task, NFC task, keyboard task, and main loop.
+ *                            task, NFC task, link task and main loop (the
+ *                            keyboard reader takes the I2C lock instead, IS.1).
  *  - `ScopedSpiLock`       → the vendor-internal SPI-bus lock. The vendor
  *                            uses it to serialize display / radio / SD
  *                            transactions on the shared SPI. On T-Watch-S3
