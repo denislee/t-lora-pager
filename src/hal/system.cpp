@@ -47,7 +47,9 @@ static constexpr size_t kMallocInternalMaxBytes = 1024;
 using std::string;
 
 
+#ifdef ARDUINO
 #define NVS_NAME    "pager"
+#endif
 user_setting_params_t user_setting;
 
 // Tracks the last frequency passed to setCpuFrequencyMhz() so hw_set_cpu_freq()

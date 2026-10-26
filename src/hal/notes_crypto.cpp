@@ -30,6 +30,7 @@
 #include <freertos/semphr.h>
 #endif
 
+#ifdef ARDUINO  // used only by the hardware paths (emulator -Wunused-macros)
 /* The canary sits in its own NVS namespace so schema changes to the main
  * settings blob don't drag it along. */
 #define NC_NS           "notes_sec"
@@ -38,11 +39,12 @@
  * script; if this changes, the sync script's openssl invocation must gain an
  * explicit `-iter` flag. */
 #define NC_ITERATIONS   10000
+#define NC_MAGIC        "Salted__"
+#endif
 #define NC_CANARY_PT    "NOTES_OK"
 #define NC_SALT_LEN     8
 #define NC_KEY_LEN      32
 #define NC_IV_LEN       16
-#define NC_MAGIC        "Salted__"
 
 namespace {
 
