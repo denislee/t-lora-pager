@@ -59,6 +59,33 @@ void reset_icon_color_cache()
     prev_sd_color = prev_bt_color = prev_wifi_color =
         prev_hub_color = prev_usb_color = UINT32_MAX;
 }
+
+// One status-bar label: colour, font, text (nullptr leaves LVGL's default),
+// optionally hidden until the status timer shows it.
+lv_obj_t *make_status_label(lv_obj_t *parent, const char *text, lv_color_t color,
+                            const lv_font_t *font, bool hidden)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_style_text_color(l, color, 0);
+    lv_obj_set_style_text_font(l, font, 0);
+    if (text) lv_label_set_text(l, text);
+    if (hidden) lv_obj_add_flag(l, LV_OBJ_FLAG_HIDDEN);
+    return l;
+}
+
+// The clock and battery texts, shared by the 1 s timer and the synchronous
+// first fill in setupGlobalUI().
+void set_clock_text(lv_obj_t *label, const struct tm &t)
+{
+    lv_label_set_text_fmt(label, "%02d/%02d/%04d %02d:%02d",
+                          t.tm_mday, t.tm_mon + 1, t.tm_year + 1900, t.tm_hour, t.tm_min);
+}
+
+void set_batt_text(lv_obj_t *label, const monitor_params_t &p)
+{
+    lv_label_set_text_fmt(label, "%s %d%%",
+                          ui_battery_icon(p.battery_percent, p.is_charging), p.battery_percent);
+}
 } // namespace
 
 void System::setupGlobalUI() {
@@ -103,13 +130,10 @@ void System::setupGlobalUI() {
     lv_obj_set_style_radius(_statusBar, 0, 0);
     lv_obj_set_style_pad_all(_statusBar, 2, 0);
 
-    _statTimeLabel = lv_label_create(_statusBar);
-    lv_obj_center(_statTimeLabel);
-    lv_obj_set_style_text_color(_statTimeLabel, ui_color_title_fg(), 0);
-    lv_obj_set_style_text_font(_statTimeLabel, header_font, 0);
-    /* Avoid LVGL's default "Text" leaking through any modal (e.g. the
+    /* "" avoids LVGL's default "Text" leaking through any modal (e.g. the
      * passphrase prompt) that opens before the 1Hz timer below has fired. */
-    lv_label_set_text(_statTimeLabel, "");
+    _statTimeLabel = make_status_label(_statusBar, "", ui_color_title_fg(), header_font, false);
+    lv_obj_center(_statTimeLabel);
 
     // Right-side flex container holding SD, USB and battery indicators.
     // Flex order: SD, USB, Battery — so hidden icons collapse naturally and
@@ -125,37 +149,22 @@ void System::setupGlobalUI() {
     lv_obj_set_style_bg_opa(_statRightCont, LV_OPA_TRANSP, 0);
     lv_obj_remove_flag(_statRightCont, LV_OBJ_FLAG_SCROLLABLE);
 
-    // File-count indicator — added first so it sits at the leftmost position
-    // inside the right-side cluster; styled gray per spec.
-    _statFileCountLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statFileCountLabel, ui_color_title_muted(), 0);
-    lv_obj_set_style_text_font(_statFileCountLabel, header_font, 0);
-    lv_label_set_text(_statFileCountLabel, "");
-    lv_obj_add_flag(_statFileCountLabel, LV_OBJ_FLAG_HIDDEN);
-
-    _statSDLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statSDLabel, ui_color_title_icon(), 0);
-    lv_obj_set_style_text_font(_statSDLabel, header_font, 0);
-    lv_label_set_text(_statSDLabel, LV_SYMBOL_SD_CARD);
-    lv_obj_add_flag(_statSDLabel, LV_OBJ_FLAG_HIDDEN);
-
-    _statUSBLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statUSBLabel, ui_color_title_icon(), 0);
-    lv_obj_set_style_text_font(_statUSBLabel, header_font, 0);
-    lv_label_set_text(_statUSBLabel, LV_SYMBOL_USB);
-    lv_obj_add_flag(_statUSBLabel, LV_OBJ_FLAG_HIDDEN);
-
-    _statBTLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statBTLabel, ui_color_title_icon(), 0);
-    lv_obj_set_style_text_font(_statBTLabel, header_font, 0);
-    lv_label_set_text(_statBTLabel, LV_SYMBOL_BLUETOOTH);
-    lv_obj_add_flag(_statBTLabel, LV_OBJ_FLAG_HIDDEN);
-
-    _statWifiLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statWifiLabel, ui_color_title_icon(), 0);
-    lv_obj_set_style_text_font(_statWifiLabel, header_font, 0);
-    lv_label_set_text(_statWifiLabel, LV_SYMBOL_WIFI);
-    lv_obj_add_flag(_statWifiLabel, LV_OBJ_FLAG_HIDDEN);
+    // Hidden state icons, in flex order. The file count comes first so it
+    // sits leftmost in the right-side cluster; styled gray per spec.
+    const struct {
+        lv_obj_t  **obj;
+        const char *text;
+        lv_color_t  color;
+    } icons[] = {
+        { &_statFileCountLabel, "",                  ui_color_title_muted() },
+        { &_statSDLabel,        LV_SYMBOL_SD_CARD,   ui_color_title_icon()  },
+        { &_statUSBLabel,       LV_SYMBOL_USB,       ui_color_title_icon()  },
+        { &_statBTLabel,        LV_SYMBOL_BLUETOOTH, ui_color_title_icon()  },
+        { &_statWifiLabel,      LV_SYMBOL_WIFI,      ui_color_title_icon()  },
+    };
+    for (const auto &ic : icons) {
+        *ic.obj = make_status_label(_statRightCont, ic.text, ic.color, header_font, true);
+    }
 
     // Local hub indicator. Hidden when the user hasn't enabled the hub at
     // all; muted when enabled but unreachable; accent when the LAN service
@@ -167,16 +176,10 @@ void System::setupGlobalUI() {
     lv_label_set_text(_statHubLabel, LV_SYMBOL_HOME);
     lv_obj_add_flag(_statHubLabel, LV_OBJ_FLAG_HIDDEN);
 
-    _statBattLabel = lv_label_create(_statRightCont);
-    lv_obj_set_style_text_color(_statBattLabel, ui_color_title_fg(), 0);
-    lv_obj_set_style_text_font(_statBattLabel, header_font, 0);
-    lv_label_set_text(_statBattLabel, "");
+    _statBattLabel = make_status_label(_statRightCont, "", ui_color_title_fg(), header_font, false);
 
-    _statMemLabel = lv_label_create(_statusBar);
+    _statMemLabel = make_status_label(_statusBar, nullptr, ui_color_title_fg(), header_font, true);
     lv_obj_align(_statMemLabel, LV_ALIGN_LEFT_MID, 5, 0);
-    lv_obj_set_style_text_color(_statMemLabel, ui_color_title_fg(), 0);
-    lv_obj_set_style_text_font(_statMemLabel, header_font, 0);
-    lv_obj_add_flag(_statMemLabel, LV_OBJ_FLAG_HIDDEN);
 
     // Back button — hidden until a screen requests it. Sits on the far left
     // of the status bar; left-aligned icons (SD/USB/MEM) shift right when it's
@@ -223,30 +226,18 @@ void System::setupGlobalUI() {
         static const lv_font_t *applied_header_font = nullptr;
         const lv_font_t *cur_font = get_header_font();
         if (applied_header_font == nullptr) applied_header_font = cur_font;
-        if (self._statusBar && cur_font != applied_header_font) {
+        // Every status-bar object exists before this timer is created, so the
+        // members below are never null (DC2.4.23).
+        if (cur_font != applied_header_font) {
             applied_header_font = cur_font;
             int32_t new_bar_h = ui_status_bar_height();  // from cur_font
-            lv_obj_set_style_text_font(self._statTimeLabel, cur_font, 0);
-            lv_obj_set_style_text_font(self._statBattLabel, cur_font, 0);
-            lv_obj_set_style_text_font(self._statMemLabel, cur_font, 0);
-            lv_obj_set_style_text_font(self._statSDLabel, cur_font, 0);
-            lv_obj_set_style_text_font(self._statUSBLabel, cur_font, 0);
-            if (self._statBTLabel) {
-                lv_obj_set_style_text_font(self._statBTLabel, cur_font, 0);
-            }
-            if (self._statWifiLabel) {
-                lv_obj_set_style_text_font(self._statWifiLabel, cur_font, 0);
-            }
-            if (self._statHubLabel) {
-                lv_obj_set_style_text_font(self._statHubLabel, cur_font, 0);
-            }
-            if (self._statFileCountLabel) {
-                lv_obj_set_style_text_font(self._statFileCountLabel, cur_font, 0);
-            }
-            if (self._statBackBtn) {
-                lv_obj_t *back_lbl = lv_obj_get_child(self._statBackBtn, 0);
-                if (back_lbl) lv_obj_set_style_text_font(back_lbl, cur_font, 0);
-            }
+            lv_obj_t *const labels[] = {
+                self._statTimeLabel, self._statBattLabel, self._statMemLabel,
+                self._statSDLabel, self._statUSBLabel, self._statBTLabel,
+                self._statWifiLabel, self._statHubLabel, self._statFileCountLabel,
+                lv_obj_get_child(self._statBackBtn, 0),
+            };
+            for (lv_obj_t *l : labels) lv_obj_set_style_text_font(l, cur_font, 0);
             if (lv_obj_get_height(self._statusBar) != new_bar_h) {
                 lv_obj_set_height(self._statusBar, new_bar_h);
                 int32_t v_res = lv_display_get_vertical_resolution(NULL);
@@ -267,15 +258,12 @@ void System::setupGlobalUI() {
         // I2C) for this once-per-second label — see hw_get_wall_clock.
         struct tm timeinfo;
         hw_get_wall_clock(timeinfo);
-        if (self._statTimeLabel &&
-            (timeinfo.tm_min  != prev_clock_min  ||
-             timeinfo.tm_hour != prev_clock_hour ||
-             timeinfo.tm_mday != prev_clock_mday ||
-             timeinfo.tm_mon  != prev_clock_mon  ||
-             timeinfo.tm_year != prev_clock_year)) {
-            lv_label_set_text_fmt(self._statTimeLabel, "%02d/%02d/%04d %02d:%02d",
-                                timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
-                                timeinfo.tm_hour, timeinfo.tm_min);
+        if (timeinfo.tm_min  != prev_clock_min  ||
+            timeinfo.tm_hour != prev_clock_hour ||
+            timeinfo.tm_mday != prev_clock_mday ||
+            timeinfo.tm_mon  != prev_clock_mon  ||
+            timeinfo.tm_year != prev_clock_year) {
+            set_clock_text(self._statTimeLabel, timeinfo);
             prev_clock_min  = timeinfo.tm_min;
             prev_clock_hour = timeinfo.tm_hour;
             prev_clock_mday = timeinfo.tm_mday;
@@ -286,12 +274,9 @@ void System::setupGlobalUI() {
         if (!typing) {
             monitor_params_t params;
             hw_get_monitor_params(params);
-            if (self._statBattLabel &&
-                (params.battery_percent != prev_batt_pct ||
-                 params.is_charging     != prev_is_charging)) {
-                lv_label_set_text_fmt(self._statBattLabel, "%s %d%%",
-                                      ui_battery_icon(params.battery_percent, params.is_charging),
-                                      params.battery_percent);
+            if (params.battery_percent != prev_batt_pct ||
+                params.is_charging     != prev_is_charging) {
+                set_batt_text(self._statBattLabel, params);
                 prev_batt_pct    = params.battery_percent;
                 prev_is_charging = params.is_charging;
             }
@@ -300,7 +285,7 @@ void System::setupGlobalUI() {
         // When the back button is visible, push the memory readout right so
         // it doesn't overlap.
         int back_off = 0;
-        if (self._statBackBtn && !lv_obj_has_flag(self._statBackBtn, LV_OBJ_FLAG_HIDDEN)) {
+        if (!lv_obj_has_flag(self._statBackBtn, LV_OBJ_FLAG_HIDDEN)) {
             back_off = lv_obj_get_width(self._statBackBtn);
             if (back_off <= 0) back_off = 20;
             back_off += 4;
@@ -317,37 +302,31 @@ void System::setupGlobalUI() {
         };
 
         bool sd_online = (HW_SD_ONLINE & hw_get_device_online());
-        if (self._statSDLabel) {
-            if (sd_online) {
-                lv_obj_add_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_clear_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
-                set_icon_color(self._statSDLabel, lv_palette_main(LV_PALETTE_RED), prev_sd_color);
-            }
+        if (sd_online) {
+            lv_obj_add_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
+            set_icon_color(self._statSDLabel, lv_palette_main(LV_PALETTE_RED), prev_sd_color);
         }
 
         // Radio icons have three states each:
         //   off        → hidden
         //   on, idle   → shown in muted gray
         //   connected  → shown in accent color
-        if (self._statBTLabel) {
-            if (hw_get_bt_enable()) {
-                lv_obj_clear_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
-                set_icon_color(self._statBTLabel,
-                    hw_get_ble_kb_connected() ? ui_color_title_icon() : ui_color_title_muted(), prev_bt_color);
-            } else {
-                lv_obj_add_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
-            }
+        if (hw_get_bt_enable()) {
+            lv_obj_clear_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
+            set_icon_color(self._statBTLabel,
+                hw_get_ble_kb_connected() ? ui_color_title_icon() : ui_color_title_muted(), prev_bt_color);
+        } else {
+            lv_obj_add_flag(self._statBTLabel, LV_OBJ_FLAG_HIDDEN);
         }
 
-        if (self._statWifiLabel) {
-            if (hw_get_wifi_enable()) {
-                lv_obj_clear_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
-                set_icon_color(self._statWifiLabel,
-                    hw_get_wifi_connected() ? ui_color_title_icon() : ui_color_title_muted(), prev_wifi_color);
-            } else {
-                lv_obj_add_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
-            }
+        if (hw_get_wifi_enable()) {
+            lv_obj_clear_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
+            set_icon_color(self._statWifiLabel,
+                hw_get_wifi_connected() ? ui_color_title_icon() : ui_color_title_muted(), prev_wifi_color);
+        } else {
+            lv_obj_add_flag(self._statWifiLabel, LV_OBJ_FLAG_HIDDEN);
         }
 
         // Hub indicator. The TCP probe is a real network call (a connect()
@@ -409,19 +388,17 @@ void System::setupGlobalUI() {
 
         bool usb_mounted = hw_is_usb_msc_mounted();
 
-        if (self._statUSBLabel) {
-            if (usb_mounted) {
-                lv_obj_clear_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
-                if (hw_is_usb_msc_writing()) {
-                    set_icon_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_RED), prev_usb_color);
-                } else if (hw_is_usb_msc_reading()) {
-                    set_icon_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_BLUE), prev_usb_color);
-                } else {
-                    set_icon_color(self._statUSBLabel, ui_color_title_icon(), prev_usb_color);
-                }
+        if (usb_mounted) {
+            lv_obj_clear_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
+            if (hw_is_usb_msc_writing()) {
+                set_icon_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_RED), prev_usb_color);
+            } else if (hw_is_usb_msc_reading()) {
+                set_icon_color(self._statUSBLabel, lv_palette_main(LV_PALETTE_BLUE), prev_usb_color);
             } else {
-                lv_obj_add_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
+                set_icon_color(self._statUSBLabel, ui_color_title_icon(), prev_usb_color);
             }
+        } else {
+            lv_obj_add_flag(self._statUSBLabel, LV_OBJ_FLAG_HIDDEN);
         }
 
         // Unsafe-to-disconnect warning: present as long as the volume is
@@ -468,36 +445,32 @@ void System::setupGlobalUI() {
 
         // Internal file count — refreshed only every few ticks so the FFat
         // walk stays cheap. Tick counter is local to this timer.
-        if (self._statFileCountLabel) {
-            if (settings.show_file_count) {
-                static uint8_t file_count_tick = 0;
-                static uint32_t cached_file_count = UINT32_MAX;
-                if (!typing && (cached_file_count == UINT32_MAX || ++file_count_tick >= 60)) {
-                    cached_file_count = hw_count_internal_files();
-                    file_count_tick = 0;
-                }
-                if (cached_file_count != prev_file_count) {
-                    lv_label_set_text_fmt(self._statFileCountLabel, "%u", (unsigned)cached_file_count);
-                    prev_file_count = cached_file_count;
-                }
-                lv_obj_clear_flag(self._statFileCountLabel, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(self._statFileCountLabel, LV_OBJ_FLAG_HIDDEN);
+        if (settings.show_file_count) {
+            static uint8_t file_count_tick = 0;
+            static uint32_t cached_file_count = UINT32_MAX;
+            if (!typing && (cached_file_count == UINT32_MAX || ++file_count_tick >= 60)) {
+                cached_file_count = hw_count_internal_files();
+                file_count_tick = 0;
             }
+            if (cached_file_count != prev_file_count) {
+                lv_label_set_text_fmt(self._statFileCountLabel, "%u", (unsigned)cached_file_count);
+                prev_file_count = cached_file_count;
+            }
+            lv_obj_clear_flag(self._statFileCountLabel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(self._statFileCountLabel, LV_OBJ_FLAG_HIDDEN);
         }
 
-        if (self._statMemLabel) {
-            if (settings.show_mem_usage) {
-                uint32_t mem_free_kb = hw_get_free_heap() / 1024;
-                if (mem_free_kb != prev_mem_free_kb) {
-                    lv_label_set_text_fmt(self._statMemLabel, "M:%uK", mem_free_kb);
-                    prev_mem_free_kb = mem_free_kb;
-                }
-                lv_obj_clear_flag(self._statMemLabel, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_set_x(self._statMemLabel, 5 + back_off);
-            } else {
-                lv_obj_add_flag(self._statMemLabel, LV_OBJ_FLAG_HIDDEN);
+        if (settings.show_mem_usage) {
+            uint32_t mem_free_kb = hw_get_free_heap() / 1024;
+            if (mem_free_kb != prev_mem_free_kb) {
+                lv_label_set_text_fmt(self._statMemLabel, "M:%uK", (unsigned)mem_free_kb);
+                prev_mem_free_kb = mem_free_kb;
             }
+            lv_obj_clear_flag(self._statMemLabel, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_x(self._statMemLabel, 5 + back_off);
+        } else {
+            lv_obj_add_flag(self._statMemLabel, LV_OBJ_FLAG_HIDDEN);
         }
     }, 1000, NULL);
 
@@ -508,16 +481,12 @@ void System::setupGlobalUI() {
      * appear blank behind the modal. */
     {
         struct tm timeinfo;
-        hw_get_date_time(timeinfo);
-        lv_label_set_text_fmt(_statTimeLabel, "%02d/%02d/%04d %02d:%02d",
-                              timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900,
-                              timeinfo.tm_hour, timeinfo.tm_min);
+        hw_get_wall_clock(timeinfo);  // system clock, seeded from the RTC in hw_init()
+        set_clock_text(_statTimeLabel, timeinfo);
 
         monitor_params_t params;
         hw_get_monitor_params(params);
-        lv_label_set_text_fmt(_statBattLabel, "%s %d%%",
-                              ui_battery_icon(params.battery_percent, params.is_charging),
-                              params.battery_percent);
+        set_batt_text(_statBattLabel, params);
     }
 
     applyChromeStyle();
@@ -547,7 +516,9 @@ void System::applyChromeStyle() {
             lv_obj_set_style_border_opa(_statusBar, LV_OPA_COVER, 0);
         }
     }
-    // Re-color the status-bar members to sit on the title bar.
+    // Re-color the status-bar members to sit on the title bar. The state
+    // icons (SD/USB/BT/Wi-Fi/hub) are not written here: resetting their
+    // colour cache makes the next status tick re-apply their state colour.
     if (_statTimeLabel)     lv_obj_set_style_text_color(_statTimeLabel, ui_color_title_fg(), 0);
     if (_statBattLabel)     lv_obj_set_style_text_color(_statBattLabel, ui_color_title_fg(), 0);
     if (_statMemLabel)      lv_obj_set_style_text_color(_statMemLabel, ui_color_title_fg(), 0);
@@ -555,12 +526,8 @@ void System::applyChromeStyle() {
         lv_obj_t *lbl = lv_obj_get_child(_statBackBtn, 0);
         if (lbl) lv_obj_set_style_text_color(lbl, ui_color_title_fg(), 0);
     }
-    if (_statSDLabel)       lv_obj_set_style_text_color(_statSDLabel, ui_color_title_icon(), 0);
-    if (_statUSBLabel)      lv_obj_set_style_text_color(_statUSBLabel, ui_color_title_icon(), 0);
-    if (_statBTLabel)       lv_obj_set_style_text_color(_statBTLabel, ui_color_title_icon(), 0);
-    if (_statWifiLabel)     lv_obj_set_style_text_color(_statWifiLabel, ui_color_title_icon(), 0);
     if (_statFileCountLabel) lv_obj_set_style_text_color(_statFileCountLabel, ui_color_title_muted(), 0);
-    reset_icon_color_cache();   // the next status tick re-applies the state colours
+    reset_icon_color_cache();
 }
 
 void System::showMenu() {
