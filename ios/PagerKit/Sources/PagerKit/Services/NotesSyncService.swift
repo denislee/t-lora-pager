@@ -443,6 +443,8 @@ public actor NotesSyncService {
     private var running: [Int: Task<Void, Never>] = [:]
     /// The last queued run; the next one starts after it (serialised triggers).
     private var tail: Task<Void, Never>?
+    /// Told after every pager-initiated move (session log, viewer refresh).
+    private var reporter: (@Sendable (NotesMoveResult) async -> Void)?
 
     /// `pagerCaps` are the pager's `sys.hello` caps: without
     /// `"fs.delete.if"` a move uploads and verifies but deletes nothing.
@@ -463,6 +465,12 @@ public actor NotesSyncService {
             guard let self else { throw RPCError(code: "unsupported", msg: "notes service gone") }
             return try await self.start(params)
         }
+    }
+
+    /// Called after each pager-initiated `"github"` job with its result:
+    /// counts and reasons, never note contents or the token.
+    public func onPagerMove(_ reporter: @escaping @Sendable (NotesMoveResult) async -> Void) {
+        self.reporter = reporter
     }
 
     /// Wait for a job's background work (tests).
@@ -575,6 +583,7 @@ public actor NotesSyncService {
         await emit(job, phase: "done", uploaded: result.uploaded, already: result.already,
                    deleted: result.deleted, kept: result.kept.count,
                    errors: phoneErrors + result.errors.map(\.name), done: true)
+        await reporter?(result)
     }
 
     // MARK: - The move engine (§3.6)

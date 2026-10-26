@@ -59,9 +59,17 @@ final class PagerSession: ObservableObject {
     private var linkIsBLE = false
     /// The phone's own Telegram login; answers tg.* while logged in.
     private let telegram: TelegramNative?
+    /// The Notes tab: every note on the pager, and the move to GitHub
+    /// (`IOS_NOTES_VIEWER_PLAN.md`). Outlives links; attached in `bringUp`.
+    let notes: NotesModel
 
     init(telegram: TelegramNative? = nil) {
         self.telegram = telegram
+        notes = NotesModel(
+            account: GitHubAccountStore(secrets: KeychainSecretStore(service: "PagerCompanion.github")),
+            cacheRoot: NotesModel.defaultCacheRoot()
+        )
+        notes.log = { [weak self] line in self?.appendLog(line) }
     }
 
     /// The weather key the pager last asked for (`"auto"` or a city), pushed
@@ -191,12 +199,38 @@ final class PagerSession: ObservableObject {
             if let key = UserDefaults.standard.string(forKey: Self.weatherKeyDefault) {
                 await pushWeather(key: key)
             }
+            await startNotes(on: session, pagerCaps: Self.caps(of: hello))
         } catch {
             await disconnect()
             state = .failed(String(describing: error))
             appendLog("connect failed: \(error)")
             scheduleReconnect()
         }
+    }
+
+    /// One `NotesSyncService` per link: answers the pager's `notes.sync`
+    /// (its Notes Sync button) and runs the Notes tab's "Sync to GitHub",
+    /// both as a move (upload, verify, then conditional delete). The pager's
+    /// caps say whether it honours the delete precondition.
+    private func startNotes(on session: LinkSession, pagerCaps: [String]) async {
+        let account = notes.account
+        let backend = GitHubNotesBackend(config: { account.config() })
+        let service = NotesSyncService(session: session, github: backend, phoneDirectory: nil,
+                                       pagerCaps: pagerCaps)
+        await service.onPagerMove { [weak self] result in
+            await MainActor.run { self?.notes.pagerMoveFinished(result) }
+        }
+        await service.register()
+        if !pagerCaps.contains(NotesSyncService.conditionalDeleteCap) {
+            appendLog("notes: pager firmware has no fs.delete.if; sync uploads but keeps the notes")
+        }
+        await notes.attach(session, sync: service, pagerCaps: pagerCaps)
+    }
+
+    /// The `caps` strings of a `sys.hello` result.
+    nonisolated static func caps(of hello: JSONValue) -> [String] {
+        guard case .array(let caps)? = hello["caps"] else { return [] }
+        return caps.compactMap(\.stringValue)
     }
 
     /// Answer the pager's `weather.get` (PROTOCOL.md §6.3).
@@ -303,6 +337,7 @@ final class PagerSession: ObservableObject {
         await stopTransport?()
         info = nil
         lastRTT = nil
+        await notes.detach()
         state = .disconnected
         if wasConnected {
             appendLog("disconnected")
@@ -315,6 +350,7 @@ final class PagerSession: ObservableObject {
         eventsTask = Task { [weak self] in
             for await event in session.events {
                 self?.appendLog("event \(event.name)")
+                if event.name == "evt.fs.changed" { self?.notes.fsChanged() }
             }
             guard let self, self.session === session else { return }
             await self.disconnect()

@@ -674,10 +674,12 @@ final class NotesMoveTests: XCTestCase {
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
+        let reported = ReportedResults()
+        await service.onPagerMove { result in reported.append(result) }
         await service.register()
 
         async let events = NotesMoveTests.collectNotes(pager, timeout: .seconds(5))
-        _ = try await pager.call("notes.sync", params: [
+        let reply = try await pager.call("notes.sync", params: [
             "targets": ["github"],
             "files": [
                 NotesMoveTests.manifest("int", "a.txt", aBytes),
@@ -685,6 +687,9 @@ final class NotesMoveTests: XCTestCase {
             ],
         ], timeout: .seconds(5))
         let collected = await events
+        await service.wait(job: reply["job"]?.intValue ?? 0)
+        // The app's session log and viewer hear about the pager's move.
+        XCTAssertEqual(reported.values.map(\.deleted), [2])
 
         let last = collected.last
         XCTAssertEqual(last?["uploaded"]?.intValue, 2)
@@ -832,5 +837,23 @@ final class NotesMoveTests: XCTestCase {
     func testConflictName() {
         XCTAssertEqual(NotesSyncService.conflictName("a.txt", sha: "0123456789"), "a~0123456.txt")
         XCTAssertEqual(NotesSyncService.conflictName("x", sha: "0123456789"), "x~0123456")
+    }
+}
+
+/// Results handed to `NotesSyncService.onPagerMove`, collected under a lock.
+private final class ReportedResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [NotesMoveResult] = []
+
+    func append(_ result: NotesMoveResult) {
+        lock.lock()
+        defer { lock.unlock() }
+        results.append(result)
+    }
+
+    var values: [NotesMoveResult] {
+        lock.lock()
+        defer { lock.unlock() }
+        return results
     }
 }
