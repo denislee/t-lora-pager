@@ -17,16 +17,8 @@
 #include <ctime>
 #include <string>
 
+#include "hal/link/link_log.h"
 #include "hal/link/link_service.h"
-
-#ifdef ARDUINO
-#include <esp32-hal-log.h>
-#define LINK_LOG(...) log_i(__VA_ARGS__)
-#else
-#include <cstdio>
-#define LINK_LOG(fmt, ...) printf("[link] " fmt "\n", ##__VA_ARGS__)
-#endif
-
 
 namespace pagerlink {
 namespace {
