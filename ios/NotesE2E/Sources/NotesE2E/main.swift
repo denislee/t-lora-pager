@@ -58,6 +58,72 @@ func waitTestResult(_ events: Events, after count: Int, _ within: Duration) asyn
     return nil
 }
 
+// ---- Real GitHub mode (W11, W12 against a scratch repo) -------------------
+// NOTES_E2E_GITHUB_REPO=owner/name NOTES_E2E_GITHUB_TOKEN=… : talk to
+// api.github.com instead of the fake. Use a scratch repo only: the move adds
+// notes to it. The token is read from the environment and never printed.
+let env = ProcessInfo.processInfo.environment
+if let realRepo = env["NOTES_E2E_GITHUB_REPO"], let realToken = env["NOTES_E2E_GITHUB_TOKEN"] {
+    print("== Real GitHub: \(realRepo)@main")
+    let cfg = GitHubNotesConfig(repo: realRepo, branch: "main", token: realToken)
+    let gh = GitHubNotesBackend(config: { cfg })
+    let empty = try await gh.existingBlobs()
+    check(empty.isEmpty, "Test connection on the fresh repo: OK — 0 notes", "\(empty.count)")
+    let bad = GitHubNotesBackend(config: { GitHubNotesConfig(repo: realRepo, branch: "main", token: "ghp_invalid") })
+    do {
+        _ = try await bad.existingBlobs()
+        check(false, "a wrong token is refused")
+    } catch {
+        let msg = (error as? NotesSyncError)?.msg ?? "\(error)"
+        check(msg.hasPrefix("github 401"), "a wrong token shows \"github 401\"", msg)
+    }
+
+    let t = try POSIXTransport(host: "127.0.0.1", port: 7600)
+    let s = LinkSession(transport: t)
+    let ev = Events()
+    await s.start()
+    let w = Task { for await e in s.events { ev.add(e) } }
+    let h = try await s.call("sys.hello", params: ["proto": 1, "app": "notes-e2e", "caps": ["sys", "fs"]],
+                             timeout: .seconds(5))
+    var pagerCaps: [String] = []
+    if case .array(let raw)? = h["caps"] { pagerCaps = raw.compactMap(\.stringValue) }
+    let svc = NotesSyncService(session: s, github: gh, phoneDirectory: nil, pagerCaps: pagerCaps)
+    let rep = Reports()
+    await svc.onPagerMove { rep.add($0) }
+    await svc.register()
+
+    _ = try await s.call("test.callback", params: ["notes": "github"], timeout: .seconds(5))
+    let r = await waitTestResult(ev, after: 0, .seconds(90))
+    check(r?["ok"]?.boolValue == true && r?["uploaded"]?.intValue == 3 && r?["deleted"]?.intValue == 3
+          && r?["kept"]?.intValue == 0 && r?["errors"]?.intValue == 0,
+          "pager's Sync button moves the 3 internal notes to GitHub", "\(String(describing: r))")
+    let blobs = try await gh.existingBlobs()
+    var same = blobs.count == 3
+    for (label, name) in [("int/a-plain.txt", "a-plain.txt"), ("int/b-shared.txt", "b-shared.txt"),
+                          ("int/c-secret.txt", "c-secret.txt")] {
+        let bytes = hexBytes(r?["seeded"]?[label]?.stringValue ?? "")
+        if blobs[name] != GitBlob.sha1(bytes) { same = false; print("       \(name): blob SHA differs") }
+    }
+    check(same, "GitHub blob SHAs equal the pager's bytes (c-secret.txt as Salted__ ciphertext)")
+    check((try await gh.existingBlobs()).count == 3, "Test connection now: OK — 3 notes")
+    let files = FileService(session: s, timeout: .seconds(10))
+    let left = try await NotesIndexer.scan(files)
+    check(left.all.filter { $0.vol == "int" }.isEmpty, "internal notes gone from the emulator")
+    let n = rep.all.count
+    _ = try await s.call("test.callback", params: [
+        "method": "notes.sync", "params": ["targets": ["github"], "files": []], "timeout_ms": 5000,
+    ], timeout: .seconds(5))
+    let until = ContinuousClock.now + .seconds(20)
+    while rep.all.count == n && ContinuousClock.now < until { try? await Task.sleep(for: .milliseconds(50)) }
+    check(rep.all.count > n && rep.all.last!.nothingToDo, "second press: nothing to do")
+    if let sha = rep.all.first?.commitSHA { print("       commit: https://github.com/\(realRepo)/commit/\(sha)") }
+    w.cancel()
+    await s.stop()
+    t.close()
+    print(failures == 0 ? "notes-e2e (real GitHub): all checks passed" : "notes-e2e (real GitHub): \(failures) failed")
+    exit(Int32(failures))
+}
+
 let transport = try POSIXTransport(host: "127.0.0.1", port: 7600)
 let session = LinkSession(transport: transport)
 let events = Events()
