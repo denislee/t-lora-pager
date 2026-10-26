@@ -31,11 +31,15 @@ public struct NotesPushResult: Sendable, Equatable {
     public var uploaded = 0
     public var already = 0
     public var errors: [NotesPushError] = []
+    /// The commit that landed, nil when nothing was committed.
+    public var commitSHA: String?
 
-    public init(uploaded: Int = 0, already: Int = 0, errors: [NotesPushError] = []) {
+    public init(uploaded: Int = 0, already: Int = 0, errors: [NotesPushError] = [],
+                commitSHA: String? = nil) {
         self.uploaded = uploaded
         self.already = already
         self.errors = errors
+        self.commitSHA = commitSHA
     }
 }
 
@@ -46,10 +50,15 @@ public struct NotesSyncError: Error, Equatable, Sendable {
     public init(_ msg: String) { self.msg = msg }
 }
 
-/// An additive-only notes remote: list what is there, add what is not.
+/// An additive-only notes remote: list what is there (with blob SHAs), add
+/// what is not, read a commit back.
 public protocol NotesRemote: Sendable {
     /// Names currently under `notes/`.
     func existingNames() async throws -> Set<String>
+    /// name → git blob SHA of every blob under `notes/` on the branch (404 → empty); a truncated listing throws.
+    func existingBlobs() async throws -> [String: String]
+    /// The same listing for the tree of one commit (pinned, not the moving branch head) — what the move engine verifies against.
+    func blobs(atCommit sha: String) async throws -> [String: String]
     /// Add `files` (none of which exist remotely); `already` stays 0.
     func commit(_ files: [NoteFile]) async -> NotesPushResult
     /// Identifies the remote `existingNames` lists (repo and branch), so a
@@ -145,10 +154,30 @@ public struct GitHubNotesBackend: NotesRemote {
     /// the notes past it would look missing and be pulled and pushed again. A
     /// `truncated` tree is an error for the same reason.
     public func existingNames() async throws -> Set<String> {
+        Set(try await existingBlobs().keys)
+    }
+
+    /// name → git blob SHA of every blob under `notes/` on the branch; a 404
+    /// means the folder (or branch) does not exist yet.
+    public func existingBlobs() async throws -> [String: String] {
         let cfg = try validConfig()
-        let url = "\(apiBase)/repos/\(cfg.repo)/git/trees/\(Self.refPathEscape(cfg.branch)):notes"
+        return try await listNotes(ref: cfg.branch)
+    }
+
+    /// The same listing for the tree of one commit, not the moving branch
+    /// head: a commit SHA pins what a landed commit actually contains.
+    public func blobs(atCommit sha: String) async throws -> [String: String] {
+        _ = try validConfig()
+        guard !sha.isEmpty else { throw NotesSyncError("bad commit sha") }
+        return try await listNotes(ref: sha)
+    }
+
+    /// The `notes/` blobs of `ref` (a branch or a commit), by name → blob SHA.
+    private func listNotes(ref: String) async throws -> [String: String] {
+        let cfg = try validConfig()
+        let url = "\(apiBase)/repos/\(cfg.repo)/git/trees/\(Self.refPathEscape(ref)):notes"
         let reply = try await exchange("GET", url, cfg, body: nil, attempts: 2)
-        if reply.status == 404 { return [] }
+        if reply.status == 404 { return [:] }
         guard reply.status == 200 else { throw NotesSyncError(Self.githubError(reply)) }
         let listing = try JSONValue.decode(bytes: Array(reply.body))
         guard case .array(let entries)? = listing["tree"] else {
@@ -157,17 +186,19 @@ public struct GitHubNotesBackend: NotesRemote {
         if listing["truncated"]?.boolValue == true {
             throw NotesSyncError("notes listing truncated")
         }
-        var names = Set<String>()
+        var blobs = [String: String]()
         for entry in entries {
-            guard entry["type"]?.stringValue == "blob", let name = entry["path"]?.stringValue else { continue }
-            names.insert(name)
+            guard entry["type"]?.stringValue == "blob", let name = entry["path"]?.stringValue,
+                  let sha = entry["sha"]?.stringValue else { continue }
+            blobs[name] = sha
         }
-        return names
+        return blobs
     }
 
     /// lilyhub `commitFiles`: blobs (parallel), then tree + commit + ref,
     /// retrying the last three on a 422. Failed blobs are reported and left
     /// out; if the commit itself fails every blobbed file is reported failed.
+    /// On success the result carries the new commit SHA.
     public func commit(_ files: [NoteFile]) async -> NotesPushResult {
         var out = NotesPushResult()
         let cfg: GitHubNotesConfig
@@ -236,6 +267,7 @@ public struct GitHubNotesBackend: NotesRemote {
                 let (conflict, error) = await updateRef(cfg, commit)
                 guard let error else {
                     out.uploaded += blobs.count
+                    out.commitSHA = commit
                     return out
                 }
                 lastError = error
