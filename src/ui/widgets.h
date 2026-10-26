@@ -61,3 +61,7 @@ lv_obj_t *create_floating_button(lv_event_cb_t event_cb, void *user_data);
 /* Full-panel lv_menu with the root back button disabled. `event_cb` (may be
  * nullptr) is attached for LV_EVENT_CLICKED. */
 lv_obj_t *create_menu(lv_obj_t *parent);
+/* Shared teardown of the menu-based apps: deletes *menu (children included)
+ * and, asynchronously, the touch quit button, then nulls both. Either may
+ * already be NULL. Back button / keyboard stay with the caller. */
+void ui_app_widgets_del(lv_obj_t **menu, lv_obj_t **quit_btn);

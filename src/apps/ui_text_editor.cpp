@@ -8,7 +8,7 @@
  *   widgets: menu, text_area, quit_btn, word_count_label, float_bar,
  *            float_sync_btn, float_sync_icon, float_journal_btn
  *                                       — destroyed via lv_obj_del then nulled
- *   unlock:  pending_editor_parent      — nulled, so an unlock prompt that
+ *   unlock:  s_unlock_gate              — nulled, so an unlock prompt that
  *                                          completes after exit builds nothing
  *   display: clip_invalidate_cb         — removed from the default display
  *   timers:  sync_pill_timer            — lv_timer_del + null
@@ -409,29 +409,11 @@ static lv_obj_t *make_editor_pill(lv_obj_t *bar, const char *symbol,
     return btn;
 }
 
-static lv_obj_t *pending_editor_parent = NULL;
-static void editor_unlock_result_cb(bool ok, void *ud)
-{
-    lv_obj_t *parent = (lv_obj_t *)ud;
-    if (!ok) {
-        pending_editor_parent = NULL;
-        menu_show_deferred();
-        return;
-    }
-    if (pending_editor_parent == parent) {
-        pending_editor_parent = NULL;
-        editor_build_ui(parent);
-    }
-}
+static ui_unlock_gate_t s_unlock_gate = { NULL, editor_build_ui };
 
 static void ui_text_editor_enter(lv_obj_t *parent)
 {
-    if (notes_crypto_is_enabled() && !notes_crypto_is_unlocked()) {
-        pending_editor_parent = parent;
-        ui_passphrase_unlock(editor_unlock_result_cb, parent);
-        return;
-    }
-    editor_build_ui(parent);
+    ui_build_when_unlocked(&s_unlock_gate, parent);
 }
 
 static void editor_build_ui(lv_obj_t *parent)
@@ -627,7 +609,7 @@ static void ui_text_editor_exit()
         sync_pill_timer = NULL;
     }
     sync_pill_last_state = -1;
-    pending_editor_parent = NULL;
+    ui_unlock_gate_cancel(&s_unlock_gate);
 
     if (word_count_debounce_timer) {
         lv_timer_del(word_count_debounce_timer);
@@ -642,15 +624,7 @@ static void ui_text_editor_exit()
     float_sync_icon = NULL;
     float_journal_btn = NULL;
 
-    if (menu) {
-        lv_obj_clean(menu);
-        lv_obj_del(menu);
-        menu = NULL;
-    }
-    if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    ui_app_widgets_del(&menu, &quit_btn);
     text_area = NULL;
     disable_keyboard();
     current_file_path = "";

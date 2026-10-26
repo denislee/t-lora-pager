@@ -20,7 +20,7 @@
  *                           LVGL thread and drops it if the submit token no
  *                           longer matches the open prompt. Callers whose app
  *                           can stop while a prompt is open guard their own
- *                           callback (e.g. journal/editor pending_*_parent).
+ *                           callback (e.g. ui_build_when_unlocked's gate).
  */
 #include "ui_define.h"
 #include "hal/notes_crypto.h"
@@ -386,6 +386,38 @@ void ui_passphrase_unlock(ui_passphrase_unlock_cb cb, void *ud)
           "Enter your passphrase",
           /*confirm=*/false, /*verify_unlock=*/true,
           /*cb_pw=*/nullptr, cb, ud);
+}
+
+namespace {
+struct UnlockGateReq { ui_unlock_gate_t *gate; lv_obj_t *parent; };
+
+void unlock_gate_result_cb(bool ok, void *ud)
+{
+    UnlockGateReq *req = (UnlockGateReq *)ud;
+    ui_unlock_gate_t *gate = req->gate;
+    lv_obj_t *parent = req->parent;
+    delete req;
+    if (!ok) {
+        gate->pending = NULL;
+        menu_show_deferred();
+        return;
+    }
+    // Only the prompt this gate is still waiting on may build.
+    if (gate->pending == parent) {
+        gate->pending = NULL;
+        gate->build(parent);
+    }
+}
+} /* namespace */
+
+void ui_build_when_unlocked(ui_unlock_gate_t *gate, lv_obj_t *parent)
+{
+    if (notes_crypto_is_enabled() && !notes_crypto_is_unlocked()) {
+        gate->pending = parent;
+        ui_passphrase_unlock(unlock_gate_result_cb, new UnlockGateReq{gate, parent});
+        return;
+    }
+    gate->build(parent);
 }
 
 void ui_passphrase_prompt(const char *title, const char *subtitle,

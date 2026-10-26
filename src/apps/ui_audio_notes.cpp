@@ -121,7 +121,7 @@ static uint32_t bytes_to_seconds(uint32_t data_bytes)
 static void ensure_notes_dir()
 {
 #ifdef ARDUINO
-    if (!(HW_SD_ONLINE & hw_get_device_online())) return;
+    if (!hw_sd_online()) return;
     core::ScopedSpiLock lock;
     if (!SD.exists(NOTES_DIR)) SD.mkdir(NOTES_DIR);
 #endif
@@ -741,15 +741,7 @@ static void ui_notes_exit()
     // unless kick_notes_reload() re-attaches it on a later re-entry.
     s_notes_scan_job.teardown();
     s_notes_scan_pending = false;
-    if (menu) {
-        lv_obj_clean(menu);
-        lv_obj_del(menu);
-        menu = NULL;
-    }
-    if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    ui_app_widgets_del(&menu, &quit_btn);
     main_page = NULL;
     clear_view_refs();
     notes.clear();

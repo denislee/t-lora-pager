@@ -517,7 +517,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
     if (menu != NULL) return;
     enable_keyboard();
 
-    bool sd_online = (HW_SD_ONLINE & hw_get_device_online()) != 0;
+    bool sd_online = hw_sd_online();
     current_source = SOURCE_INTERNAL;
     current_dir = "/";
 
@@ -599,15 +599,7 @@ void ui_file_browser_exit()
     s_list_job.teardown();
     ui_hide_back_button();
     disable_keyboard();
-    if (menu) {
-        lv_obj_clean(menu);
-        lv_obj_del(menu);
-        menu = NULL;
-    }
-    if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    ui_app_widgets_del(&menu, &quit_btn);
     file_list = NULL;
     src_btn_int = NULL;
     src_btn_sd = NULL;

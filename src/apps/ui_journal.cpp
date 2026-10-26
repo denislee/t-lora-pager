@@ -4,7 +4,7 @@
  *
  * State reset on onStop (ui_journal_exit):
  *   widgets: menu, quit_btn            — destroyed via lv_obj_del then nulled
- *            parent_obj, pending_journal_parent
+ *            parent_obj, s_unlock_gate
  *                                       — nulled (not owned)
  *   paging:  target_focus_index, current_page — reset
  *   cache:   journal_entries / cache_valid    — kept on purpose (warm reopen);
@@ -388,20 +388,7 @@ void ui_journal_exit();
 static void journal_build_ui(lv_obj_t *parent);
 static void schedule_bg_refresh();
 
-static lv_obj_t *pending_journal_parent = NULL;
-static void journal_unlock_result_cb(bool ok, void *ud)
-{
-    lv_obj_t *parent = (lv_obj_t *)ud;
-    if (!ok) {
-        pending_journal_parent = NULL;
-        menu_show_deferred();
-        return;
-    }
-    if (pending_journal_parent == parent) {
-        pending_journal_parent = NULL;
-        journal_build_ui(parent);
-    }
-}
+static ui_unlock_gate_t s_unlock_gate = { NULL, journal_build_ui };
 
 static void free_post_user_data()
 {
@@ -421,13 +408,7 @@ static void free_post_user_data()
 static void teardown_menu_for_rerender()
 {
     free_post_user_data();
-    lv_obj_clean(menu);
-    lv_obj_del(menu);
-    menu = NULL;
-    if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    ui_app_widgets_del(&menu, &quit_btn);
 }
 
 // --- Background refresh -----------------------------------------------------
@@ -781,12 +762,7 @@ void ui_journal_enter(lv_obj_t *parent)
 {
     static bool s_lock_hook_set = false;
     if (!s_lock_hook_set) { notes_crypto_set_lock_hook(journal_lock_hook); s_lock_hook_set = true; }
-    if (notes_crypto_is_enabled() && !notes_crypto_is_unlocked()) {
-        pending_journal_parent = parent;
-        ui_passphrase_unlock(journal_unlock_result_cb, parent);
-        return;
-    }
-    journal_build_ui(parent);
+    ui_build_when_unlocked(&s_unlock_gate, parent);
 }
 
 static void journal_build_ui(lv_obj_t *parent)
@@ -1057,16 +1033,12 @@ void ui_journal_exit()
     loader_hide();
     ui_hide_back_button();
     disable_keyboard();
-    if (menu) {
-        teardown_menu_for_rerender();
-    } else if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    if (menu) free_post_user_data();
+    ui_app_widgets_del(&menu, &quit_btn);
     target_focus_index = -1;
     current_page = 0;
     parent_obj = NULL;
-    pending_journal_parent = NULL;  // a still-open unlock prompt must not build
+    ui_unlock_gate_cancel(&s_unlock_gate);  // a still-open unlock prompt must not build
 }
 
 } // namespace

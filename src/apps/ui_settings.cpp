@@ -661,14 +661,7 @@ static void ui_sys_exit()
     // That cycle races with the core-0 keyboard_task polling the same chip
     // and hangs the device. Keyboard is a system-level resource; leave it on
     // across app switches. Sleep path (ui_pause_timers) still disables it.
-    if (menu) {
-        lv_obj_del(menu);
-        menu = NULL;
-    }
-    if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    ui_app_widgets_del(&menu, &quit_btn);
     hw_set_user_setting(local_param);
     // Rebuild the theme so any system-font change takes effect on the next
     // screen that gets constructed. Objects already created keep their old

@@ -126,6 +126,18 @@ typedef void (*ui_passphrase_unlock_cb)(bool ok, void *ud);
  * and calls `cb` with the outcome. */
 void ui_passphrase_unlock(ui_passphrase_unlock_cb cb, void *ud);
 
+/* Unlock-gated app build shared by the editor and the journal. Runs
+ * `build(parent)` at once when the notes session is unlocked (or crypto is
+ * off); otherwise shows the unlock modal and runs it on success, or returns
+ * to the menu (menu_show_deferred) on cancel. `gate` is the app's static
+ * state: ui_unlock_gate_cancel() on exit makes a still-open prompt a no-op. */
+typedef struct {
+    lv_obj_t *pending;              /* parent awaiting the unlock, or NULL */
+    void (*build)(lv_obj_t *parent);
+} ui_unlock_gate_t;
+void ui_build_when_unlocked(ui_unlock_gate_t *gate, lv_obj_t *parent);
+static inline void ui_unlock_gate_cancel(ui_unlock_gate_t *gate) { gate->pending = NULL; }
+
 /* Low-level prompt. `cb` receives the typed passphrase (non-null, only valid
  * during the callback) on OK, or NULL on Cancel. With `confirm=true`, a second
  * confirmation field is shown and only matching entries proceed. */

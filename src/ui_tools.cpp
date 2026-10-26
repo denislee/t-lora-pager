@@ -821,6 +821,18 @@ lv_obj_t *create_menu(lv_obj_t *parent)
     return menu;
 }
 
+void ui_app_widgets_del(lv_obj_t **menu, lv_obj_t **quit_btn)
+{
+    if (*menu) {
+        lv_obj_del(*menu);
+        *menu = NULL;
+    }
+    if (*quit_btn) {
+        lv_obj_del_async(*quit_btn);
+        *quit_btn = NULL;
+    }
+}
+
 #ifndef ARDUINO
 lv_indev_t *lv_get_encoder_indev()
 {

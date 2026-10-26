@@ -433,15 +433,7 @@ static void ui_tasks_exit() {
     // save_tasks() serializes the `tasks` model (not widget state); flush
     // before tasks.clear() below.
     flush_pending_save();
-    if (menu) {
-        lv_obj_clean(menu);
-        lv_obj_del(menu);
-        menu = NULL;
-    }
-    if (quit_btn) {
-        lv_obj_del_async(quit_btn);
-        quit_btn = NULL;
-    }
+    ui_app_widgets_del(&menu, &quit_btn);
     add_ta = NULL;
     task_container = NULL;
     add_ta_expanded_h = 0;
