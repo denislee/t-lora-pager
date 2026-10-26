@@ -4,14 +4,19 @@ and generator for the golden vectors in protocol/vectors/.
 
 This is the oracle: the firmware (src/hal/link/link_frame.cpp) and the Swift
 codec (ios/PagerKit) are tested against what it writes, never against each
-other. Deterministic — re-running it must produce byte-identical files.
+other. Deterministic — re-running it must produce byte-identical files. It also
+writes notes_crypto.json (OpenSSL `enc` format the firmware's
+src/hal/notes_crypto.cpp uses) and git_blob.json (git blob SHA-1).
 
     python3 protocol/tools/mkvectors.py            # rewrite vectors
     python3 protocol/tools/mkvectors.py --check    # exit 1 if they are stale
 """
+import hashlib
 import json
 import os
+import shutil
 import struct
+import subprocess
 import sys
 import zlib
 
@@ -220,12 +225,338 @@ def bulk_vectors():
             "crc32": crc32}
 
 
+# --- AES-256 (FIPS-197), only for the notes_crypto oracle ---
+
+
+def gmul(a, b):
+    p = 0
+    for _ in range(8):
+        if b & 1:
+            p ^= a
+        hi = a & 0x80
+        a = (a << 1) & 0xFF
+        if hi:
+            a ^= 0x1B
+        b >>= 1
+    return p
+
+
+def xtime(a):
+    return gmul(a, 2)
+
+
+def _build_sbox():
+    """GF(2^8) multiplicative inverse, then the FIPS-197 affine transform."""
+    inv = [0] * 256
+    for a in range(1, 256):
+        for b in range(1, 256):
+            if gmul(a, b) == 1:
+                inv[a] = b
+                break
+    out = []
+    for a in range(256):
+        b = inv[a]
+        s = b
+        for _ in range(4):
+            b = ((b << 1) | (b >> 7)) & 0xFF
+            s ^= b
+        out.append(s ^ 0x63)
+    return out
+
+
+SBOX = _build_sbox()
+INV_SBOX = [0] * 256
+for _i, _v in enumerate(SBOX):
+    INV_SBOX[_v] = _i
+RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36]
+
+
+def aes256_expand_key(key):
+    if len(key) != 32:
+        raise ValueError("AES-256 key must be 32 bytes")
+    words = [list(key[4 * i:4 * i + 4]) for i in range(8)]
+    for i in range(8, 60):
+        temp = list(words[i - 1])
+        if i % 8 == 0:
+            temp = temp[1:] + temp[:1]
+            temp = [SBOX[x] for x in temp]
+            temp[0] ^= RCON[i // 8 - 1]
+        elif i % 8 == 4:
+            temp = [SBOX[x] for x in temp]
+        words.append([words[i - 8][j] ^ temp[j] for j in range(4)])
+    return [bytes(b for w in words[4 * r:4 * r + 4] for b in w) for r in range(15)]
+
+
+def _add_round_key(state, rk):
+    return [state[i] ^ rk[i] for i in range(16)]
+
+
+def _sub_bytes(state, box):
+    return [box[x] for x in state]
+
+
+def _shift_rows(state, inverse=False):
+    out = [0] * 16
+    for r in range(4):
+        for c in range(4):
+            src = (c - r) % 4 if inverse else (c + r) % 4
+            out[r + 4 * c] = state[r + 4 * src]
+    return out
+
+
+def _mix_columns(state, inverse=False):
+    m = [14, 11, 13, 9] if inverse else [2, 3, 1, 1]
+    out = []
+    for c in range(4):
+        a = state[4 * c:4 * c + 4]
+        for row in range(4):
+            s = 0
+            for k in range(4):
+                s ^= gmul(a[k], m[(k - row) % 4])
+            out.append(s)
+    return out
+
+
+def aes_encrypt_block(rk, block16):
+    if len(block16) != 16:
+        raise ValueError("block must be 16 bytes")
+    state = _add_round_key(list(block16), rk[0])
+    for rnd in range(1, 14):
+        state = _add_round_key(_mix_columns(_shift_rows(_sub_bytes(state, SBOX))), rk[rnd])
+    state = _add_round_key(_shift_rows(_sub_bytes(state, SBOX)), rk[14])
+    return bytes(state)
+
+
+def aes_decrypt_block(rk, block16):
+    if len(block16) != 16:
+        raise ValueError("block must be 16 bytes")
+    state = _add_round_key(list(block16), rk[14])
+    for rnd in range(13, 0, -1):
+        state = _shift_rows(_sub_bytes(state, INV_SBOX), True)
+        state = _add_round_key(state, rk[rnd])
+        state = _mix_columns(state, True)
+    state = _shift_rows(_sub_bytes(state, INV_SBOX), True)
+    return bytes(_add_round_key(state, rk[0]))
+
+
+def pkcs7_pad(data):
+    n = 16 - (len(data) % 16)
+    return data + bytes([n]) * n
+
+
+def pkcs7_unpad(data):
+    if not data:
+        return None
+    n = data[-1]
+    if n == 0 or n > 16 or n > len(data):
+        return None
+    if data[-n:] != bytes([n]) * n:
+        return None
+    return data[:-n]
+
+
+def aes256_cbc_encrypt(key, iv, plaintext):
+    rk = aes256_expand_key(key)
+    buf = pkcs7_pad(plaintext)
+    out = bytearray()
+    prev = iv
+    for off in range(0, len(buf), 16):
+        blk = bytes(a ^ b for a, b in zip(buf[off:off + 16], prev))
+        prev = aes_encrypt_block(rk, blk)
+        out += prev
+    return bytes(out)
+
+
+def aes256_cbc_decrypt_raw(key, iv, ciphertext):
+    rk = aes256_expand_key(key)
+    out = bytearray()
+    prev = iv
+    for off in range(0, len(ciphertext), 16):
+        blk = ciphertext[off:off + 16]
+        out += bytes(a ^ b for a, b in zip(aes_decrypt_block(rk, blk), prev))
+        prev = blk
+    return bytes(out)
+
+
+# FIPS-197 Appendix C.3 known answer.
+_FIPS_KEY = bytes(range(32))
+_FIPS_IN = bytes.fromhex("00112233445566778899aabbccddeeff")
+_FIPS_OUT = bytes.fromhex("8ea2b7ca516745bfeafc49904b496089")
+_FIPS_RK = aes256_expand_key(_FIPS_KEY)
+assert len(_FIPS_RK) == 15 and all(len(k) == 16 for k in _FIPS_RK)
+assert aes_encrypt_block(_FIPS_RK, _FIPS_IN) == _FIPS_OUT
+assert aes_decrypt_block(_FIPS_RK, _FIPS_OUT) == _FIPS_IN
+
+
+NOTES_ITER = 10000
+NOTES_MAGIC = b"Salted__"
+
+
+def notes_derive(passphrase, salt):
+    dk = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, NOTES_ITER, 48)
+    return dk[:32], dk[32:48]
+
+
+def notes_encrypt(passphrase, salt, plaintext):
+    if len(salt) != 8:
+        raise ValueError("salt must be 8 bytes")
+    key, iv = notes_derive(passphrase, salt)
+    return NOTES_MAGIC + salt + aes256_cbc_encrypt(key, iv, plaintext)
+
+
+def notes_decrypt_detail(passphrase, data):
+    """Returns (plaintext, None) or (None, reason)."""
+    if data is None or len(data) < 16:
+        return None, "short"
+    if not data.startswith(NOTES_MAGIC):
+        return None, "header"
+    salt, body = data[8:16], data[16:]
+    if not body:
+        return None, "short"
+    if len(body) % 16:
+        return None, "length"
+    key, iv = notes_derive(passphrase, salt)
+    plain = pkcs7_unpad(aes256_cbc_decrypt_raw(key, iv, body))
+    if plain is None:
+        return None, "padding"
+    return plain, None
+
+
+def notes_decrypt(passphrase, data):
+    return notes_decrypt_detail(passphrase, data)[0]
+
+
+def notes_crypto_vectors():
+    cases = [
+        ("empty", "hunter2", "0102030405060708", b""),
+        ("short", "hunter2", "a1a2a3a4a5a6a7a8", b"hi\n"),
+        ("exact_block", "correct horse battery staple", "0011223344556677",
+         b"0123456789abcdef"),
+        ("multi_block", "correct horse battery staple", "deadbeefcafef00d",
+         b"Shopping list\n- milk\n- eggs\n- coffee beans\n- batteries (AA)\n\n"
+         b"Call the plumber on Tuesday.\n"),
+        ("utf8_non_ascii", "p\u00e4ssw\u00f6rd \u2713", "f0e1d2c3b4a59687",
+         "\u041f\u0440\u0438\u0432\u0435\u0442, caf\u00e9 \u2014 \u65e5\u672c\u8a9e \u2713\nsecond line\n".encode("utf-8")),
+    ]
+    valid = []
+    for name, passphrase, salt_hex, plaintext in cases:
+        salt = bytes.fromhex(salt_hex)
+        key, iv = notes_derive(passphrase, salt)
+        ct = notes_encrypt(passphrase, salt, plaintext)
+        assert notes_decrypt(passphrase, ct) == plaintext, name
+        valid.append({"name": name, "passphrase": passphrase, "salt_hex": salt_hex,
+                      "key_hex": key.hex(), "iv_hex": iv.hex(),
+                      "plaintext_hex": plaintext.hex(), "ciphertext_hex": ct.hex()})
+
+    multi = next(v for v in valid if v["name"] == "multi_block")
+    multi_ct = bytes.fromhex(multi["ciphertext_hex"])
+    multi_pt = bytes.fromhex(multi["plaintext_hex"])
+    wrong_passphrase, wrong = [], None
+    for cand in ["hunter3", "hunter4", "hunter5", "hunter6", "hunter7"]:
+        if notes_decrypt(cand, multi_ct) is None:
+            wrong = cand
+            break
+    assert wrong is not None, "no wrong passphrase produced invalid padding"
+    wrong_passphrase.append({"name": "multi_block_wrong", "passphrase": wrong,
+                             "ciphertext_hex": multi_ct.hex()})
+
+    malformed = []
+    for name, data, reason in [
+        ("empty", b"", "short"),
+        ("short_header", b"Salted__1234", "short"),
+        ("missing_magic", b"NotSalted1234567" + bytes(16), "header"),
+        ("header_only", b"Salted__" + bytes.fromhex("0102030405060708"), "short"),
+        ("not_block_multiple", b"Salted__" + bytes.fromhex("0102030405060708") + bytes(15), "length"),
+    ]:
+        _, got = notes_decrypt_detail("hunter2", data)
+        assert notes_decrypt("hunter2", data) is None, name
+        assert got == reason, (name, got, reason)
+        malformed.append({"name": name, "bytes_hex": data.hex(), "reason": reason})
+
+    return {"iterations": NOTES_ITER, "valid": valid,
+            "wrong_passphrase": wrong_passphrase, "malformed": malformed}
+
+
+# --- git blob hashing ---
+
+
+def git_blob_sha1(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def git_blob_vectors():
+    multi = next(v for v in notes_crypto_vectors()["valid"] if v["name"] == "multi_block")
+    blobs = []
+    for name, data in [
+        ("empty", b""),
+        ("hello", b"hello\n"),
+        ("utf8", "caf\u00e9 \u2713\n".encode("utf-8")),
+        ("salted", bytes.fromhex(multi["ciphertext_hex"])),
+        ("pattern_5000", pattern(5000, 3)),
+    ]:
+        blobs.append({"name": name, "bytes_hex": data.hex(), "sha1": git_blob_sha1(data)})
+    assert blobs[0]["sha1"] == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    assert blobs[1]["sha1"] == "ce013625030ba8dba906f756967f9e9ca394464a"
+    return {"blobs": blobs}
+
+
+def _openssl_decrypt(openssl, iterations, passphrase, data):
+    return subprocess.run(
+        [openssl, "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", str(iterations),
+         "-md", "sha256", "-pass", "env:MKV_PASS"],
+        input=data, env=dict(os.environ, MKV_PASS=passphrase),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def cross_check(rendered):
+    notes = rendered["notes_crypto.json"]
+    blobs = rendered["git_blob.json"]["blobs"]
+    multi_pt = next(bytes.fromhex(v["plaintext_hex"]) for v in notes["valid"]
+                    if v["name"] == "multi_block")
+    ok = True
+
+    openssl = shutil.which("openssl")
+    if openssl:
+        for v in notes["valid"]:
+            want = bytes.fromhex(v["plaintext_hex"])
+            proc = _openssl_decrypt(openssl, notes["iterations"], v["passphrase"],
+                                    bytes.fromhex(v["ciphertext_hex"]))
+            if proc.returncode != 0 or proc.stdout != want:
+                print("cross_check: openssl mismatch for notes_crypto/%s (rc=%d, got=%s, want=%s)"
+                      % (v["name"], proc.returncode, proc.stdout.hex(), want.hex()),
+                      file=sys.stderr)
+                ok = False
+        for v in notes["wrong_passphrase"]:
+            proc = _openssl_decrypt(openssl, notes["iterations"], v["passphrase"],
+                                    bytes.fromhex(v["ciphertext_hex"]))
+            if proc.returncode == 0 and proc.stdout == multi_pt:
+                print("cross_check: openssl accepted wrong passphrase for notes_crypto/%s"
+                      % v["name"], file=sys.stderr)
+                ok = False
+
+    git = shutil.which("git")
+    if git:
+        for b in blobs:
+            proc = subprocess.run([git, "hash-object", "--stdin"],
+                                  input=bytes.fromhex(b["bytes_hex"]),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            got = proc.stdout.decode("ascii", "replace").strip()
+            if proc.returncode != 0 or got != b["sha1"]:
+                print("cross_check: git mismatch for git_blob/%s (rc=%d, got=%r, want=%s)"
+                      % (b["name"], proc.returncode, got, b["sha1"]), file=sys.stderr)
+                ok = False
+
+    return ok
+
+
 def render():
     return {
         "message.json": message_vectors(),
         "segment.json": segment_vectors(),
         "reassemble.json": reassemble_vectors(),
         "bulk.json": bulk_vectors(),
+        "notes_crypto.json": notes_crypto_vectors(),
+        "git_blob.json": git_blob_vectors(),
     }
 
 
@@ -233,7 +564,8 @@ def main():
     vdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vectors")
     os.makedirs(vdir, exist_ok=True)
     stale = []
-    for fname, obj in render().items():
+    objs = render()
+    for fname, obj in objs.items():
         text = json.dumps(obj, indent=1, sort_keys=True) + "\n"
         path = os.path.join(vdir, fname)
         cur = open(path).read() if os.path.exists(path) else None
@@ -242,6 +574,8 @@ def main():
             if "--check" not in sys.argv:
                 with open(path, "w") as f:
                     f.write(text)
+    if not cross_check(objs):
+        return 1
     if "--check" in sys.argv and stale:
         print("stale vectors: " + ", ".join(stale), file=sys.stderr)
         return 1

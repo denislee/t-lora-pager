@@ -1,0 +1,84 @@
+{
+ "iterations": 10000,
+ "malformed": [
+  {
+   "bytes_hex": "",
+   "name": "empty",
+   "reason": "short"
+  },
+  {
+   "bytes_hex": "53616c7465645f5f31323334",
+   "name": "short_header",
+   "reason": "short"
+  },
+  {
+   "bytes_hex": "4e6f7453616c7465643132333435363700000000000000000000000000000000",
+   "name": "missing_magic",
+   "reason": "header"
+  },
+  {
+   "bytes_hex": "53616c7465645f5f0102030405060708",
+   "name": "header_only",
+   "reason": "short"
+  },
+  {
+   "bytes_hex": "53616c7465645f5f0102030405060708000000000000000000000000000000",
+   "name": "not_block_multiple",
+   "reason": "length"
+  }
+ ],
+ "valid": [
+  {
+   "ciphertext_hex": "53616c7465645f5f010203040506070806b3a8d39ef352996f0c0fa5fa00786c",
+   "iv_hex": "4530fdc38287f064e7624d95a0862d67",
+   "key_hex": "2e8bb77faf1815202a073292eb753ddcfe7511ef67860f7ed11a6ca615acde69",
+   "name": "empty",
+   "passphrase": "hunter2",
+   "plaintext_hex": "",
+   "salt_hex": "0102030405060708"
+  },
+  {
+   "ciphertext_hex": "53616c7465645f5fa1a2a3a4a5a6a7a86cc90ac27d8098b960fc62c467e48204",
+   "iv_hex": "249ce1143902a80e43f7a10b4f8cc686",
+   "key_hex": "bb6b0e9e7c0b318c4bbd78896ecd43311d7548ea0fc323f35d5dd87d1800ccba",
+   "name": "short",
+   "passphrase": "hunter2",
+   "plaintext_hex": "68690a",
+   "salt_hex": "a1a2a3a4a5a6a7a8"
+  },
+  {
+   "ciphertext_hex": "53616c7465645f5f0011223344556677f6affc0bff7338b38c24f1d51ea35a651fcc7c64f6ddfc3d82f29a62b4ec4bbf",
+   "iv_hex": "9e15d6879dc73cfb2f7f28d3ce9e2f9d",
+   "key_hex": "32e40dcba34836d591c0e3a73caacafadaf59372158c0d46b924b3dcf1551e66",
+   "name": "exact_block",
+   "passphrase": "correct horse battery staple",
+   "plaintext_hex": "30313233343536373839616263646566",
+   "salt_hex": "0011223344556677"
+  },
+  {
+   "ciphertext_hex": "53616c7465645f5fdeadbeefcafef00db93870c354f26d336dd000e7ca829032419f3bb85f5bfd8bb25d6d258bbdd76023e4e80ec08a05e3d4732a8d55b568fb3bf6bcac5b71a39286e6c01afd5cc0ffa198f50fbf5db2cc7163d9ffd63f9a1d13d5cabdd8d5b22dc6c31123a83662a8",
+   "iv_hex": "3a29f1f55d0c3d90ab47d11f8c8e6eeb",
+   "key_hex": "d387ee2aa0bc364d7cab45a76d52fa88481a9a3c856a6b172b525d208a254a10",
+   "name": "multi_block",
+   "passphrase": "correct horse battery staple",
+   "plaintext_hex": "53686f7070696e67206c6973740a2d206d696c6b0a2d20656767730a2d20636f66666565206265616e730a2d2062617474657269657320284141290a0a43616c6c2074686520706c756d626572206f6e20547565736461792e0a",
+   "salt_hex": "deadbeefcafef00d"
+  },
+  {
+   "ciphertext_hex": "53616c7465645f5ff0e1d2c3b4a5968727b67443deb4215f0562981b58a77bd17cb13d0434b1e688cd518ffae99fe9845766da344c37d332bddd0fc968ea585d5251078b17891e651d1d37d4266e4962",
+   "iv_hex": "e08c01434306c1e8d1df2161bf0ba60d",
+   "key_hex": "111bd0723dee1c88c948c649e0a6e1019e57b514c597045d22e4a89d20605adc",
+   "name": "utf8_non_ascii",
+   "passphrase": "p\u00e4ssw\u00f6rd \u2713",
+   "plaintext_hex": "d09fd180d0b8d0b2d0b5d1822c20636166c3a920e2809420e697a5e69cace8aa9e20e29c930a7365636f6e64206c696e650a",
+   "salt_hex": "f0e1d2c3b4a59687"
+  }
+ ],
+ "wrong_passphrase": [
+  {
+   "ciphertext_hex": "53616c7465645f5fdeadbeefcafef00db93870c354f26d336dd000e7ca829032419f3bb85f5bfd8bb25d6d258bbdd76023e4e80ec08a05e3d4732a8d55b568fb3bf6bcac5b71a39286e6c01afd5cc0ffa198f50fbf5db2cc7163d9ffd63f9a1d13d5cabdd8d5b22dc6c31123a83662a8",
+   "name": "multi_block_wrong",
+   "passphrase": "hunter3"
+  }
+ ]
+}
