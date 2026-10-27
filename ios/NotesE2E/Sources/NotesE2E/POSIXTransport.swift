@@ -1,9 +1,20 @@
 import Foundation
-import Glibc
 import PagerKit
+#if canImport(Glibc)
+import Glibc
+private let sockStream = Int32(SOCK_STREAM.rawValue)
+private let sysSend = Glibc.send
+private let sysClose = Glibc.close
+#else
+import Darwin
+private let sockStream = SOCK_STREAM
+private let sysSend = Darwin.send
+private let sysClose = Darwin.close
+#endif
 
 /// PagerLink over the emulator's TCP port (PROTOCOL.md §5: u16 LE length +
-/// packet) on a blocking POSIX socket; Linux stand-in for TCPTransport.
+/// packet) on a blocking POSIX socket; Linux (and plain macOS) stand-in for
+/// TCPTransport.
 final class POSIXTransport: PacketTransport, @unchecked Sendable {
     let packetSize = PagerLink.tcpPacket
     let packets: AsyncStream<[UInt8]>
@@ -15,7 +26,13 @@ final class POSIXTransport: PacketTransport, @unchecked Sendable {
         var c: AsyncStream<[UInt8]>.Continuation!
         packets = AsyncStream { c = $0 }
         continuation = c
-        fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        fd = socket(AF_INET, sockStream, 0)
+        #if canImport(Darwin)
+        // Darwin has no MSG_NOSIGNAL: a send after the emulator hangs up
+        // must fail, not raise SIGPIPE.
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        #endif
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = port.bigEndian
@@ -57,7 +74,7 @@ final class POSIXTransport: PacketTransport, @unchecked Sendable {
         lock.withLock {
             var sent = 0
             while sent < record.count {
-                let r = record.withUnsafeBytes { Glibc.send(fd, $0.baseAddress! + sent, record.count - sent, 0) }
+                let r = record.withUnsafeBytes { sysSend(fd, $0.baseAddress! + sent, record.count - sent, 0) }
                 if r <= 0 { return false }
                 sent += r
             }
@@ -65,5 +82,5 @@ final class POSIXTransport: PacketTransport, @unchecked Sendable {
         }
     }
 
-    func close() { shutdown(fd, Int32(SHUT_RDWR)); Glibc.close(fd) }
+    func close() { shutdown(fd, Int32(SHUT_RDWR)); _ = sysClose(fd) }
 }
