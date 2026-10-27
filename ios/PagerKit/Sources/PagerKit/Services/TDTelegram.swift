@@ -195,6 +195,12 @@ public actor TDTelegram: TelegramNative {
         }
     }
 
+    /// A TDLib `user`'s "first last", skipping empty parts.
+    public static func displayName(_ user: JSONValue) -> String {
+        [user["first_name"]?.stringValue, user["last_name"]?.stringValue]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
     /// A sender's display name, cached per session.
     func senderName(_ sender: JSONValue?) async -> String {
         let type = sender?["@type"]?.stringValue
@@ -204,8 +210,7 @@ public actor TDTelegram: TelegramNative {
             guard let user = try? await call(["@type": "getUser", "user_id": .number(Double(userID))]) else {
                 return ""
             }
-            let name = [user["first_name"]?.stringValue, user["last_name"]?.stringValue]
-                .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
+            let name = Self.displayName(user)
             names[key] = name
             return name
         }

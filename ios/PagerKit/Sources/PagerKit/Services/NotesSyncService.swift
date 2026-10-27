@@ -588,15 +588,19 @@ public actor NotesSyncService {
 
     // MARK: - The move engine (§3.6)
 
+    // A static helper with an inout result, not a nested func: a nested func
+    // capturing `out` is actor-isolated and newer compilers reject returning
+    // `out` after it (region isolation).
+    private static func fail(_ out: inout NotesMoveResult, _ input: MoveInput, _ reason: String) {
+        out.errors.append(NotesMoveIssue(vol: input.vol, name: input.name, reason: reason))
+    }
+
     private func runMove(_ inputs: [MoveInput],
                          progress: @Sendable (NotesMoveProgress) async -> Void) async -> NotesMoveResult {
         var out = NotesMoveResult()
         out.canDelete = canDelete
-        func fail(_ input: MoveInput, _ reason: String) {
-            out.errors.append(NotesMoveIssue(vol: input.vol, name: input.name, reason: reason))
-        }
         guard let github else {
-            inputs.forEach { fail($0, "github not configured") }
+            for input in inputs { Self.fail(&out, input, "github not configured") }
             return out
         }
         if inputs.isEmpty { return out }
@@ -609,7 +613,7 @@ public actor NotesSyncService {
             remote = try await github.existingBlobs()
         } catch {
             let reason = GitHubNotesBackend.describe(error)
-            inputs.forEach { fail($0, reason) }
+            for input in inputs { Self.fail(&out, input, reason) }
             return out
         }
 
@@ -621,12 +625,12 @@ public actor NotesSyncService {
         var planned = remote
         for (index, input) in inputs.enumerated() {
             if Task.isCancelled {
-                inputs[index...].forEach { fail($0, Self.keepCancelled) }
+                for input in inputs[index...] { Self.fail(&out, input, Self.keepCancelled) }
                 return out
             }
             await progress(.pulling(done: index, total: inputs.count))
             guard GitHubNotesBackend.safeName(input.name) else {
-                fail(input, "invalid name")
+                Self.fail(&out, input, "invalid name")
                 continue
             }
             let bytes: [UInt8]
@@ -634,7 +638,7 @@ public actor NotesSyncService {
                 (bytes, _) = try await session.readFile(vol: input.vol, path: "/notes/" + input.name,
                                                         timeout: readTimeout)
             } catch {
-                fail(input, "read: \(GitHubNotesBackend.describe(error))")
+                Self.fail(&out, input, "read: \(GitHubNotesBackend.describe(error))")
                 continue
             }
             let crc = CRC32.checksum(bytes)
@@ -642,11 +646,11 @@ public actor NotesSyncService {
                UInt32(exactly: bytes.count) != expect.size || crc != expect.crc32 {
                 // The manifest describes the raw on-disk bytes; the note
                 // changed after the pager built it.
-                fail(input, "changed since the manifest")
+                Self.fail(&out, input, "changed since the manifest")
                 continue
             }
             guard let size = UInt32(exactly: bytes.count) else {
-                fail(input, "too large")
+                Self.fail(&out, input, "too large")
                 continue
             }
             let sha = GitBlob.sha1(bytes)
@@ -655,7 +659,7 @@ public actor NotesSyncService {
             if let existing = planned[remoteName], existing != sha {
                 remoteName = Self.conflictName(input.name, sha: sha)
                 guard GitHubNotesBackend.safeName(remoteName) else {
-                    fail(input, "invalid name")
+                    Self.fail(&out, input, "invalid name")
                     continue
                 }
             }
@@ -663,7 +667,7 @@ public actor NotesSyncService {
             case sha?: break // already there (or already planned) byte for byte
             case nil: upload = true
             case _?:
-                fail(input, "name clash at \(remoteName)")
+                Self.fail(&out, input, "name clash at \(remoteName)")
                 continue
             }
             if upload {
