@@ -87,7 +87,12 @@ final class PagerSession: ObservableObject {
         }
         cancelReconnect()
         reconnectDelay = 2
+        #if targetEnvironment(simulator)
+        // The Simulator has no Bluetooth radio; its pager is the emulator.
+        Task { await connectTCP(host: TCPTransport.defaultHost, port: TCPTransport.defaultPort) }
+        #else
         Task { await connectBLE() }
+        #endif
     }
 
     /// Retry the BLE connect after a backoff delay, if auto-connect wants it.
