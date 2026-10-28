@@ -11,9 +11,10 @@
  *
  * On the emulator both volumes are real directories, `$PAGERLINK_FS_ROOT/int`
  * and `$PAGERLINK_FS_ROOT/sd` (default root /tmp/pagerlink-fs), created on
- * first use. They are independent of the emulator's canned storage listings
- * that the UI and the screenshot sweep render, so link transfers can be tested
- * end to end without changing any screenshot.
+ * first use. The emulator's note storage (storage.cpp: the Journal, editor
+ * and Tasks app) lives in the same directories (host_dir), so a note the
+ * phone writes shows up in the Journal and the other way round. The file
+ * browser's canned listings stay independent of them.
  *
  * Every `path` is an absolute path already passed through sandbox_path()
  * (notes_path.h): "/" or "/a/b", no "..", no trailing '/'. Each vol_* call
@@ -41,6 +42,11 @@ struct VolEntry {
     uint32_t size;  /* bytes; 0 for directories */
     uint32_t mtime; /* unix seconds; 0 when unknown */
 };
+
+#ifndef ARDUINO
+/** Emulator: the host directory backing `v`, created on first use. */
+std::string host_dir(Vol v);
+#endif
 
 /** True when the volume can be used now (the SD card is mounted). */
 bool vol_available(Vol v);

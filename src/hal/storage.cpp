@@ -18,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifdef ARDUINO
 #include <algorithm>
@@ -30,6 +31,15 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/event_groups.h>
+#else
+#include <algorithm>
+#include <cstdio>
+#include <functional>
+#include <set>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "link/fs_volume.h"
 #endif
 
 /* When notes_crypto is enabled+unlocked, the text I/O wrappers below
@@ -54,6 +64,94 @@ static inline void wait_pending_save() {}
 static inline void wait_pending_save_for(const char *) {}
 static inline void wait_pending_save_under(const char *) {}
 static inline void wait_pending_save_in_dir(const char *) {}
+#endif
+
+#ifndef ARDUINO
+/* Emulator note storage: the PagerLink file service's two host directories
+ * (fs_volume.h host_dir) stand in for FFat and the SD card, so the Journal,
+ * the editor and the Tasks app see what the phone reads and writes over the
+ * link, and the other way round. The card counts as inserted, as it does for
+ * PagerLink on the emulator. Notes crypto is never unlocked here, so an
+ * encrypted note reads as unavailable, like on a locked pager. The file
+ * browser's canned listings (hw_list_*_entries) stay as they are. */
+namespace {
+std::string emu_path(bool sd, const char *path)
+{
+    char norm[256];
+    normalize_path(path, norm, sizeof(norm));
+    return pagerlink::host_dir(sd ? pagerlink::Vol::Sd : pagerlink::Vol::Int) + norm;
+}
+
+bool emu_size(bool sd, const char *path, size_t &out)
+{
+    struct stat st;
+    if (::stat(emu_path(sd, path).c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    out = (size_t)st.st_size;
+    return true;
+}
+
+bool emu_read(bool sd, const char *path, std::vector<uint8_t> &out)
+{
+    out.clear();
+    FILE *f = std::fopen(emu_path(sd, path).c_str(), "rb");
+    if (!f) return false;
+    uint8_t chunk[4096];
+    size_t n;
+    while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0) out.insert(out.end(), chunk, chunk + n);
+    const bool ok = !std::ferror(f);
+    std::fclose(f);
+    return ok;
+}
+
+/* Whole-file write through a temp file and rename, creating the parent
+ * directory (one level: /notes) when missing. */
+bool emu_write(bool sd, const char *path, const uint8_t *buf, size_t len)
+{
+    const std::string full = emu_path(sd, path);
+    const size_t slash = full.rfind('/');
+    if (slash != std::string::npos) ::mkdir(full.substr(0, slash).c_str(), 0755);
+    const std::string tmp = full + ".tmp";
+    FILE *f = std::fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    bool ok = (len == 0 || std::fwrite(buf, 1, len, f) == len);
+    ok = (std::fclose(f) == 0) && ok;
+    if (ok) ok = (std::rename(tmp.c_str(), full.c_str()) == 0);
+    if (!ok) ::unlink(tmp.c_str());
+    return ok;
+}
+
+bool emu_remove(bool sd, const char *path)
+{
+    return ::unlink(emu_path(sd, path).c_str()) == 0;
+}
+
+/* Leaf names of the regular `ext` files in `dir`, unsorted (list_files). */
+void emu_list(bool sd, const char *dir, const char *ext, std::vector<std::string> &out)
+{
+    DIR *d = ::opendir(emu_path(sd, dir).c_str());
+    if (!d) return;
+    const std::string base = emu_path(sd, dir);
+    const size_t elen = strlen(ext);
+    while (struct dirent *de = ::readdir(d)) {
+        const std::string name = de->d_name;
+        if (name.size() < elen || name.compare(name.size() - elen, elen, ext) != 0) continue;
+        struct stat st;
+        if (::stat((base + "/" + name).c_str(), &st) == 0 && S_ISREG(st.st_mode)) out.push_back(name);
+    }
+    ::closedir(d);
+}
+
+/* open_preferred(): the SD copy first when `sd_first`, else internal first. */
+bool emu_read_preferred(const char *path, bool sd_first, std::vector<uint8_t> &out)
+{
+    return emu_read(sd_first, path, out) || emu_read(!sd_first, path, out);
+}
+
+bool emu_is_ciphertext(const std::vector<uint8_t> &buf)
+{
+    return content_has_salted_magic((const char *)buf.data(), buf.size());
+}
+}  // namespace
 #endif
 
 #ifdef ARDUINO
@@ -434,8 +532,9 @@ bool hw_delete_file(const char *path)
     bool res_int = FFat.remove(str);
     return res_sd || res_int;
 #else
-    log_d("Delete file: %s", path);
-    return true;
+    const bool res_sd = emu_remove(true, path);
+    const bool res_int = emu_remove(false, path);
+    return res_sd || res_int;
 #endif
 }
 
@@ -544,8 +643,11 @@ bool hw_read_file(const char *path, std::string &content)
     }
     return true;
 #else
-    log_d("Read from file: %s", path);
-    content = "Dummy content for simulation";
+    std::vector<uint8_t> buf;
+    content.clear();
+    if (!emu_read_preferred(path, /*sd_first=*/true, buf)) return false;
+    if (emu_is_ciphertext(buf)) return false;  // locked, as decode_after_read
+    content.assign(buf.begin(), buf.end());
     return true;
 #endif
 }
@@ -566,7 +668,9 @@ size_t hw_get_file_size(const char *path)
     }
     return size;
 #else
-    return 1024;
+    size_t size = 0;
+    if (!emu_size(true, path, size)) emu_size(false, path, size);
+    return size;
 #endif
 }
 
@@ -579,8 +683,7 @@ bool hw_read_internal_bytes_raw(const char *path, std::vector<uint8_t> &buf)
     wait_pending_save_for(str);
     return hal::fs_read_all(FFat, str, buf);
 #else
-    (void)path;
-    return false;
+    return emu_read(false, path, buf);
 #endif
 }
 
@@ -595,8 +698,7 @@ bool hw_read_sd_bytes_raw(const char *path, std::vector<uint8_t> &buf)
     core::ScopedSpiLock lock;
     return hal::fs_read_all(SD, str, buf);
 #else
-    (void)path;
-    return false;
+    return emu_read(true, path, buf);
 #endif
 }
 
@@ -686,8 +788,10 @@ void hw_get_internal_txt_files(std::vector<std::string> &list)
         list.push_back(NOTES_PREFIX + name);
     }
 #else
-    list.push_back("notes/internal1.txt");
-    list.push_back("notes/internal2.txt");
+    std::vector<std::string> names;
+    emu_list(false, NOTES_DIR, ".txt", names);
+    std::sort(names.begin(), names.end(), std::greater<std::string>());  // newest first
+    for (const auto &name : names) list.push_back(NOTES_PREFIX + name);
 #endif
 }
 
@@ -709,8 +813,10 @@ void hw_get_sd_txt_files(std::vector<std::string> &list)
         }
     }
 #else
-    list.push_back("notes/sd1.txt");
-    list.push_back("notes/sd2.txt");
+    std::vector<std::string> names;
+    emu_list(true, NOTES_DIR, ".txt", names);
+    std::sort(names.begin(), names.end(), std::greater<std::string>());  // newest first
+    for (const auto &name : names) list.push_back(NOTES_PREFIX + name);
 #endif
 }
 
@@ -840,7 +946,16 @@ uint32_t hw_count_internal_files()
     dir.close();
     return count;
 #else
-    return 4;
+    DIR *d = ::opendir(emu_path(false, NOTES_DIR).c_str());
+    if (!d) return 0;
+    uint32_t count = 0;
+    while (struct dirent *de = ::readdir(d)) {
+        if (de->d_name[0] == '.') continue;
+        size_t size = 0;
+        if (emu_size(false, (std::string(NOTES_DIR) + "/" + de->d_name).c_str(), size)) count++;
+    }
+    ::closedir(d);
+    return count;
 #endif
 }
 
@@ -1015,10 +1130,14 @@ static bool save_preferred_file_impl(const char *path, const char *content, std:
     if (allow_prune) prune_internal_storage();
     return ok_int;
 #else
-    (void)error;
     (void)allow_prune;
-    log_d("Save to preferred file: %s, content: %s", path, content);
-    return true;
+    /* Notes crypto is never enabled on the emulator: encode_for_write would
+     * pass the plaintext through. */
+    const size_t len = content ? strlen(content) : 0;
+    const bool ok_int = emu_write(false, path, (const uint8_t *)content, len);
+    if (!ok_int && error) *error = "Cannot write to Internal.";
+    emu_write(true, path, (const uint8_t *)content, len);
+    return ok_int;
 #endif
 }
 
@@ -1221,9 +1340,12 @@ bool hw_read_preferred_file_snippet(const char *path, std::string &content, size
     if (truncated) *truncated = total > max_bytes;
     return true;
 #else
-    (void)path; (void)max_bytes;
-    content = "simulated preview...";
-    if (truncated) *truncated = true;
+    std::vector<uint8_t> buf;
+    if (!emu_read_preferred(path, /*sd_first=*/false, buf)) return false;
+    if (emu_is_ciphertext(buf)) return false;  // locked, as decode_after_read
+    const size_t n = buf.size() < max_bytes ? buf.size() : max_bytes;
+    content.assign(buf.begin(), buf.begin() + n);
+    if (truncated) *truncated = buf.size() > max_bytes;
     return true;
 #endif
 }
@@ -1260,6 +1382,21 @@ void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t
     for (const auto &name : infos) {
         list.emplace_back(NOTES_PREFIX + name, note_stamp(name));  // stamp, not mtime
     }
+#else
+    std::vector<std::string> infos;
+    emu_list(false, NOTES_DIR, ".txt", infos);
+    std::vector<std::string> sd_infos;
+    emu_list(true, NOTES_DIR, ".txt", sd_infos);
+    std::set<std::string> internal_names(infos.begin(), infos.end());
+    for (const auto &sdi : sd_infos) {
+        if (!internal_names.count(sdi)) infos.push_back(sdi);
+    }
+    list.reserve(infos.size());
+    int count = 0;
+    for (const auto &name : infos) {
+        list.emplace_back(NOTES_PREFIX + name, note_stamp(name));
+        if (cb) cb(++count, 0, name.c_str());
+    }
 #endif
 }
 
@@ -1294,8 +1431,10 @@ bool hw_save_preferred_bytes(const char *path, const uint8_t *buf, size_t len, s
 
     return ok;
 #else
-    (void)path; (void)buf; (void)len; (void)error;
-    return true;
+    const bool ok = emu_write(false, path, buf, len);
+    if (!ok && error) *error = "Cannot write to Internal.";
+    emu_write(true, path, buf, len);
+    return ok;
 #endif
 }
 
@@ -1312,8 +1451,7 @@ bool hw_read_preferred_bytes(const char *path, std::vector<uint8_t> &buf)
     hal::fs_read_all(f, buf);
     return true;
 #else
-    (void)path;
-    return false;
+    return emu_read_preferred(path, /*sd_first=*/false, buf);
 #endif
 }
 

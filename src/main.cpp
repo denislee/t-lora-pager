@@ -39,6 +39,14 @@ void hal_setup(void)
     setenv("DBUS_FATAL_WARNINGS", "0", 1);
 #endif
 
+    // The screenshot sweep renders the Journal, Tasks and editor from the
+    // emulator's note storage (the PagerLink directories, fs_volume.h): give
+    // it a fresh empty root so the shots do not depend on the host's notes.
+    if (getenv("UI_SHOTS_DIR") && !getenv("PAGERLINK_FS_ROOT")) {
+        char root[] = "/tmp/ui-shots-fs-XXXXXX";
+        if (mkdtemp(root)) setenv("PAGERLINK_FS_ROOT", root, 1);
+    }
+
     /* Add a display
      * Use the 'monitor' driver which creates window on PC's monitor to simulate a display*/
 

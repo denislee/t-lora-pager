@@ -465,6 +465,8 @@ bool remove_recursive(const std::string &p) {
 
 }  // namespace
 
+std::string host_dir(Vol v) { return host(v, "/"); }
+
 bool vol_available(Vol v) {
     (void)v;
     return true;
