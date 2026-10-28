@@ -414,6 +414,62 @@ void hw_wifi_forget()
 #endif
 }
 
+bool hw_wifi_forget_ssid(const std::string &ssid)
+{
+#ifdef ARDUINO
+    if (ssid.empty()) return false;
+
+    // Same read/rewrite shape as hw_wifi_add_saved(), except the matching
+    // SSID is left out of the kept list instead of being prepended.
+    std::vector<std::pair<std::string, std::string>> kept;
+    kept.reserve(WIFI_MAX_SAVED);
+    bool dropped = false;
+
+    Preferences p;
+    if (!p.begin(WIFI_PREFS_NS, false)) return false;
+    int n = wifi_saved_count_ro(p);
+    for (int i = 0; i < n && (int)kept.size() < WIFI_MAX_SAVED; ++i) {
+        char sk[8], pk[8];
+        wifi_key_ssid(i, sk);
+        wifi_key_pass(i, pk);
+        String s = p.getString(sk, "");
+        if (s.length() == 0) continue;
+        if (ssid == s.c_str()) { dropped = true; continue; }
+        String pw = p.getString(pk, "");
+        kept.emplace_back(s.c_str(), pw.c_str());
+    }
+
+    for (size_t i = 0; i < kept.size(); ++i) {
+        char sk[8], pk[8];
+        wifi_key_ssid((int)i, sk);
+        wifi_key_pass((int)i, pk);
+        p.putString(sk, kept[i].first.c_str());
+        p.putString(pk, kept[i].second.c_str());
+    }
+    // Clear any trailing slots that used to be populated.
+    for (size_t i = kept.size(); i < (size_t)n && i < WIFI_MAX_SAVED; ++i) {
+        char sk[8], pk[8];
+        wifi_key_ssid((int)i, sk);
+        wifi_key_pass((int)i, pk);
+        p.remove(sk);
+        p.remove(pk);
+    }
+    p.putUChar(WIFI_PREFS_COUNT, (uint8_t)kept.size());
+    p.end();
+
+    // Dropping the network we are associated with leaves a stale link up.
+    if (dropped && hw_get_wifi_connected()) {
+        std::string current;
+        hw_get_wifi_ssid(current);
+        if (current == ssid) WiFi.disconnect(false, false);
+    }
+    return dropped;
+#else
+    (void)ssid;
+    return false;
+#endif
+}
+
 // --- HTTP --------------------------------------------------------------
 
 #ifdef ARDUINO

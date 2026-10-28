@@ -1,0 +1,536 @@
+{
+ "action_job": {
+  "params": {
+   "id": "wifi.scan"
+  },
+  "result": {
+   "job": "j1"
+  }
+ },
+ "cases": [
+  {
+   "method": "settings.schema",
+   "name": "schema_first_page",
+   "params": {},
+   "result": {
+    "actions": [
+     {
+      "group": "wifi",
+      "id": "wifi.scan",
+      "title": "Scan for networks"
+     }
+    ],
+    "groups": [
+     {
+      "id": "display",
+      "title": "Display & Backlight"
+     },
+     {
+      "id": "storage",
+      "title": "Storage"
+     },
+     {
+      "id": "nsync",
+      "title": "Notes Sync"
+     },
+     {
+      "id": "wifi",
+      "title": "Wi-Fi Networks"
+     }
+    ],
+    "items": [
+     {
+      "apply": "live",
+      "group": "display",
+      "id": "display.brightness",
+      "max": 16,
+      "min": 0,
+      "step": 1,
+      "title": "Screen brightness",
+      "type": "int"
+     },
+     {
+      "apply": "tick",
+      "group": "display",
+      "hint": "0 = never",
+      "id": "display.timeout_s",
+      "max": 180,
+      "min": 0,
+      "step": 1,
+      "title": "Screen timeout (s)",
+      "type": "int"
+     },
+     {
+      "apply": "sleep",
+      "enum": [
+       {
+        "label": "Light",
+        "v": "light"
+       },
+       {
+        "label": "Deep",
+        "v": "deep"
+       }
+      ],
+      "group": "display",
+      "id": "display.sleep_mode",
+      "title": "Sleep mode",
+      "type": "enum"
+     },
+     {
+      "apply": "reboot",
+      "enum": [
+       {
+        "label": "SD card",
+        "v": "sd"
+       },
+       {
+        "label": "Internal flash",
+        "v": "int"
+       }
+      ],
+      "group": "storage",
+      "id": "storage.msc_target",
+      "title": "USB drive shows",
+      "type": "enum"
+     },
+     {
+      "apply": "live",
+      "group": "nsync",
+      "id": "nsync.token",
+      "max_len": 255,
+      "secret": true,
+      "title": "GitHub token (PAT)",
+      "type": "secret"
+     },
+     {
+      "apply": "live",
+      "group": "wifi",
+      "id": "wifi.saved",
+      "ro": true,
+      "title": "Saved networks",
+      "type": "list"
+     }
+    ],
+    "rev_schema": "ebdafa8d"
+   },
+   "result_json": "{\"rev_schema\":\"ebdafa8d\",\"groups\":[{\"id\":\"display\",\"title\":\"Display & Backlight\"},{\"id\":\"storage\",\"title\":\"Storage\"},{\"id\":\"nsync\",\"title\":\"Notes Sync\"},{\"id\":\"wifi\",\"title\":\"Wi-Fi Networks\"}],\"actions\":[{\"id\":\"wifi.scan\",\"group\":\"wifi\",\"title\":\"Scan for networks\"}],\"items\":[{\"id\":\"display.brightness\",\"group\":\"display\",\"title\":\"Screen brightness\",\"type\":\"int\",\"min\":0,\"max\":16,\"step\":1,\"apply\":\"live\"},{\"id\":\"display.timeout_s\",\"group\":\"display\",\"title\":\"Screen timeout (s)\",\"type\":\"int\",\"min\":0,\"max\":180,\"step\":1,\"apply\":\"tick\",\"hint\":\"0 = never\"},{\"id\":\"display.sleep_mode\",\"group\":\"display\",\"title\":\"Sleep mode\",\"type\":\"enum\",\"enum\":[{\"v\":\"light\",\"label\":\"Light\"},{\"v\":\"deep\",\"label\":\"Deep\"}],\"apply\":\"sleep\"},{\"id\":\"storage.msc_target\",\"group\":\"storage\",\"title\":\"USB drive shows\",\"type\":\"enum\",\"enum\":[{\"v\":\"sd\",\"label\":\"SD card\"},{\"v\":\"int\",\"label\":\"Internal flash\"}],\"apply\":\"reboot\"},{\"id\":\"nsync.token\",\"group\":\"nsync\",\"title\":\"GitHub token (PAT)\",\"type\":\"secret\",\"max_len\":255,\"apply\":\"live\",\"secret\":true},{\"id\":\"wifi.saved\",\"group\":\"wifi\",\"title\":\"Saved networks\",\"type\":\"list\",\"apply\":\"live\",\"ro\":true}]}"
+  },
+  {
+   "method": "settings.schema",
+   "name": "schema_cursor",
+   "params": {
+    "cursor": "4"
+   },
+   "result": {
+    "items": [
+     {
+      "apply": "live",
+      "group": "nsync",
+      "id": "nsync.token",
+      "max_len": 255,
+      "secret": true,
+      "title": "GitHub token (PAT)",
+      "type": "secret"
+     },
+     {
+      "apply": "live",
+      "group": "wifi",
+      "id": "wifi.saved",
+      "ro": true,
+      "title": "Saved networks",
+      "type": "list"
+     }
+    ],
+    "rev_schema": "ebdafa8d"
+   },
+   "result_json": "{\"rev_schema\":\"ebdafa8d\",\"items\":[{\"id\":\"nsync.token\",\"group\":\"nsync\",\"title\":\"GitHub token (PAT)\",\"type\":\"secret\",\"max_len\":255,\"apply\":\"live\",\"secret\":true},{\"id\":\"wifi.saved\",\"group\":\"wifi\",\"title\":\"Saved networks\",\"type\":\"list\",\"apply\":\"live\",\"ro\":true}]}"
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "bad cursor"
+   },
+   "method": "settings.schema",
+   "name": "schema_bad_cursor",
+   "params": {
+    "cursor": "x"
+   }
+  },
+  {
+   "method": "settings.get",
+   "name": "get_all",
+   "params": {},
+   "result": {
+    "rev": 100,
+    "rev_schema": "ebdafa8d",
+    "values": {
+     "display.brightness": 8,
+     "display.sleep_mode": "light",
+     "display.timeout_s": 60,
+     "nsync.token": {
+      "set": false
+     },
+     "storage.msc_target": "sd",
+     "wifi.saved": [
+      "home"
+     ]
+    }
+   },
+   "result_json": "{\"rev\":100,\"rev_schema\":\"ebdafa8d\",\"values\":{\"display.brightness\":8,\"display.timeout_s\":60,\"display.sleep_mode\":\"light\",\"storage.msc_target\":\"sd\",\"nsync.token\":{\"set\":false},\"wifi.saved\":[\"home\"]}}"
+  },
+  {
+   "method": "settings.get",
+   "name": "get_with_secret",
+   "params": {
+    "ids": [
+     "display.brightness",
+     "nsync.token"
+    ]
+   },
+   "result": {
+    "rev": 100,
+    "rev_schema": "ebdafa8d",
+    "values": {
+     "display.brightness": 8,
+     "nsync.token": {
+      "set": false
+     }
+    }
+   },
+   "result_json": "{\"rev\":100,\"rev_schema\":\"ebdafa8d\",\"values\":{\"display.brightness\":8,\"nsync.token\":{\"set\":false}}}"
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "nope.x: unknown setting"
+   },
+   "method": "settings.get",
+   "name": "get_unknown",
+   "params": {
+    "ids": [
+     "nope.x"
+    ]
+   }
+  },
+  {
+   "method": "settings.set",
+   "name": "set_ok",
+   "params": {
+    "if_rev": 100,
+    "values": {
+     "display.brightness": 5
+    }
+   },
+   "result": {
+    "applied": [
+     "display.brightness"
+    ],
+    "reboot": false,
+    "rev": 101
+   },
+   "result_json": "{\"rev\":101,\"applied\":[\"display.brightness\"],\"reboot\":false}"
+  },
+  {
+   "method": "settings.set",
+   "name": "set_unchanged",
+   "params": {
+    "values": {
+     "display.brightness": 8
+    }
+   },
+   "result": {
+    "applied": [],
+    "reboot": false,
+    "rev": 100
+   },
+   "result_json": "{\"rev\":100,\"applied\":[],\"reboot\":false}"
+  },
+  {
+   "method": "settings.set",
+   "name": "set_two",
+   "params": {
+    "values": {
+     "display.brightness": 4,
+     "display.sleep_mode": "deep"
+    }
+   },
+   "result": {
+    "applied": [
+     "display.brightness",
+     "display.sleep_mode"
+    ],
+    "reboot": false,
+    "rev": 101
+   },
+   "result_json": "{\"rev\":101,\"applied\":[\"display.brightness\",\"display.sleep_mode\"],\"reboot\":false}"
+  },
+  {
+   "method": "settings.set",
+   "name": "set_reboot",
+   "params": {
+    "values": {
+     "storage.msc_target": "int"
+    }
+   },
+   "result": {
+    "applied": [
+     "storage.msc_target"
+    ],
+    "reboot": true,
+    "rev": 101
+   },
+   "result_json": "{\"rev\":101,\"applied\":[\"storage.msc_target\"],\"reboot\":true}"
+  },
+  {
+   "method": "settings.set",
+   "name": "set_secret",
+   "params": {
+    "values": {
+     "nsync.token": "ghp_example"
+    }
+   },
+   "result": {
+    "applied": [
+     "nsync.token"
+    ],
+    "reboot": false,
+    "rev": 101
+   },
+   "result_json": "{\"rev\":101,\"applied\":[\"nsync.token\"],\"reboot\":false}"
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "display.timeout_s: out of range"
+   },
+   "method": "settings.set",
+   "name": "set_one_bad",
+   "params": {
+    "values": {
+     "display.brightness": 5,
+     "display.timeout_s": 999
+    }
+   }
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "changed"
+   },
+   "method": "settings.set",
+   "name": "set_stale_rev",
+   "params": {
+    "if_rev": 99,
+    "values": {
+     "display.brightness": 5
+    }
+   }
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "display.sleep_mode: not one of the choices"
+   },
+   "method": "settings.set",
+   "name": "set_bad_enum",
+   "params": {
+    "values": {
+     "display.sleep_mode": "nap"
+    }
+   }
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "wifi.saved: read-only"
+   },
+   "method": "settings.set",
+   "name": "set_read_only",
+   "params": {
+    "values": {
+     "wifi.saved": []
+    }
+   }
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "display.brightness: expected integer"
+   },
+   "method": "settings.set",
+   "name": "set_wrong_type",
+   "params": {
+    "values": {
+     "display.brightness": "5"
+    }
+   }
+  },
+  {
+   "error": {
+    "code": "invalid_argument",
+    "msg": "values is empty"
+   },
+   "method": "settings.set",
+   "name": "set_empty",
+   "params": {
+    "values": {}
+   }
+  }
+ ],
+ "catalog": {
+  "actions": [
+   {
+    "group": "wifi",
+    "id": "wifi.scan",
+    "title": "Scan for networks"
+   }
+  ],
+  "groups": [
+   {
+    "id": "display",
+    "title": "Display & Backlight"
+   },
+   {
+    "id": "storage",
+    "title": "Storage"
+   },
+   {
+    "id": "nsync",
+    "title": "Notes Sync"
+   },
+   {
+    "id": "wifi",
+    "title": "Wi-Fi Networks"
+   }
+  ],
+  "initial": {
+   "display.brightness": 8,
+   "display.sleep_mode": "light",
+   "display.timeout_s": 60,
+   "nsync.token": false,
+   "storage.msc_target": "sd",
+   "wifi.saved": [
+    "home"
+   ]
+  },
+  "items": [
+   {
+    "apply": "live",
+    "group": "display",
+    "id": "display.brightness",
+    "max": 16,
+    "min": 0,
+    "step": 1,
+    "title": "Screen brightness",
+    "type": "int"
+   },
+   {
+    "apply": "tick",
+    "group": "display",
+    "hint": "0 = never",
+    "id": "display.timeout_s",
+    "max": 180,
+    "min": 0,
+    "step": 1,
+    "title": "Screen timeout (s)",
+    "type": "int"
+   },
+   {
+    "apply": "sleep",
+    "enum": [
+     {
+      "label": "Light",
+      "v": "light"
+     },
+     {
+      "label": "Deep",
+      "v": "deep"
+     }
+    ],
+    "group": "display",
+    "id": "display.sleep_mode",
+    "title": "Sleep mode",
+    "type": "enum"
+   },
+   {
+    "apply": "reboot",
+    "enum": [
+     {
+      "label": "SD card",
+      "v": "sd"
+     },
+     {
+      "label": "Internal flash",
+      "v": "int"
+     }
+    ],
+    "group": "storage",
+    "id": "storage.msc_target",
+    "title": "USB drive shows",
+    "type": "enum"
+   },
+   {
+    "apply": "live",
+    "group": "nsync",
+    "id": "nsync.token",
+    "max_len": 255,
+    "secret": true,
+    "title": "GitHub token (PAT)",
+    "type": "secret"
+   },
+   {
+    "apply": "live",
+    "group": "wifi",
+    "id": "wifi.saved",
+    "ro": true,
+    "title": "Saved networks",
+    "type": "list"
+   }
+  ]
+ },
+ "events": [
+  {
+   "e": "evt.settings.changed",
+   "name": "changed",
+   "p": {
+    "ids": [
+     "display.brightness"
+    ],
+    "rev": 101
+   },
+   "p_json": "{\"rev\":101,\"ids\":[\"display.brightness\"]}"
+  },
+  {
+   "e": "evt.settings.job",
+   "name": "job_scan",
+   "p": {
+    "done": true,
+    "job": "j1",
+    "msg": "ok",
+    "ok": true,
+    "result": [
+     {
+      "rssi": -50,
+      "secure": true,
+      "ssid": "home"
+     }
+    ]
+   },
+   "p_json": "{\"job\":\"j1\",\"done\":true,\"ok\":true,\"msg\":\"ok\",\"result\":[{\"ssid\":\"home\",\"rssi\":-50,\"secure\":true}]}"
+  },
+  {
+   "e": "evt.settings.job",
+   "name": "job_failed",
+   "p": {
+    "done": true,
+    "job": "j2",
+    "msg": "NTP timed out",
+    "ok": false
+   },
+   "p_json": "{\"job\":\"j2\",\"done\":true,\"ok\":false,\"msg\":\"NTP timed out\"}"
+  }
+ ],
+ "rev0": 100,
+ "rev_schema": "ebdafa8d"
+}

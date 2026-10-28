@@ -284,6 +284,37 @@ uint16_t hw_set_charger_current_level(uint8_t level)
 #endif
 }
 
+// Milliamps a Settings level maps to, without touching the hardware.
+static uint16_t charge_current_for_level(uint8_t level)
+{
+#if defined(ARDUINO) && defined(USING_PPM_MANAGE)
+    return level * dev_conts_var.charge_steps;
+#else
+    if (level > kChargeCurrentLevels - 1) level = kChargeCurrentLevels - 1;
+    return kChargeCurrentTable[level];
+#endif
+}
+
+void hw_charge_current_options(std::vector<uint16_t> &ma)
+{
+    ma.clear();
+    uint8_t nums = hw_get_charge_level_nums();
+    for (uint8_t level = 1; level <= nums; ++level) {
+        uint16_t value = charge_current_for_level(level);
+        if (!ma.empty() && ma.back() == value) continue;  // no duplicates
+        ma.push_back(value);
+    }
+}
+
+uint8_t hw_charge_level_for_ma(uint16_t ma)
+{
+    uint8_t nums = hw_get_charge_level_nums();
+    for (uint8_t level = 1; level <= nums; ++level) {
+        if (charge_current_for_level(level) == ma) return level;
+    }
+    return 0;
+}
+
 // --- Monitor / power params -------------------------------------------
 
 #ifdef ARDUINO

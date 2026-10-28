@@ -71,6 +71,7 @@ void register_sys_handlers(Rpc &rpc) {
             .str_val("fs")
             .str_val("fs.delete.if")  // fs.delete honours size/crc32 (§6.1)
             .str_val("weather")
+            .str_val("settings")
             .end_array()
             .key("mtu")
             .uint_val(static_cast<uint64_t>(service_packet_size() + 3))
@@ -165,7 +166,8 @@ void register_sys_handlers(Rpc &rpc) {
             return false;
         }
         std::string tz;
-        if (!params.get_string("tz", tz) || !tz_charset_ok(tz)) {
+        /* T6: only a zone the pager can apply is stored. */
+        if (!params.get_string("tz", tz) || !tz_charset_ok(tz) || !timezone_is_known(tz.c_str())) {
             err.code = hal_error_code(HalError::InvalidArgument);
             err.msg = "bad tz";
             return false;

@@ -52,6 +52,7 @@
 #include "../hal/wireless.h"
 #include "../hal/secrets.h"
 #include "../hal/notes_crypto.h"
+#include "../hal/settings.h"
 #include "app_registry.h"
 
 #include <atomic>
@@ -605,6 +606,10 @@ void cfg_save(const SshConfig& cfg) {
 #else
     (void)cfg;
 #endif
+    // Written straight to NVS above: tell the registry (and any phone
+    // observer) that these ids changed.
+    settings::registry().note_changed(
+        std::vector<std::string>{"ssh.host", "ssh.user", "ssh.port"});
 }
 
 // Returns the decrypted password, or empty if the slot is missing or notes

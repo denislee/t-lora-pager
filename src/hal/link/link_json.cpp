@@ -367,6 +367,13 @@ const JsonObject::Member *JsonObject::find(const char *key) const
 
 bool JsonObject::has(const char *key) const { return find(key) != nullptr; }
 
+std::vector<std::string> JsonObject::keys() const {
+    std::vector<std::string> out;
+    out.reserve(members_.size());
+    for (const Member &m : members_) out.push_back(m.key);
+    return out;
+}
+
 bool JsonObject::get_raw(const char *key, std::string &out) const
 {
     const Member *m = find(key);

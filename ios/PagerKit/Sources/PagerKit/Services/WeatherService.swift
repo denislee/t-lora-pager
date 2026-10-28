@@ -16,6 +16,24 @@ public struct WeatherPlace: Sendable, Equatable {
     }
 }
 
+/// One city from Open-Meteo's geocoder, as a city picker shows it.
+public struct CityMatch: Sendable, Equatable, Identifiable {
+    public var name: String
+    /// `name, admin1, country` — the parts that exist, joined by ", ".
+    public var label: String
+    public var lat: Double
+    public var lon: Double
+
+    public init(name: String, label: String, lat: Double, lon: Double) {
+        self.name = name
+        self.label = label
+        self.lat = lat
+        self.lon = lon
+    }
+
+    public var id: String { "\(name)|\(lat)|\(lon)" }
+}
+
 /// Answers the pager's `weather.get` and sends `weather.push` (PROTOCOL.md
 /// §6.3) with forecasts from Open-Meteo, requested with exactly the fields the
 /// firmware's direct path asks for (`src/apps/ui_weather.cpp` `fetch_weather`)
@@ -96,6 +114,51 @@ public struct WeatherService: Sendable {
     }
 
     // MARK: - Location
+
+    /// Search Open-Meteo's geocoder for `query`, as the app's city picker
+    /// does. An empty search (`results` absent) is an empty list, not an error.
+    public static func searchCities(_ query: String, urlSession: URLSession = .shared) async throws -> [CityMatch] {
+        var c = URLComponents(url: geocodeURL, resolvingAgainstBaseURL: false)!
+        c.queryItems = [
+            URLQueryItem(name: "name", value: query),
+            URLQueryItem(name: "count", value: "10"),
+            URLQueryItem(name: "language", value: "en"),
+            URLQueryItem(name: "format", value: "json"),
+        ]
+        let request = try HTTP.request(url: c.url!, timeout: requestTimeout)
+        let reply: HTTPReply
+        do {
+            reply = try await HTTP.send(request, using: urlSession)
+        } catch {
+            throw RPCError(code: "http_error", msg: "geo: \(error.localizedDescription)")
+        }
+        guard (200..<300).contains(reply.status) else {
+            throw RPCError(code: "http_error", msg: "geo: HTTP \(reply.status)")
+        }
+        struct Reply: Decodable {
+            struct Result: Decodable {
+                let name: String
+                let latitude: Double
+                let longitude: Double
+                let admin1: String?
+                let country: String?
+            }
+            let results: [Result]?
+        }
+        let found: [Reply.Result]
+        do {
+            found = try JSONDecoder().decode(Reply.self, from: reply.body).results ?? []
+        } catch {
+            throw RPCError(code: "http_error", msg: "geo: bad response")
+        }
+        return found.map { r in
+            let label = [r.name, r.admin1, r.country]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+            return CityMatch(name: r.name, label: label, lat: r.latitude, lon: r.longitude)
+        }
+    }
 
     func resolve(key: String) async throws -> WeatherPlace {
         if key == "auto" {

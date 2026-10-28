@@ -993,7 +993,13 @@ void load_vis_cache() {
     }
     if (ok) p.end();
 #else
-    for (int i = 0; i < kItemCount; i++) s_vis_cache[i] = 1;
+    // Emulator: each tile's flag is a file under $PAGERLINK_NVS_DIR/homeapps,
+    // so the grid layout survives a restart. A missing slot still means shown.
+    for (int i = 0; i < kItemCount; i++) {
+        char key[16];
+        make_vis_key(kItems[i].appName, key);
+        s_vis_cache[i] = hal::nvs_get_bool(kHomeAppsNs, key, true) ? 1 : 0;
+    }
 #endif
     s_vis_loaded = true;
 }
@@ -1005,6 +1011,11 @@ int home_apps_count() { return kItemCount; }
 const char *home_apps_label(int idx) {
     if (idx < 0 || idx >= kItemCount) return "";
     return kItems[idx].label;
+}
+
+const char *home_apps_name(int idx) {
+    if (idx < 0 || idx >= kItemCount) return "";
+    return kItems[idx].appName;
 }
 
 bool home_apps_is_visible(int idx) {

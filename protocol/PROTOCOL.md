@@ -186,7 +186,7 @@ Both sides reset `seq` to 0 on each new TCP connection.
 | `sys.hello` | P→D | `{"proto":1,"app":"<ver>","caps":[…]}` → `{"proto":1,"fw":"<hash>","board":"pager","name":"lilygo-pager","caps":[…],"mtu":<P+3>}`. A `proto` major mismatch → ERR `unsupported` |
 | `sys.info` | P→D | → `{"batt_pct","charging","uptime_s","wifi":{"on","connected","ssid","rssi"},"storage":{"int":{"t","u"},"sd":{"t","u","mounted"}}}` (sizes in bytes) |
 | `sys.ping` | both | `{"t":<n>}` → `{"t":<n>}` (echo) |
-| `sys.time.set` | P→D | `{"epoch":<unix s>,"tz":"<IANA>"}` → `{}` |
+| `sys.time.set` | P→D | `{"epoch":<unix s>,"tz":"<IANA>"}` → `{}`. A `tz` the pager has no rule for → `invalid_argument` and nothing is stored |
 | `evt.battery` | D→P | `{"pct","charging"}` on change ≥ 5 % or charge-state flip |
 | `chat.audio.begin` | D→P | `{"size","crc32","fmt":"wav"}` → `{"xfer"}`. Announces a voice memo (16 kHz/16-bit mono WAV, at most 15 s); the phone receives, so it allocates `xfer` (§4), then the pager streams the bytes as DATA. A CRC mismatch surfaces on the following `chat.ask` as `invalid_argument` |
 | `chat.ask` | D→P | `{"text"?,"audio_xfer"?,"reset"?}` → `{"transcript"?,"reply"}`. `audio_xfer` names a finished `chat.audio.begin` upload; `transcript` is set for voice. The phone keeps per-pager history (`reset` clears it). Timeout 60 s |
@@ -254,6 +254,7 @@ notes sync, and
 `{"tg":"chats"|"msgs"|"send"|"notify","bridge","token","chat_id"?,"text"?,"reset"?,"link_down"?}`
 runs one step of the Telegram worker code (list, open chat + mark-read, send,
 one unread-notifier tick). The outcome arrives as `evt.test.result`. `test.weather.cache` `{"key"}` (P→D) answers synchronously with the forecast the pager has cached under `key`, re-encoded as a ForecastPayload (§6.3), or ERR `not_found` (test-only code) when there is none. `test.weather.fetch` `{"key"}` runs the Weather app's phone step (`weather.get` → key check → cache save) and reports `{"step":"weather","ok","msg","city","hourly_count","daily_count"}` as `evt.test.result`.
+`test.settings.local` `{"id","value"}` writes one setting the way the pager's own Settings app does, so the smoke can see the resulting `evt.settings.changed` (§6.4).
 Hardware builds never register it (`src/hal/link/handlers_test.cpp`): it
 would let a phone make the pager call arbitrary methods.
 
@@ -283,6 +284,54 @@ Integers must be JSON integers (a string or a fraction is rejected). A payload t
 | `weather.push` | P→D | ForecastPayload → `{}`. The pager stores the forecast (and the location, when complete) under `key`; an open Weather app showing that key re-renders. Invalid → `invalid_argument` |
 | `weather.get` | D→P | `{"key"}` → ForecastPayload. The pager asks for the forecast of its current key when it has no fresh cache and no Wi-Fi (or the direct fetch failed). A reply whose `key` differs from the requested one is discarded. Timeout 15 s |
 
+## 6.4 Methods — settings (`caps` `"settings"`)
+
+Every user setting of the pager (IOS_SETTINGS_PLAN.md §3) is readable and
+writable by id. The pager owns the catalog: `settings.schema` lists only the
+settings that exist on the connected board, with that board's ranges, so the
+phone renders them generically and a new pager setting needs no app release.
+Both the pager's own Settings app and these methods write through one
+registry (`src/hal/settings_registry.cpp`), so a value is validated, stored and
+applied the same way whichever side changed it.
+
+A setting **item** is
+`{"id","group","title","type","min"?,"max"?,"step"?,"enum"?:[{"v","label"?}],"max_len"?,"apply","secret"?,"danger"?,"ro"?,"hint"?}`:
+
+| `type` | value on the wire | rule |
+|---|---|---|
+| `bool` | `true`/`false` | |
+| `int` | integer | `min` ≤ v ≤ `max`, `(v - min) % step == 0` |
+| `enum` | one `v` of `enum` (string or integer) | exact match |
+| `string` | string | ≤ `max_len` bytes, no control characters |
+| `secret` | write: string (≤ `max_len`; `""` clears). Read: `{"set":bool}` | the value is never sent pager → phone |
+| `list` / `object` | JSON array / object | per id (e.g. `tg.favorites`: `[{"id","title"}]`; `weather.location`: `{"auto":true}` or `{"name","lat","lon"}`) |
+
+`apply` says when a change takes effect: `live`, `tick` (≤ 1 s), `theme`
+(screens opened after the change), `sleep` (next sleep), `reboot` (the app
+says so; the pager never reboots by itself). `danger` asks the app to
+confirm first (`conn.bt`: turning Bluetooth off drops this link). `ro` items
+are read-only (`wifi.saved`, `notes_sec.state`). An **action**
+`{"id","group","title","danger"?,"hint"?}` is a one-shot command.
+
+| Method / event | Dir | Params → result |
+|---|---|---|
+| `settings.schema` | P→D | `{"cursor"?}` → `{"rev_schema","groups":[{"id","title"}],"actions":[…],"items":[…],"cursor"?}`. `groups`/`actions` only on the first page (no `cursor`). `cursor` is present while items remain; pass it back. Each result stays under 3.5 KB. `rev_schema` is a hash of the whole schema (every page) |
+| `settings.get` | P→D | `{"ids"?:[…]}` → `{"rev","rev_schema","values":{"<id>":<value>}}`; every item when `ids` is absent. A `rev_schema` different from the cached one means refetch the schema |
+| `settings.set` | P→D | `{"values":{"<id>":<value>},"if_rev"?}` → `{"rev","applied":[ids],"reboot":bool}`. **All or nothing**: every value is validated first; one bad value fails the call with `invalid_argument` and a `msg` naming the id (`"display.timeout_s: out of range"`) and nothing is written. An unchanged value is not rewritten and not listed in `applied`; `rev` moves only when something changed. With `if_rev` ≠ the current `rev` → `invalid_argument` `"changed"` and nothing is written |
+| `settings.action` | P→D | `{"id","p"?}` → per action. Long ones (`wifi.scan`, `wifi.add`, `wifi.test`, `time.sync_ntp`, `time.sync_gps`, `storage.copy_int_to_sd`, `storage.prune_now`) answer `{"job"}` at once and finish with `evt.settings.job`. `sys.power_off` answers `{"confirm":"on_pager"}`: the pager asks on its own screen |
+| `evt.settings.changed` | D→P | `{"rev","ids":[…]}` after any change from either side, at most one per 250 ms (ids merged). Refetch those ids with `settings.get` |
+| `evt.settings.job` | D→P | `{"job","done":true,"ok","msg","result"?}`. `wifi.scan` result `[{"ssid","rssi","secure"}]`; `wifi.test` `{"ok","ms"}`; `storage.copy_int_to_sd` `{"copied","failed"}` |
+
+`rev` is a 32-bit counter that starts at a random value on every boot, so a
+revision from before a reboot never matches.
+
+Errors: unknown id → `invalid_argument` `"<id>: unknown setting"`; an id the
+board lacks → `unsupported` `"<id>: not on this board"`; a non-empty secret
+while notes encryption is off or locked → `unauthorized` `"<id>: encryption
+off"` / `"<id>: notes locked"`. Action parameters: `wifi.add`
+`{"ssid","password"?}` (connects, saves on success); `wifi.forget`
+`{"ssid"}` or `{"all":true}`. Wi-Fi passwords travel phone → pager only.
+
 The rest of the catalog (notify.*, …) is specified in
 `IOS_COMPANION_PLAN.md` §4.5 and moves here as each phase lands. A side
 that doesn't implement a method answers ERR `unsupported`; `caps` lists the
@@ -300,3 +349,6 @@ hex with no separators. Files:
 - `segment.json` — segmentation of one message at packet sizes 20 / 182 / 244.
 - `reassemble.json` — packet sequences → delivered messages and resets.
 - `bulk.json` — DATA / ACK payload encode/decode, and CRC-32 check values (`crc32`).
+- `settings.json` — §6.4: a small catalog, and for each case the params and
+  the exact compact result (or error) the pager's registry answers;
+  `test/test_settings_registry` checks them byte for byte.

@@ -82,6 +82,11 @@ struct State {
     /* hw_get_filesystem_generation() last announced with evt.fs.changed. */
     uint32_t last_fs_gen = 0;
 
+    /* Settings ids changed since the last evt.settings.changed (coalesced). */
+    std::vector<std::string> settings_ids;
+    uint32_t settings_rev = 0;
+    uint32_t settings_first_ms = 0; /* steady_ms() of the oldest pending id */
+
     /* Outbound (pager -> phone) bulk transfers started by service_send_bytes().
      * The phone allocated the even xfer id in the RPC that announced them. */
     struct Outbound {
@@ -114,6 +119,9 @@ struct State {
     std::vector<Inbound> inbound;
     uint16_t next_inbound_id = 32769; /* odd; fs.write counts up from 1 */
 };
+
+/* evt.settings.changed coalescing window (IOS_SETTINGS_PLAN.md W6). */
+constexpr uint32_t kSettingsCoalesceMs = 250;
 
 State &state() {
     static State s;
@@ -363,6 +371,7 @@ void service_on_connect(const TransportOps &ops) {
     register_sys_handlers(*s.rpc);
     register_fs_handlers(*s.rpc);
     register_weather_handlers(*s.rpc);
+    register_settings_handlers(*s.rpc);
 #ifndef ARDUINO
     register_test_handlers(*s.rpc);
 #endif
@@ -396,6 +405,7 @@ void service_on_connect(const TransportOps &ops) {
         });
 
     s.last_fs_gen = hw_get_filesystem_generation();
+    s.settings_ids.clear();
 
     monitor_params_t mp;
     hw_get_monitor_params(mp);
@@ -504,6 +514,17 @@ void service_tick() {
         s.rpc->emit("evt.fs.changed", "{}");
     }
 
+    /* Settings changed (either UI): one event per 250 ms window. */
+    if (!s.settings_ids.empty() &&
+        static_cast<uint32_t>(now - s.settings_first_ms) >= kSettingsCoalesceMs) {
+        JsonWriter w;
+        w.begin_object().key("rev").uint_val(s.settings_rev).key("ids").begin_array();
+        for (const std::string &id : s.settings_ids) w.str_val(id);
+        w.end_array().end_object();
+        s.settings_ids.clear();
+        s.rpc->emit("evt.settings.changed", w.str());
+    }
+
     const int pct = mp.battery_percent;
     const bool charging = mp.is_charging;
 
@@ -539,6 +560,9 @@ uint32_t service_next_tick_ms(uint32_t cap) {
     uint32_t wait = s.rpc->next_wait_ms(cap);
     wait = fs_next_wait_ms(wait);
     const uint32_t now = steady_ms();
+    if (!s.settings_ids.empty()) {
+        wait = min_wait_ms(wait, now, s.settings_first_ms + kSettingsCoalesceMs);
+    }
     /* The checks service_tick() makes; the stall ones are strict `>`. */
     for (const State::Outbound &o : s.outbound) {
         wait = o.send.next_wait_ms(wait, now);
@@ -754,6 +778,29 @@ void service_accept_close(uint16_t xfer) {
 bool service_accept_owns(uint16_t xfer) {
     LinkLock lock(__func__);
     return inbound_find(xfer) >= 0;
+}
+
+void service_note_settings_changed(uint32_t rev, const std::vector<std::string> &ids) {
+    LinkLock lock(__func__);
+    State &s = state();
+    if (!s.connected || !s.rpc) {
+        return;
+    }
+    if (s.settings_ids.empty()) {
+        s.settings_first_ms = steady_ms();
+    }
+    for (const std::string &id : ids) {
+        bool seen = false;
+        for (const std::string &have : s.settings_ids) {
+            if (have == id) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) s.settings_ids.push_back(id);
+    }
+    s.settings_rev = rev;
+    note_new_deadline();
 }
 
 bool service_emit(const std::string &event, const std::string &params_json) {

@@ -168,14 +168,14 @@ namespace {
 void msc_target_cb(lv_event_t *e) {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.msc_prefer_sd = en;
-    hw_set_msc_prefer_sd(en);
+    // The registry setter calls hw_set_msc_prefer_sd itself.
+    settings_commit_str("storage.msc_target", en ? "sd" : "int");
 }
 
 void storage_prune_cb(lv_event_t *e) {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.prune_internal = en;
+    settings_commit_bool("storage.prune_internal", en);
 }
 
 void storage_prune_now_cb(lv_event_t *) {

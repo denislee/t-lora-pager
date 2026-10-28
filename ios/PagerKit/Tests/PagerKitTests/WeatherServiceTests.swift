@@ -84,6 +84,40 @@ final class WeatherServiceTests: XCTestCase {
         XCTAssertFalse(WeatherService.validKey(String(repeating: "a", count: 65)))
     }
 
+    // MARK: - City search
+
+    func testSearchCitiesDecodesLabels() async throws {
+        let json = #"""
+            {"results":[
+              {"name":"Recife","latitude":-8.05,"longitude":-34.9,"admin1":"Pernambuco","country":"Brazil"},
+              {"name":"Recife","latitude":-3.0,"longitude":-40.0,"country":"Brazil"}]}
+            """#
+        let server = StubServer { _ in .json(200, json) }
+        let matches = try await WeatherService.searchCities("Recife", urlSession: StubURLProtocol.session(server))
+
+        XCTAssertEqual(matches.count, 2)
+        XCTAssertEqual(matches[0].name, "Recife")
+        XCTAssertEqual(matches[0].label, "Recife, Pernambuco, Brazil")
+        XCTAssertEqual(matches[0].lat, -8.05)
+        XCTAssertEqual(matches[0].lon, -34.9)
+        XCTAssertEqual(matches[1].label, "Recife, Brazil")
+        XCTAssertNotEqual(matches[0].id, matches[1].id)
+
+        let request = try XCTUnwrap(server.requests(path: "/v1/search").first)
+        XCTAssertEqual(request.method, "GET")
+        let query = try XCTUnwrap(request.query)
+        XCTAssertTrue(query.contains("name=Recife"))
+        XCTAssertTrue(query.contains("count=10"))
+        XCTAssertTrue(query.contains("language=en"))
+        XCTAssertTrue(query.contains("format=json"))
+    }
+
+    func testSearchCitiesEmptyBodyGivesNoMatches() async throws {
+        let server = StubServer { _ in .json(200, "{}") }
+        let matches = try await WeatherService.searchCities("Nowhere", urlSession: StubURLProtocol.session(server))
+        XCTAssertTrue(matches.isEmpty)
+    }
+
     // MARK: - Caching (P7.60)
 
     /// A minimal reply the pager can reduce (see `OpenMeteoForecast`).

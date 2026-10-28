@@ -27,6 +27,7 @@
 #include "hal/link/link_service.h"
 #include "hal/link/link_xfer.h"
 #include "hal/notes_link.h"
+#include "hal/settings.h"
 #include "hal/weather_cache.h"
 #include "hal/weather_payload.h"
 
@@ -477,9 +478,35 @@ bool handle_test_weather_fetch(const JsonObject &params, JsonWriter &result, Rpc
     return true;
 }
 
+/**
+ * test.settings.local {"id","value"} — write one setting the way the pager's
+ * own Settings app does (settings::registry().set, not settings.set), so the
+ * smoke can check that a pager-side change reaches the phone as
+ * evt.settings.changed.
+ */
+bool handle_test_settings_local(const JsonObject &params, JsonWriter &result, RpcError &err) {
+    std::string id, raw;
+    settings::Value v;
+    if (!params.get_string("id", id) || !params.get_raw("value", raw) ||
+        !settings::value_from_json(raw, v)) {
+        err.code = hal_error_code(HalError::InvalidArgument);
+        err.msg = "id and value required";
+        return false;
+    }
+    settings::Error e;
+    if (!settings::registry().set(id, v, e)) {
+        err.code = e.code;
+        err.msg = e.msg;
+        return false;
+    }
+    result.begin_object().key("rev").uint_val(settings::registry().rev()).end_object();
+    return true;
+}
+
 }  // namespace
 
 void register_test_handlers(Rpc &rpc) {
+    rpc.handle("test.settings.local", handle_test_settings_local);
     rpc.handle("test.callback", handle_test_callback);
     rpc.handle("test.weather.cache", handle_test_weather_cache);
     rpc.handle("test.weather.fetch", handle_test_weather_fetch);

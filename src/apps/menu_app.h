@@ -23,6 +23,7 @@ public:
 // menu defines them inline) — Settings reads/writes by index here.
 int          home_apps_count();
 const char  *home_apps_label(int idx);
+const char  *home_apps_name(int idx);   // kItems[idx].appName, "" out of range
 bool         home_apps_is_visible(int idx);   // default true when no NVS slot
 void         home_apps_set_visible(int idx, bool on);
 

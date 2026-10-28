@@ -24,3 +24,6 @@ const char *timezone_get_user_posix();
 
 // Fills `out` with the bundled IANA zone names (replaces its contents).
 void timezone_fetch_list(std::vector<std::string> &out);
+
+// True when `name` is a non-empty entry of the bundled zone table.
+bool timezone_is_known(const char *name);

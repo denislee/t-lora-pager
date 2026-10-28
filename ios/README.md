@@ -26,34 +26,39 @@ services; it has no UIKit/SwiftUI imports and builds (and tests) without Xcode.
 ios/
   README.md                       this file
   project.yml                     XcodeGen spec (source of truth)
-  Makefile                        gen / test / test-linux / notes-e2e / sim / device* / clean*
+  Makefile                        gen / test / test-linux / notes-e2e / settings-e2e / sim / device* / clean*
   .swift-format                   swift-format style config
   Config/
     Base.xcconfig                 shared build settings
     Local.xcconfig.example        template for per-developer signing
   Resources/Info.plist            app Info.plist (build-setting variables)
   App/
-    PagerCompanionApp.swift       @main, injects PagerSession (+ its NotesModel, TasksModel) + TelegramAccount
+    PagerCompanionApp.swift       @main, injects PagerSession (+ its NotesModel, TasksModel, SettingsModel) + TelegramAccount
     Session/PagerSession.swift    @MainActor ObservableObject link state
     Notes/NotesModel.swift        Notes tab state: list, unlock, edit/save/delete, move to GitHub
     Tasks/TasksModel.swift        Tasks tab state: the pager's /tasks.txt, saved on every change
+    Settings/SettingsModel.swift  Settings tab state: binds PagerKit's SettingsStore to the link
     Notes/KeychainSecretStore.swift  the GitHub PAT in the Keychain (this device only)
     Session/LocationProvider.swift  CoreLocation fix + city for weather "auto"
     Telegram/…                    TDLib JSON client + the phone's Telegram login
-    Features/RootView.swift       Dashboard / Notes / Tasks / Telegram / Diagnostics tabs
+    Features/RootView.swift       Dashboard / Notes / Tasks / Telegram / Settings / Diagnostics tabs
     Features/Dashboard/…          connection + sys.info
     Features/Notes/…              note list + detail/editor, unlock, sync sheets, GitHub settings
     Features/Tasks/…              task list: check off, add, rename, reorder, delete
     Features/Telegram/…           api keys, phone/code/2FA login, log out
+    Features/Settings/…           the pager's settings: generic form + Wi-Fi, time zone,
+                                  weather location, Telegram favorites screens
     Features/Diagnostics/…        ping + session log
   PagerKit/                       Swift package (no UIKit/SwiftUI)
     Sources/PagerKit/…            Transport (BLE, TCP) / Link / RPC / Model /
                                   Services (sys, weather, tg + TDLib, chat, notes
                                   sync + move engine, fs) / Notes (indexer,
                                   cache, library, NoteCrypto, GitBlob, account) /
-                                  Tasks (TasksFile format, TasksService)
+                                  Tasks (TasksFile format, TasksService) /
+                                  settings (SettingsService, SettingsStore)
     Tests/PagerKitTests/…         XCTest (reads ../../protocol/vectors)
   NotesE2E/                       notes viewer + move checks against the emulator
+  SettingsE2E/                    every pager setting: set, read back, kill -9, read back
 ```
 
 ## Generate and open
@@ -111,6 +116,14 @@ checkout still generates and builds (unsigned, Simulator-only).
 
   ```sh
   make -C ios notes-e2e   # ios/NotesE2E: listing order, both sync triggers, edit during verify
+  ```
+
+- Every pager setting end to end (Linux via Docker, or macOS). Starts the
+  emulator itself on a fresh state root, so port 7600 must be free:
+
+  ```sh
+  make -C ios settings-e2e   # ios/SettingsE2E/run.sh: set + read back every writable
+                             # setting, kill -9 the emulator, restart, read back again
   ```
 
 ## Simulator ↔ emulator
@@ -193,6 +206,28 @@ overwritten: a name already there with other content goes up as
 `<stem>~<sha7>.txt`. Encrypted notes reach GitHub as their ciphertext. A
 pager without `fs.delete.if` gets uploads only.
 
+## Settings
+
+The **Settings** tab (shown when the pager's `sys.hello` caps include
+`"settings"`) reads and writes every setting the pager's own Settings app has
+(`IOS_SETTINGS_PLAN.md` §3, `protocol/PROTOCOL.md` §6.4). The pager owns the
+catalog: `settings.schema` lists only what the connected board has, with its
+ranges, and the tab renders it generically, one section per group in the
+pager's tile order. Wi-Fi networks (scan, join, forget, internet test), time
+zone, weather location (the phone looks the city up) and Telegram favorites
+(picked from the phone's Telegram login when there is one) have their own
+screens. Secrets (Telegram token, GitHub PAT, SSH password) are write-only:
+the tab shows Set / Not set, and the pager refuses them unless its notes
+encryption is on and unlocked. **Copy from this phone's GitHub settings**
+writes the Notes tab's repo, branch and token to the pager's Notes Sync.
+
+Every write carries `if_rev`; a change made on the pager meanwhile is picked
+up (`evt.settings.changed`) and a stale write is retried once unless the
+pager changed that same setting. Turning Bluetooth off asks first (it drops
+this link), and Power off is confirmed on the pager's own screen. Offline, the
+last values read this run stay visible, read-only. The session log shows
+setting ids, never values.
+
 ## Telegram
 
 The app can hold its own Telegram login (TDLib, via the `TDLibFramework`
@@ -226,6 +261,11 @@ falls back to the bridge the pager sends, if any.
   views, `NotesModel` wiring and Keychain store have not been built with Xcode
   or run in the Simulator / on hardware yet (`IOS_NOTES_VIEWER_PLAN.md` W8,
   W9, W15).
+- **Settings tab:** PagerKit parts (`SettingsService`, `SettingsStore`)
+  tested on Linux (`make test-linux`) and end to end against the emulator
+  (`make settings-e2e`); `SettingsModel`, `SettingsView` and the custom
+  screens were written on Linux and have not been built with Xcode or run in
+  the Simulator yet (`IOS_SETTINGS_PLAN.md` W10, W11).
 - **The app target builds on macOS** (`make gen && make sim`, Xcode 26, no
   warnings under strict concurrency). `TCPTransportTests` drives
   `TCPTransport` + `LinkSession` against a loopback-socket pager: connect

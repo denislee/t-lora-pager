@@ -13,9 +13,14 @@
  *   arrays:  main_page_group_items[], subpage_items[], settings_shortcuts[]
  *                                       — cleared, counts reset to 0
  *   group:   s_group                   — not owned (the app group); kept
- *   settings: local_param               — flushed to NVS (hw_set_user_setting),
- *                                         then theme_init() rebuilds the theme
- *                                         (and the chrome) if a style/font changed
+ *   settings: local_param               — a read-only snapshot; NOT written
+ *                                         back (each control commits through the
+ *                                         settings registry). Pending slider
+ *                                         commits are flushed, then theme_init()
+ *                                         rebuilds the theme (and the chrome) if a
+ *                                         style/font changed
+ *   registry: s_settings_obs            — unsubscribed; s_commit_timer deleted
+ *   tiles:    s_tile_pages[]            — cleared (pages die with the menu)
  *   subpages: ui_sys_exit calls each subpage namespace's reset_state() by
  *             hand (info, datetime, connectivity, notes_sec, hub, weather,
  *             telegram, notes_sync, imu_debug) to null its cached state. The
@@ -30,6 +35,7 @@
 #include "../core/app_manager.h"
 #include "../core/system.h"
 #include "../core/input_profile.h"
+#include "../core/ui_post.h"
 #include "app_registry.h"
 #include "settings_internal.h"
 
@@ -328,6 +334,23 @@ static void tile_app_click_cb(lv_event_t *e)
         core::System::getInstance().getAppPanel());
 }
 
+// Subpages whose builder holds no cached state (no reset_state), so they can
+// be rebuilt in place when the phone changes one of their settings.
+static bool tile_rebuildable(subpage_builder_t b)
+{
+    return b == display_cfg::build_backlight || b == fonts_cfg::build_subpage ||
+           b == display_cfg::build_otg || b == home_apps_cfg::build_subpage ||
+           b == storage_cfg::build_subpage || b == display_cfg::build_performance;
+}
+
+// Every subpage created on entry, with its builder (the page's user_data is
+// cleared after the first build).
+static struct {
+    lv_obj_t *page;
+    subpage_builder_t builder;
+} s_tile_pages[sizeof(kTiles) / sizeof(kTiles[0])];
+static uint8_t s_tile_page_count = 0;
+
 static lv_obj_t *create_tile(lv_obj_t *menu, lv_obj_t *main_page, const SettingsTile &t)
 {
     lv_obj_t *cont = lv_menu_cont_create(main_page);
@@ -335,6 +358,11 @@ static lv_obj_t *create_tile(lv_obj_t *menu, lv_obj_t *main_page, const Settings
     if (t.builder) {
         lv_obj_t *sub_page = lv_menu_page_create(menu, NULL);
         lv_obj_set_user_data(sub_page, (void *)t.builder);
+        if (s_tile_page_count < sizeof(s_tile_pages) / sizeof(s_tile_pages[0])) {
+            s_tile_pages[s_tile_page_count].page = sub_page;
+            s_tile_pages[s_tile_page_count].builder = t.builder;
+            s_tile_page_count++;
+        }
         lv_menu_set_load_page_event(menu, cont, sub_page);
         if (t.set_sub_page) t.set_sub_page(sub_page);
     } else {
@@ -562,6 +590,84 @@ lv_obj_t *settings_action_row(lv_obj_t *page, const char *txt, const char *btn_t
     return btn;
 }
 
+// --- Write-through to the settings registry (settings_internal.h) -------
+
+// Set while a Settings control writes, so the registry observer below does
+// not rebuild the page the user is working on. Observers run on the writer's
+// thread, so a phone write (link task) never sees it set.
+static thread_local bool s_own_write = false;
+static int s_settings_obs = 0;
+static lv_timer_t *s_commit_timer = NULL;
+static std::vector<std::pair<std::string, settings::Value>> s_pending_commits;
+
+bool settings_commit(const char *id, const settings::Value &v, bool apply, std::string *msg)
+{
+    s_own_write = true;
+    const bool ok = settings::set(id, v, msg, apply);
+    s_own_write = false;
+    hw_get_user_setting(local_param);
+    return ok;
+}
+
+void settings_flush_pending()
+{
+    if (s_commit_timer) {
+        lv_timer_delete(s_commit_timer);
+        s_commit_timer = NULL;
+    }
+    std::vector<std::pair<std::string, settings::Value>> pending;
+    pending.swap(s_pending_commits);
+    for (const auto &p : pending) settings_commit(p.first.c_str(), p.second);
+}
+
+void settings_commit_later(const char *id, const settings::Value &v)
+{
+    bool found = false;
+    for (auto &p : s_pending_commits) {
+        if (p.first == id) {
+            p.second = v;
+            found = true;
+        }
+    }
+    if (!found) s_pending_commits.push_back(std::make_pair(std::string(id), v));
+    if (s_commit_timer) {
+        lv_timer_reset(s_commit_timer);
+        return;
+    }
+    s_commit_timer = lv_timer_create([](lv_timer_t *) {
+        // One-shot: drop the handle first, flush deletes nothing then.
+        lv_timer_delete(s_commit_timer);
+        s_commit_timer = NULL;
+        settings_flush_pending();
+    }, 400, NULL);
+}
+
+// The phone changed `ids` while Settings is open (LVGL thread). Refresh the
+// snapshot; rebuild the shown subpage when it is stateless, and mark the other
+// stateless pages to rebuild when next shown. Stateful pages keep their
+// widgets until reopened; the stored values are right either way.
+static void settings_external_change()
+{
+    if (!menu) return;
+    hw_get_user_setting(local_param);
+    lv_obj_t *cur = lv_menu_get_cur_main_page(menu);
+    for (uint8_t i = 0; i < s_tile_page_count; i++) {
+        lv_obj_t *page = s_tile_pages[i].page;
+        subpage_builder_t b = s_tile_pages[i].builder;
+        if (!tile_rebuildable(b)) continue;
+        const bool built = lv_obj_get_user_data(page) == NULL;
+        if (!built) continue;
+        unregister_subpage_items_for(page);
+        lv_obj_clean(page);
+        if (page == cur) {
+            b(menu, page);
+            activate_subpage_group(page);
+        } else {
+            lv_obj_set_user_data(page, (void *)b); /* settings_page_changed_cb rebuilds it */
+        }
+    }
+}
+
 static void ui_sys_enter(lv_obj_t *parent)
 {
     INPUT_PROF_SPAN("ui_sys_enter");
@@ -571,6 +677,14 @@ static void ui_sys_enter(lv_obj_t *parent)
     enable_keyboard();
 
     hw_get_user_setting(local_param);
+    s_tile_page_count = 0;
+    s_settings_obs = settings::registry().subscribe(
+        [](uint32_t, const std::vector<std::string> &) {
+            if (s_own_write) return;
+            // Two hops: a phone write posts its hardware applies (theme,
+            // style) after its reply, so rebuild after those have run.
+            core::ui_post([] { core::ui_post(settings_external_change); });
+        });
 
     menu = create_menu(parent);
 
@@ -661,8 +775,16 @@ static void ui_sys_exit()
     // That cycle races with the core-0 keyboard_task polling the same chip
     // and hangs the device. Keyboard is a system-level resource; leave it on
     // across app switches. Sleep path (ui_pause_timers) still disables it.
+    // Every control already committed its own setting; only slider notches
+    // still inside their debounce window are pending. No whole-blob write-back
+    // (it clobbered values the phone set while Settings was open, T1).
+    settings_flush_pending();
+    if (s_settings_obs) {
+        settings::registry().unsubscribe(s_settings_obs);
+        s_settings_obs = 0;
+    }
     ui_app_widgets_del(&menu, &quit_btn);
-    hw_set_user_setting(local_param);
+    s_tile_page_count = 0;
     // Rebuild the theme so any system-font change takes effect on the next
     // screen that gets constructed. Objects already created keep their old
     // font, but the next UI (menu, app, dialog) picks up the new one.

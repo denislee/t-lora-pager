@@ -369,6 +369,8 @@ Direction: **P→D** = phone calls device, **D→P** = device calls phone.
 | `weather.get` | D→P | 3 | `{key:"auto"\|city}` → `ForecastPayload` (see §6.3) |
 | `weather.push` | P→D | 3 | `ForecastPayload` → saved to the weather cache; the Weather app re-renders if open |
 | `loc.get` | D→P | 3 | → `{lat, lon, acc_m, city?}` (also feeds the "auto" weather key) |
+| `settings.schema` / `settings.get` / `settings.set` / `settings.action` | P→D | 3 | Every pager setting by id (`IOS_SETTINGS_PLAN.md`, `protocol/PROTOCOL.md` §6.4): paged schema of what this board has, all-or-nothing `set` with `if_rev`, one-shot actions with `evt.settings.job`. Cap `"settings"` |
+| `evt.settings.changed` | D→P | 3 | `{rev, ids}` after a change from either side, at most one per 250 ms |
 | `notify.post` | P→D | 4 | `{id, title, body, src, ts, prio}` → shown via the shared popup/toast + stored in a small inbox ring |
 | `clip.push` | both | 4 | `{text}`. Pager→phone puts it on the iOS pasteboard (foreground) or a local notification (background) |
 | `phone.find` | D→P | 4 | → the phone plays a sound / posts a time-sensitive local notification |
@@ -505,7 +507,7 @@ direct (if Wi-Fi)  →  phone (if link connected)  →  cached (stale badge)
 | Files | Volume switch (Internal / SD), breadcrumb navigation, list with size/mtime, pull-to-refresh, swipe delete/rename, new folder; tap → download with progress → Quick Look / text preview; share sheet; import from Files app / Photos (upload); protected (encrypted) files shown with a lock badge |
 | Weather | What the phone will serve to the pager: location source (GPS / city), last fetch, "push now", a preview rendered like the pager does |
 | Inbox | Texts/clipboard the pager sent; compose a message to the pager (`notify.post` / `text.send`) |
-| Settings | Auto-push weather, auto time sync, background refresh, units, trusted device rename/forget, transport (BLE / TCP for emulator, debug builds only) |
+| Settings | The pager's own settings, rendered from its `settings.schema` (display, charger, fonts, time zone, connectivity, Wi-Fi networks, home apps, hub, weather location, Telegram, notes sync, storage, SSH; `IOS_SETTINGS_PLAN.md`), plus a "This phone" section linking the app-side settings (GitHub account, Telegram login) |
 | Diagnostics | Live frame log (hex + decoded JSON), MTU, conn interval, throughput test (`fs.read` of a generated file), export logs |
 
 ### 6.2 Data and state

@@ -87,7 +87,10 @@ static void refresh_labels()
 static void set_url_cb(const char *text, void *)
 {
     if (!text) return;
-    apps::tg_cfg_set_url(text);
+    std::string why;
+    if (!settings_commit("tg.url", settings::Value::of_str(text), true, &why)) {
+        ui_msg_pop_up("URL rejected", why.c_str());
+    }
     refresh_labels();
 }
 
@@ -98,6 +101,8 @@ static void set_token_cb(const char *text, void *)
     if (!apps::tg_cfg_set_token(text, &err)) {
         ui_msg_pop_up("Token rejected",
                       err.empty() ? "Save failed." : err.c_str());
+    } else {
+        settings::note_changed("tg.token");
     }
     refresh_labels();
 }
@@ -128,14 +133,14 @@ static void notif_vibrate_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    apps::tg_cfg_set_notif_vibrate(en);
+    settings_commit_bool("tg.notify_vibrate", en);
 }
 
 static void notif_banner_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    apps::tg_cfg_set_notif_banner(en);
+    settings_commit_bool("tg.notify_banner", en);
 }
 
 void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
@@ -203,6 +208,7 @@ static void fav_toggle_cb(lv_event_t *e)
     if (!ctx) return;
     bool checked = lv_obj_has_state(btn, LV_STATE_CHECKED);
     apps::tg_cfg_set_favorite(ctx->id, ctx->title.c_str(), checked);
+    settings::note_changed("tg.favorites");
     lv_obj_t *label = (lv_obj_t *)lv_obj_get_user_data(btn);
     if (label) lv_label_set_text(label, checked ? LV_SYMBOL_OK : LV_SYMBOL_PLUS);
 }

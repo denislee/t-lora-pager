@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "../hal_interface.h"  // user_setting_params_t
+#include "../hal/settings.h"
 
 // --- Shared helpers implemented in ui_settings.cpp ---
 void register_subpage_group_obj(lv_obj_t *page, lv_obj_t *obj);
@@ -89,11 +90,28 @@ void settings_return_to_main_page();
 // passphrase op, so activate_subpage_group won't re-add freed widgets.
 void unregister_subpage_items_for(lv_obj_t *page);
 
-// Working copy of the user settings blob — populated by ui_sys_enter from
-// NVS and written back by ui_sys_exit. Split-out subpages mutate fields on
-// this struct and call `hw_set_user_setting(local_param)` to persist
-// eagerly, so settings survive a crash/power-loss between changes.
+// Read-only snapshot of the user settings blob, used to build the subpages.
+// Refreshed from the HAL on entry, after every settings_commit*() and when
+// the phone changes a setting. Never written back: every control persists
+// its own setting through the registry (hal/settings.h), so a value the
+// phone changes while Settings is open is not clobbered on exit (T1).
 extern user_setting_params_t local_param;
+
+// --- Write-through to the settings registry (IOS_SETTINGS_PLAN.md W3) ---
+// Store one setting from a Settings control. `apply` false (the default):
+// the control has already applied the change itself, so only store + notify
+// the phone. Call it BEFORE a HAL setter that also mutates the live settings
+// struct, or the registry sees "unchanged" and skips the write. On failure
+// `msg` gets the reason.
+bool settings_commit(const char *id, const settings::Value &v, bool apply = false,
+                     std::string *msg = nullptr);
+inline bool settings_commit_bool(const char *id, bool v) { return settings_commit(id, settings::Value::of_bool(v)); }
+inline bool settings_commit_int(const char *id, int64_t v) { return settings_commit(id, settings::Value::of_int(v)); }
+inline bool settings_commit_str(const char *id, const std::string &v) { return settings_commit(id, settings::Value::of_str(v)); }
+// Slider notches: store only the last value within ~400 ms (store-only, like
+// settings_commit with apply false). ui_sys_exit flushes what is pending.
+void settings_commit_later(const char *id, const settings::Value &v);
+void settings_flush_pending();
 
 // --- Timezone (timezone_get_user_tz/set_user_tz/fetch_list) ---
 #include "../hal/timezone.h"
@@ -135,8 +153,8 @@ namespace notes_sync_cfg {
 }
 
 // Fonts subpage has no persistent state of its own — its 18 dropdowns (9
-// contexts × face/size) share two callbacks that mutate the
-// `local_param.*_font_index/size` field passed as user_data and commit. No set_sub_page/
+// contexts × face/size) share two callbacks that commit the registry id
+// (fonts.<ctx>.face / .size) passed as user_data. No set_sub_page/
 // reset_state needed.
 namespace fonts_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);

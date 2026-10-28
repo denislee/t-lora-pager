@@ -3,6 +3,7 @@
  * @brief     Local hub config storage. See hub.h.
  */
 #include "hub.h"
+#include "nvs.h"
 #include "wireless.h"
 #include "str_encode.h"
 
@@ -16,18 +17,9 @@
 namespace hal {
 
 namespace {
-// Everything in here backs the NVS-backed hardware implementation; the
-// emulator branches below return fixed stub values.
-#ifdef ARDUINO
-constexpr const char *NS = "hub";
-constexpr const char *KEY_URL = "url";
-constexpr const char *KEY_ENABLED = "enabled";
-
-// Legacy slot — hub URL used to live under the "weather" namespace before this
-// module existed. See hub.h for the migration contract.
-constexpr const char *LEGACY_NS = "weather";
-constexpr const char *LEGACY_KEY = "hub_url";
-
+// Trim helper shared by both builds: the hardware path trims what it reads
+// from NVS, the emulator path trims what it reads from the settings file.
+//
 // Whitespace-trim and drop any trailing '/' (interleaved with whitespace or
 // not), so callers can append "/api/..." directly.
 std::string trim_url(const std::string &in)
@@ -39,6 +31,17 @@ std::string trim_url(const std::string &in)
     }
     return s;
 }
+
+// Everything below backs the NVS-backed hardware implementation.
+#ifdef ARDUINO
+constexpr const char *NS = "hub";
+constexpr const char *KEY_URL = "url";
+constexpr const char *KEY_ENABLED = "enabled";
+
+// Legacy slot — hub URL used to live under the "weather" namespace before this
+// module existed. See hub.h for the migration contract.
+constexpr const char *LEGACY_NS = "weather";
+constexpr const char *LEGACY_KEY = "hub_url";
 
 // One-shot legacy migration: if the new slot is empty but the old one has a
 // value, copy it across, force the toggle ON (preserving prior behavior —
@@ -148,7 +151,7 @@ std::string hub_get_url_raw()
     cfg_ensure_locked();
     return s_cfg_url;
 #else
-    return "";
+    return trim_url(hal::nvs_get_str("hub", "url", ""));
 #endif
 }
 
@@ -159,7 +162,7 @@ bool hub_get_enabled_pref()
     cfg_ensure_locked();
     return s_cfg_enabled;
 #else
-    return false;
+    return hal::nvs_get_bool("hub", "enabled", false);
 #endif
 }
 
@@ -195,7 +198,7 @@ void hub_set_enabled(bool enabled)
     p.end();
     cfg_invalidate();
 #else
-    (void)enabled;
+    hal::nvs_set_bool("hub", "enabled", enabled);
 #endif
 }
 
@@ -212,7 +215,7 @@ void hub_set_url(const char *url)
     p.end();
     cfg_invalidate();
 #else
-    (void)url;
+    hal::nvs_set_str("hub", "url", url);
 #endif
 }
 

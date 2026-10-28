@@ -93,13 +93,14 @@ void apply_radio(bool en)
     }
 }
 
-// The six hardware toggles share one body: mirror the new state into
-// local_param, apply it, then run the optional follow-up (row visibility).
-// create_toggle_btn_row flips the On/Off label itself.
+// The six hardware toggles share one body: commit the new state through the
+// settings registry (which mirrors it into local_param), apply it, then run
+// the optional follow-up (row visibility). create_toggle_btn_row flips the
+// On/Off label itself.
 struct HwToggle {
     const char *label;
     bool (*get)();
-    uint8_t *param;                          // &local_param.<x>_enable
+    const char *id;                           // settings registry id
     void (*apply)(bool en);
     void (*after)(lv_obj_t *btn, bool en);   // may be nullptr
 };
@@ -109,17 +110,17 @@ void hw_toggle_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     const HwToggle *t = (const HwToggle *)lv_event_get_user_data(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    *t->param = en;
+    settings_commit_bool(t->id, en);
     t->apply(en);
     if (t->after) t->after(obj, en);
 }
 
-const HwToggle kWifi    = { "WiFi",      hw_get_wifi_enable,    &local_param.wifi_enable,    hw_set_wifi_enable,    wifi_after };
-const HwToggle kBt      = { "Bluetooth", hw_get_bt_enable,      &local_param.bt_enable,      hw_set_bt_enable,      nullptr };
-const HwToggle kRadio   = { "Radio",     hw_get_radio_enable,   &local_param.radio_enable,   apply_radio,           nullptr };
-const HwToggle kNfc     = { "NFC",       hw_get_nfc_enable,     &local_param.nfc_enable,     hw_set_nfc_enable,     nfc_after };
-const HwToggle kSpeaker = { "Speaker",   hw_get_speaker_enable, &local_param.speaker_enable, hw_set_speaker_enable, nullptr };
-const HwToggle kHaptic  = { "Haptic",    hw_get_haptic_enable,  &local_param.haptic_enable,  hw_set_haptic_enable,  nullptr };
+const HwToggle kWifi    = { "WiFi",      hw_get_wifi_enable,    "conn.wifi",    hw_set_wifi_enable,    wifi_after };
+const HwToggle kBt      = { "Bluetooth", hw_get_bt_enable,      "conn.bt",      hw_set_bt_enable,      nullptr };
+const HwToggle kRadio   = { "Radio",     hw_get_radio_enable,   "conn.radio",   apply_radio,           nullptr };
+const HwToggle kNfc     = { "NFC",       hw_get_nfc_enable,     "conn.nfc",     hw_set_nfc_enable,     nfc_after };
+const HwToggle kSpeaker = { "Speaker",   hw_get_speaker_enable, "conn.speaker", hw_set_speaker_enable, nullptr };
+const HwToggle kHaptic  = { "Haptic",    hw_get_haptic_enable,  "conn.haptic",  hw_set_haptic_enable,  nullptr };
 
 lv_obj_t *add_hw_toggle(lv_obj_t *sub_page, const HwToggle &t)
 {

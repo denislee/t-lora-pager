@@ -5,6 +5,7 @@
  */
 #include "../ui_define.h"
 #include "../ui_list_picker.h"
+#include "../hal/link/link_json.h"
 #include "../hal/str_encode.h"
 #include "../core/one_shot_job.h"
 #include "settings_internal.h"
@@ -31,7 +32,8 @@ static void set_status(const char *text, lv_color_t color)
 }
 
 // User picked one of the geocoding results. Persist the exact name + lat/lon
-// so the Weather app's first fetch skips the geocoding round-trip entirely.
+// through the settings registry so the Weather app's first fetch skips the
+// geocoding round-trip entirely.
 static void city_picked_cb(int index, void *ud)
 {
     (void)ud;
@@ -40,7 +42,16 @@ static void city_picked_cb(int index, void *ud)
         return;
     }
     const weather_city_match &m = g_search_results[(size_t)index];
-    weather_set_user_location(m.name.c_str(), m.lat, m.lon);
+    char lat[24], lon[24];
+    snprintf(lat, sizeof(lat), "%.5f", m.lat);
+    snprintf(lon, sizeof(lon), "%.5f", m.lon);
+    pagerlink::JsonWriter w;
+    w.begin_object()
+        .key("name").str_val(m.name)
+        .key("lat").raw_val(lat)
+        .key("lon").raw_val(lon)
+        .end_object();
+    settings_commit("weather.location", settings::Value::of_json(w.str()));
     refresh_label();
     set_status("Saved", lv_palette_main(LV_PALETTE_GREEN));
     g_search_results.clear();
@@ -100,7 +111,8 @@ static void search_entered_cb(const char *text, void *ud)
     std::string q = hal::trim(text);
     if (q.empty()) {
         // Empty submission clears the override and returns to auto.
-        weather_set_user_city("");
+        settings_commit("weather.location",
+                        settings::Value::of_json("{\"auto\":true}"));
         refresh_label();
         set_status("Using auto (IP)", UI_COLOR_MUTED);
         return;
@@ -137,7 +149,7 @@ static void btn_set_city_cb(lv_event_t *e)
 static void btn_clear_city_cb(lv_event_t *e)
 {
     (void)e;
-    weather_set_user_city("");
+    settings_commit("weather.location", settings::Value::of_json("{\"auto\":true}"));
     refresh_label();
     set_status("Using auto (IP)", UI_COLOR_MUTED);
 }

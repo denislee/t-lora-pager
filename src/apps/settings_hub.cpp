@@ -43,7 +43,7 @@ static void enable_toggle_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    hal::hub_set_enabled(en);
+    settings_commit_bool("hub.enabled", en);
     if (en && hal::hub_get_url_raw().empty()) {
         set_status("Set a URL to start using the hub",
                    lv_palette_main(LV_PALETTE_ORANGE));
@@ -59,7 +59,12 @@ static void url_entered_cb(const char *text, void *ud)
     (void)ud;
     if (!text) { set_status("Cancelled", UI_COLOR_MUTED); return; }
     std::string v = hal::trim(text);
-    hal::hub_set_url(v.c_str());
+    std::string why;
+    if (!settings_commit("hub.url", settings::Value::of_str(v), false, &why)) {
+        refresh_url_label();
+        set_status(why.c_str(), lv_palette_main(LV_PALETTE_RED));
+        return;
+    }
     refresh_url_label();
     if (v.empty()) {
         set_status("URL cleared", UI_COLOR_MUTED);
@@ -84,7 +89,7 @@ static void btn_set_url_cb(lv_event_t *e)
 static void btn_clear_url_cb(lv_event_t *e)
 {
     (void)e;
-    hal::hub_set_url("");
+    settings_commit_str("hub.url", "");
     refresh_url_label();
     set_status("URL cleared", UI_COLOR_MUTED);
 }

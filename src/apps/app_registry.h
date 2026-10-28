@@ -69,6 +69,10 @@ bool tg_cfg_is_favorite(long long id);
 // chat list and jump straight into the favorited chat when there is only
 // one. Pass nullptr/"" if no title is known; existing title is preserved.
 void tg_cfg_set_favorite(long long id, const char *title, bool on);
+// Every favorite id with its title ("" when unknown), ascending id.
+void tg_cfg_get_favorites(std::vector<std::pair<long long, std::string>> &out);
+// Replaces the whole favorites set (ids != 0) and titles, then persists.
+void tg_cfg_set_favorites(const std::vector<std::pair<long long, std::string>> &favs);
 
 // Notification channel toggles for new-message alerts raised by the
 // background poll (see tg_begin_background_poll). Default ON.

@@ -108,7 +108,7 @@ void display_brightness_cb(lv_event_t *e)
     lv_obj_t *slider_label = slider_label_of(e, &v);
     uint8_t val = (uint8_t)v;
     set_brightness_label(slider_label, val);
-    local_param.brightness_level = val;
+    settings_commit_later("display.brightness", settings::Value::of_int(val));
     hw_set_disp_backlight(val);
 }
 
@@ -119,7 +119,7 @@ void keyboard_brightness_cb(lv_event_t *e)
     lv_obj_t *slider_label = slider_label_of(e, &step);
     uint8_t val = (uint8_t)map_r(step, 0, 20, 0, 255);
     set_pct_label(slider_label, (long)step * 5);
-    local_param.keyboard_bl_level = val;
+    settings_commit_later("display.kb_backlight", settings::Value::of_int((long)step * 5));
     hw_set_kb_backlight(val);
 }
 
@@ -128,7 +128,7 @@ void disp_timeout_cb(lv_event_t *e)
     int32_t v;
     lv_obj_t *slider_label = slider_label_of(e, &v);
     uint8_t val = (uint8_t)v;
-    local_param.disp_timeout_second = val;
+    settings_commit_later("display.timeout_s", settings::Value::of_int(val));
     set_timeout_label(slider_label, val);
 }
 
@@ -137,18 +137,18 @@ void sleep_mode_cb(lv_event_t *e)
     int32_t v;
     lv_obj_t *slider_label = slider_label_of(e, &v);
     uint8_t val = (uint8_t)v;
-    local_param.sleep_mode = val;
+    settings_commit_later("display.sleep_mode", settings::Value::of_str(val ? "deep" : "light"));
     set_sleep_mode_label(slider_label, val);
 }
 
-// Show Memory / Show File Count: event user_data is &local_param.<flag>.
-// create_toggle_btn_row registers only LV_EVENT_VALUE_CHANGED.
+// Show Memory / Show File Count: event user_data is the settings registry id
+// (a const char *). create_toggle_btn_row registers only
+// LV_EVENT_VALUE_CHANGED.
 void u8_toggle_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    uint8_t *flag = (uint8_t *)lv_event_get_user_data(e);
-    *flag = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    hw_set_user_setting(local_param);
+    const char *id = (const char *)lv_event_get_user_data(e);
+    settings_commit_bool(id, lv_obj_has_state(obj, LV_STATE_CHECKED));
 }
 
 // --- Charger / OTG callbacks ---
@@ -158,7 +158,8 @@ void otg_output_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
     // Rejected: un-check, and the row's label follows (" Off ").
-    if (hw_set_otg(turnOn) == false) {
+    // The registry setter calls hw_set_otg itself.
+    if (!settings_commit("power.otg", settings::Value::of_bool(turnOn))) {
         lv_obj_remove_state(obj, LV_STATE_CHECKED);
     }
 }
@@ -167,11 +168,10 @@ void charger_enable_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool turnOn = lv_obj_has_state(obj, LV_STATE_CHECKED);
-    local_param.charger_enable = turnOn;
 
-    // Persist eagerly so the background charge-limit check sees the new
-    // state on its next tick, then re-apply the limit now.
-    hw_set_user_setting(local_param);
+    // Store eagerly through the registry so the background charge-limit check
+    // sees the new state on its next tick, then re-apply the limit now.
+    settings_commit_bool("power.charging", turnOn);
     hw_set_charger(turnOn);
     hw_apply_charge_limit();
 }
@@ -180,26 +180,22 @@ void charger_current_cb(lv_event_t *e)
 {
     int32_t val;
     lv_obj_t *slider_label = slider_label_of(e, &val);
-    local_param.charger_current = hw_set_charger_current_level(val);
-    set_charger_current_label(slider_label, local_param.charger_current);
-    // The current is applied to the PMIC live above. Like the sibling display
-    // sliders, do NOT persist per notch — dragging fires this callback on every
-    // step, and hw_set_user_setting() rewrites the whole NVS blob each time.
-    // local_param is flushed once when the user leaves Settings (ui_sys_exit),
-    // so the setting still survives without thrashing flash on every drag.
+    // Applied live per notch; stored once the slider settles
+    // (settings_commit_later).
+    uint16_t ma = hw_set_charger_current_level(val);
+    set_charger_current_label(slider_label, ma);
+    settings_commit_later("power.charge_current_ma", settings::Value::of_int(ma));
 }
 
 void charge_limit_cb(lv_event_t *e)
 {
     lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
     bool turnOn = lv_obj_has_state(btn, LV_STATE_CHECKED);
-    local_param.charge_limit_en = turnOn;
-
-    hw_set_user_setting(local_param);
+    settings_commit_bool("power.charge_limit_80", turnOn);
 
     if (!turnOn) {
         // Restoring the raw user preference — charger_enable stays authoritative
-        // once the 80% cap is off.
+        // once the 80% cap is off. local_param was refreshed by the commit.
         hw_set_charger(local_param.charger_enable);
     } else {
         hw_apply_charge_limit();
@@ -212,8 +208,7 @@ void cpu_freq_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     uint16_t index = lv_dropdown_get_selected(obj);
-    local_param.cpu_freq_mhz = kCpuFreqs[index];
-    hw_set_user_setting(local_param);
+    settings_commit_int("perf.cpu_mhz", kCpuFreqs[index]);
 }
 
 // --- UI style callback ---
@@ -221,14 +216,22 @@ void cpu_freq_cb(lv_event_t *e)
 void ui_style_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    ui_style_set((ui_style_t)lv_dropdown_get_selected(obj));
+    ui_style_t st = (ui_style_t)lv_dropdown_get_selected(obj);
+    const char *name = st == UI_STYLE_PIXEL_ISO ? "pixel"
+                     : st == UI_STYLE_HOTEL    ? "hotel"
+                     : st == UI_STYLE_BEOS     ? "beos"
+                                               : "classic";
+    settings_commit_str("display.ui_style", name);
+    ui_style_set(st);
     core::System::getInstance().applyChromeStyle();
 }
 
 void dark_mode_cb(lv_event_t *e)
 {
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
-    ui_dark_mode_set(lv_obj_has_state(obj, LV_STATE_CHECKED));
+    bool on = lv_obj_has_state(obj, LV_STATE_CHECKED);
+    settings_commit_bool("display.dark", on);
+    ui_dark_mode_set(on);
     core::System::getInstance().applyChromeStyle();
 }
 
@@ -260,9 +263,9 @@ void build_backlight(lv_obj_t *menu, lv_obj_t *sub_page)
                          local_param.sleep_mode);
 
     create_toggle_btn_row(sub_page, "Show Memory", local_param.show_mem_usage,
-                          u8_toggle_cb, &local_param.show_mem_usage);
+                          u8_toggle_cb, (void *)"statusbar.show_mem");
     create_toggle_btn_row(sub_page, "Show File Count", local_param.show_file_count,
-                          u8_toggle_cb, &local_param.show_file_count);
+                          u8_toggle_cb, (void *)"statusbar.show_files");
 
     // UI style: applies to newly built screens immediately and fully on
     // leaving Settings (ui_sys_exit rebuilds the theme + chrome).

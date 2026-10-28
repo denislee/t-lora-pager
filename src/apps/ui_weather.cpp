@@ -52,6 +52,7 @@
 #include "../hal/weather_cache.h"
 #include "../hal/weather_link.h"
 #include "../hal/weather_payload.h"
+#include "../hal/nvs.h"
 #include "../core/one_shot_job.h"
 #include "../core/ui_post.h"
 #include "app_registry.h"
@@ -1041,6 +1042,10 @@ std::string weather_get_user_city()
     p.end();
     return std::string(c.c_str());
 #else
+    // Emulator: the entry is a file under $PAGERLINK_NVS_DIR, so the chosen
+    // city survives a restart. An absent key still means "never chosen".
+    if (hal::nvs_has(WEATHER_PREFS_NS, "user_city"))
+        return hal::nvs_get_str(WEATHER_PREFS_NS, "user_city", "");
     return std::string(WEATHER_DEFAULT_CITY);
 #endif
 }
@@ -1060,7 +1065,10 @@ void weather_set_user_city(const char *city)
     p.end();
     weather_cache_clear();
 #else
-    (void)city;
+    // Store "" explicitly for auto, exactly like the hardware branch: the key
+    // must exist so weather_get_user_city() does not fall back to the default.
+    hal::nvs_put_str(WEATHER_PREFS_NS, "user_city", (city && *city) ? city : "");
+    weather_cache_clear();
 #endif
 }
 
@@ -1070,7 +1078,6 @@ void weather_set_user_city(const char *city)
 // the cache and re-geocode.
 void weather_set_user_location(const char *city, double lat, double lon)
 {
-#ifdef ARDUINO
     if (!city || !*city) {
         weather_set_user_city("");
         return;
@@ -1081,9 +1088,6 @@ void weather_set_user_location(const char *city, double lat, double lon)
     g.lat = lat;
     g.lon = lon;
     weather_cache_save_geo(weather_cache_key(city), g);   // key must match do_fetch()
-#else
-    (void)city; (void)lat; (void)lon;
-#endif
 }
 
 // Search the open-meteo geocoding API for cities matching `query`. Returns up

@@ -12,6 +12,8 @@
 #include "menu_app.h"
 #include "settings_internal.h"
 
+#include <string>
+
 namespace home_apps_cfg {
 
 namespace {
@@ -21,7 +23,7 @@ void toggle_cb(lv_event_t *e)
     lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
     bool en = lv_obj_has_state(obj, LV_STATE_CHECKED);
     int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    apps::home_apps_set_visible(idx, en);
+    settings_commit_bool((std::string("home.visible.") + apps::home_apps_name(idx)).c_str(), en);
 }
 
 } // anonymous namespace

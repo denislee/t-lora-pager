@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "hal/link.h"
 #include "hal/link/link_frame.h"
@@ -105,6 +106,14 @@ void register_sys_handlers(Rpc &rpc);
 void register_fs_handlers(Rpc &rpc);
 /** Register the weather.* handlers on `rpc` (handlers_weather.cpp). */
 void register_weather_handlers(Rpc &rpc);
+/** Register the settings.* handlers on `rpc` (handlers_settings.cpp). */
+void register_settings_handlers(Rpc &rpc);
+/**
+ * The settings registry changed `ids` (now at `rev`). Any task. Merged into
+ * one evt.settings.changed {"rev","ids"} that service_tick() emits at most
+ * every 250 ms while a phone is connected; dropped when none is.
+ */
+void service_note_settings_changed(uint32_t rev, const std::vector<std::string> &ids);
 /** Route one DATA/ACK message (Rpc::on_bulk) to its transfer; returns true when
  * the xfer id belongs to an fs transfer, false when it is unknown. */
 bool fs_on_bulk(MsgType type, uint16_t xfer, const uint8_t *payload, size_t len);

@@ -234,7 +234,7 @@ static void tz_picked_cb(int index, void *ud)
         g_tz_candidates.clear();
         return;
     }
-    timezone_set_user_tz(g_tz_candidates[(size_t)index].c_str());
+    settings_commit_str("time.tz", g_tz_candidates[(size_t)index]);
     refresh_tz_label();
     g_tz_candidates.clear();
     sync_set_status("Timezone saved. Tap Sync to apply.", UI_COLOR_MUTED);
@@ -249,7 +249,7 @@ static void set_tz_cb(lv_event_t *)
 
 static void clear_tz_cb(lv_event_t *)
 {
-    timezone_set_user_tz("");
+    settings_commit_str("time.tz", "");
     refresh_tz_label();
     sync_set_status("Timezone reset to default. Tap Sync to apply.", UI_COLOR_MUTED);
 }

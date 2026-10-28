@@ -1903,6 +1903,32 @@ void tg_cfg_set_favorite(long long id, const char *title, bool on)
     if (changed) save_favorites();
 }
 
+void tg_cfg_get_favorites(std::vector<std::pair<long long, std::string>> &out)
+{
+    out.clear();
+    if (!s_favorites_loaded) load_favorites();
+    out.reserve(s_favorites.size());
+    for (long long id : s_favorites) {
+        auto it = s_favorite_titles.find(id);
+        out.emplace_back(id, it == s_favorite_titles.end() ? std::string() : it->second);
+    }
+}
+
+void tg_cfg_set_favorites(const std::vector<std::pair<long long, std::string>> &favs)
+{
+    // Same guard-free shape as tg_cfg_set_favorite(): UI thread only, and the
+    // in-memory set is authoritative until this rewrite persists it.
+    s_favorites.clear();
+    s_favorite_titles.clear();
+    s_favorites_loaded = true;
+    for (const auto &f : favs) {
+        if (f.first == 0) continue;
+        s_favorites.insert(f.first);
+        if (!f.second.empty()) s_favorite_titles[f.first] = f.second;
+    }
+    save_favorites();
+}
+
 bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
                             std::string *err)
 {

@@ -17,14 +17,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "hal/nvs.h"
 #include "hal/timezone.h"
 
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <Preferences.h>
+#endif
 
 #define TZ_PREFS_NS  "timezone"
-#endif
 
 #define TZ_DEFAULT   "America/Sao_Paulo"
 
@@ -145,6 +146,11 @@ std::string timezone_get_user_tz()
         p.end();
         if (s.length()) return std::string(s.c_str());
     }
+#else
+    // Persisted as a file under $PAGERLINK_NVS_DIR, so the picker survives an
+    // emulator restart just like it does on the device.
+    std::string s = hal::nvs_get_str(TZ_PREFS_NS, "tz", "");
+    if (!s.empty()) return s;
 #endif
     return std::string(TZ_DEFAULT);
 }
@@ -157,6 +163,9 @@ void timezone_set_user_tz(const char *tz)
     if (tz && *tz) p.putString("tz", tz);
     else           p.remove("tz");
     p.end();
+#else
+    hal::nvs_set_str(TZ_PREFS_NS, "tz", tz);
+#endif
 
     // Apply the new zone to the C library env so localtime()/mktime() use
     // it immediately. Without this, the picker would only take effect on
@@ -167,9 +176,6 @@ void timezone_set_user_tz(const char *tz)
         setenv("TZ", posix, 1);
         tzset();
     }
-#else
-    (void)tz;
-#endif
 }
 
 const char *timezone_get_user_posix()
@@ -185,4 +191,9 @@ void timezone_fetch_list(std::vector<std::string> &out)
     out.clear();
     out.reserve(sizeof(TZ_TABLE) / sizeof(TZ_TABLE[0]));
     for (const TzEntry &e : TZ_TABLE) out.emplace_back(e.name);
+}
+
+bool timezone_is_known(const char *name)
+{
+    return tz_find_posix(name) != nullptr;
 }

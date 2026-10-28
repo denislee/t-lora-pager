@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// The app's tabs: live device state, the pager's notes, the phone's
-/// Telegram login, and the link log.
+/// The app's tabs: live device state, the pager's notes and tasks, its
+/// settings, the phone's Telegram login, and the link log.
 struct RootView: View {
     @EnvironmentObject private var session: PagerSession
     @EnvironmentObject private var notes: NotesModel
     @EnvironmentObject private var tasks: TasksModel
+    @EnvironmentObject private var settings: SettingsModel
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -31,6 +32,14 @@ struct RootView: View {
                 .tabItem {
                     Label("Telegram", systemImage: "paperplane")
                 }
+            // Needs the pager's "settings" cap; offline, the last values
+            // read-only.
+            if settings.available {
+                SettingsView()
+                    .tabItem {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+            }
             DiagnosticsView()
                 .tabItem {
                     Label("Diagnostics", systemImage: "stethoscope")
@@ -51,5 +60,6 @@ struct RootView: View {
         .environmentObject(PagerSession())
         .environmentObject(PagerSession().notes)
         .environmentObject(PagerSession().tasks)
+        .environmentObject(PagerSession().settings)
         .environmentObject(TelegramAccount())
 }

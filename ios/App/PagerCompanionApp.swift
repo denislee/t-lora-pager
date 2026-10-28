@@ -22,6 +22,7 @@ struct PagerCompanionApp: App {
                 .environmentObject(session)
                 .environmentObject(session.notes)
                 .environmentObject(session.tasks)
+                .environmentObject(session.settings)
                 .environmentObject(telegram)
         }
     }

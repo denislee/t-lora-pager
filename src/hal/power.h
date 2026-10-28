@@ -5,6 +5,7 @@
 #pragma once
 
 #include "types.h"
+#include <vector>
 
 int16_t hw_get_battery_voltage();
 // Enforce the 80 % charge limit (or plain charger_enable when it is off).
@@ -23,3 +24,8 @@ uint8_t hw_get_charge_level_nums();
 
 uint16_t hw_set_charger_current_level(uint8_t level);
 uint8_t hw_get_charger_current_level();
+
+// Milliamps of Settings levels 1..hw_get_charge_level_nums(), deduped.
+void hw_charge_current_options(std::vector<uint16_t> &ma);
+// First Settings level whose mA value equals ma, or 0 when none matches.
+uint8_t hw_charge_level_for_ma(uint16_t ma);

@@ -130,6 +130,8 @@ public:
     size_t size() const { return members_.size(); }
     /** True when a top-level member with this key exists. */
     bool has(const char *key) const;
+    /** Decoded top-level keys in document order (duplicates included). */
+    std::vector<std::string> keys() const;
 
     /** Raw JSON text of the member's value (exact bytes). */
     bool get_raw(const char *key, std::string &out) const;

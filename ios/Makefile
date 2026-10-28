@@ -50,7 +50,7 @@ LEGACY_DEVICE = $(shell command -v ios-deploy >/dev/null 2>&1 && \
 m = [re.search(r'Found (\S+) .*?, iphoneos, [^,]*, (\d+)\.(\d+)', l) for l in sys.stdin]; \
 print(next((f'{x.group(1)} {x.group(2)}.{x.group(3)}' for x in m if x and int(x.group(2)) < 17), ''))")
 
-.PHONY: gen test test-linux notes-e2e sim device device-run device-console device-log clean clean-device help
+.PHONY: gen test test-linux notes-e2e settings-e2e sim device device-run device-console device-log clean clean-device help
 
 # Regenerate PagerCompanion.xcodeproj from project.yml. The .xcodeproj is not
 # committed, so run this after any change to project.yml or to the file layout.
@@ -71,6 +71,13 @@ test-linux:
 # GitHub. Linux/Docker; host networking reaches 127.0.0.1:7600.
 notes-e2e:
 	docker run --rm --network host --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(REPO):/repo -w /repo/ios/NotesE2E swift:6.0-jammy swift run
+
+# Every writable pager setting over PagerLink: set, read back, kill -9 the
+# emulator, restart it on the same state, read back again
+# (IOS_SETTINGS_PLAN.md W12). Starts and stops the emulator itself, so port
+# 7600 must be free. Linux (Docker) or macOS.
+settings-e2e:
+	./SettingsE2E/run.sh
 
 # Build the app for the iOS Simulator (no signing required).
 sim:
@@ -157,6 +164,7 @@ help:
 	@echo "  make test        - run PagerKit tests on this host (macOS: swift test)"
 	@echo "  make test-linux  - run PagerKit tests on Linux in Docker (swift:6.0-jammy)"
 	@echo "  make notes-e2e   - notes viewer/move checks against the running emulator (Docker)"
+	@echo "  make settings-e2e - every setting: set, read back, kill -9 + restart, read back (starts the emulator)"
 	@echo "  make sim         - build for the iOS Simulator (xcodebuild)"
 	@echo "  make device      - build, sign and install on the connected iPhone"
 	@echo "                     (DEVICE_TYPE=iPad, or DEVICE=<udid> to pick one)"

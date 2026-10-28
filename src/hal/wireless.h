@@ -29,6 +29,7 @@ bool hw_wifi_get_saved_password(const std::string &ssid, std::string &password);
 void hw_wifi_get_saved_list(std::vector<std::string> &ssids);
 void hw_wifi_add_saved(const std::string &ssid, const std::string &password);
 void hw_wifi_forget();  // drop every saved network
+bool hw_wifi_forget_ssid(const std::string &ssid);  // drop one saved network; true when saved
 
 // P4.17: WiFi reconnect supervisor with exponential backoff.
 // Call from the main loop at any cadence >= 1 Hz; the function self-throttles.

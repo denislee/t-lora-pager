@@ -12,6 +12,7 @@
 #include "lvgl_task.h"
 #include "radio_chip.h"
 #include "timezone.h"
+#include "nvs.h"
 #include "../core/spi_lock.h"
 #include "../core/kb_lock.h"
 
@@ -159,8 +160,7 @@ uint32_t hw_fake_sleep_target_freq()
     return link_up ? 80 : FAKE_SLEEP_IDLE_FREQ_MHZ;
 }
 
-#ifdef ARDUINO
-// Settings blob schema guard (hardware NVS only).
+// Settings blob schema guard (hardware NVS and the emulator's blob file).
 //
 // The stored NVS blob is a `SettingsHeader` followed by a raw
 // `user_setting_params_t`. The header lets us reject bytes left over from a
@@ -194,6 +194,7 @@ struct SettingsHeader {
     uint16_t payload_size;
 };
 
+#ifdef ARDUINO
 #include "Esp.h"
 #include <LilyGoLib.h>
 #include <esp_mac.h>
@@ -222,6 +223,20 @@ void save_user_setting_nvs()
 // detection; allocation failures still surface through the existing asserts.
 extern "C" bool testSPIRAM(void) { return true; }
 
+#endif
+
+#ifndef ARDUINO
+// Emulator twin of the hardware saver above: the same SettingsHeader + payload
+// bytes, but persisted as one blob file under $PAGERLINK_NVS_DIR/pager/pager so
+// the emulator's settings survive a restart.
+void save_user_setting_nvs()
+{
+    uint8_t buf[sizeof(SettingsHeader) + sizeof(user_setting_params_t)];
+    SettingsHeader h{SETTINGS_MAGIC, SETTINGS_VERSION, (uint16_t)sizeof(user_setting_params_t)};
+    memcpy(buf, &h, sizeof(h));
+    memcpy(buf + sizeof(h), &user_setting, sizeof(user_setting_params_t));
+    hal::nvs_set_blob("pager", "pager", buf, sizeof(buf));
+}
 #endif
 
 device_const_var_t dev_conts_var = {
@@ -515,6 +530,19 @@ void hw_load_setting()
     if (needs_save) {
         save_user_setting_nvs();
     }
+#else
+    // Emulator: the blob is a file under $PAGERLINK_NVS_DIR/pager/pager, so a
+    // restart keeps the last saved settings instead of reverting to defaults.
+    std::string b;
+    if (hal::nvs_get_blob("pager", "pager", b) &&
+        b.size() == sizeof(SettingsHeader) + sizeof(user_setting_params_t)) {
+        const SettingsHeader *h = reinterpret_cast<const SettingsHeader *>(b.data());
+        if (h->magic == SETTINGS_MAGIC &&
+            h->version == SETTINGS_VERSION &&
+            h->payload_size == sizeof(user_setting_params_t)) {
+            memcpy(&user_setting, b.data() + sizeof(SettingsHeader), sizeof(user_setting_params_t));
+        }
+    }
 #endif
 }
 
@@ -526,9 +554,7 @@ void hw_get_user_setting(user_setting_params_t &param)
 void hw_set_user_setting(user_setting_params_t &param)
 {
     user_setting = param;
-#ifdef ARDUINO
     save_user_setting_nvs();
-#endif
 }
 
 

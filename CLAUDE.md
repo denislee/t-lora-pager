@@ -34,6 +34,9 @@ make protocol-test                   # vectors fresh + Unity + Go + PagerKit (Do
 (cd tools/pagerlink && go run ./cmd/pagerlink smoke)
 # Notes viewer + move-to-GitHub end to end (iOS PagerKit vs the running emulator, Docker):
 make -C ios notes-e2e
+# Every pager setting over PagerLink: set, read back, kill -9 + restart, read back
+# (starts the emulator itself on a fresh root; port 7600 must be free):
+make -C ios settings-e2e
 
 # Screenshot sweep: every app, Settings subpage and shared modal in every
 # UI style x dark mode, as PPM under <dir>/<style>-<light|dark>/ (exit = failures).
@@ -72,7 +75,7 @@ server/                            Go "lilyhub" LAN service (weather proxy, note
 protocol/                          PagerLink spec (PROTOCOL.md) + golden vectors shared by firmware, iOS and Go
 ios/                               iOS companion app: PagerKit Swift package + XcodeGen app (see ios/README.md)
 boards/, variants/                 PlatformIO board JSON + pins_arduino.h per device
-test/                              Native Unity tests (crc_cache, evict, hal_result, link_frame, link_json, link_rpc, link_xfer, notes_manifest, notes_migrate, notes_path, pbkdf2, str_encode, weather_payload)
+test/                              Native Unity tests (crc_cache, evict, hal_result, link_frame, link_json, link_rpc, link_xfer, notes_manifest, notes_migrate, notes_path, pbkdf2, settings_registry, str_encode, weather_payload)
 ```
 
 ### Core skeleton (`src/core/`)
@@ -117,7 +120,8 @@ Go HTTP service intended to run on a LAN box (Pi/ARM). Apps point at it first an
 
 - **Locks** — top-level task-coordination uses `core::ScopedInstanceLock`; SPI bus uses `core::ScopedSpiLock`/`MaybeSpiLock`. Never call vendor `lockSPI()/unlockSPI()` or raw mutex APIs in new code.
 - **Conditional compilation** — board-specific code uses `ARDUINO_T_LORA_PAGER`, `ARDUINO_T_WATCH_S3`, `ARDUINO_T_WATCH_S3_ULTRA`. Radio code uses `ARDUINO_LILYGO_LORA_*`. Emulator-vs-Arduino branches use `#ifdef ARDUINO`.
-- **Settings persistence** — Arduino `Preferences` (NVS flash). Subpages mutate `local_param` and call `hw_set_user_setting(local_param)` eagerly for crash safety.
+- **Settings registry** — every user setting is one row of `hal/settings_catalog.cpp` (id, type, range, board gate) bound to its store in `src/settings_table.cpp`; both the Settings app and the PagerLink `settings.*` RPCs write through `settings::set` / `settings_commit*` (`hal/settings.h`, `apps/settings_internal.h`). New settings go through the registry, never straight to NVS. Settings subpages commit each control on change (store-only, before their own HAL apply); `local_param` is a read-only snapshot and is never written back on exit.
+- **Settings persistence** — Arduino `Preferences` (NVS flash) on hardware; on the emulator `hal::nvs_*` and the settings blob persist as files under `$PAGERLINK_NVS_DIR` (default `$PAGERLINK_FS_ROOT/nvs`).
 - **Partition table** — `lib/LilyGoLib/examples/factory/partitions.csv`, not the default.
 - **UI calls HAL only** — never reach into LilyGoLib directly from app/UI code.
 - **Unified popups** — use the shared `ui_popup_create` / `ui_loading_t` / `ui_result_show` helpers in `ui_tools.cpp` instead of building modals by hand.

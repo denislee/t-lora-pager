@@ -65,6 +65,9 @@ final class PagerSession: ObservableObject {
     /// The Tasks tab: the pager's `/tasks.txt`, editable. Attached in
     /// `bringUp` like `notes`.
     let tasks = TasksModel()
+    /// The Settings tab: the pager's catalog and values
+    /// (`IOS_SETTINGS_PLAN.md` §4.4). Attached in `bringUp` like `tasks`.
+    let settings = SettingsModel()
 
     init(telegram: TelegramNative? = nil) {
         self.telegram = telegram
@@ -74,7 +77,12 @@ final class PagerSession: ObservableObject {
         )
         notes.log = { [weak self] line in self?.appendLog(line) }
         tasks.log = { [weak self] line in self?.appendLog(line) }
+        settings.log = { [weak self] line in self?.appendLog(line) }
     }
+
+    /// The phone's Telegram login, for screens that talk to Telegram through
+    /// the session's own client (the Telegram tab's favorites).
+    var telegramNative: TelegramNative? { telegram }
 
     /// The weather key the pager last asked for (`"auto"` or a city), pushed
     /// again on every connect so the pager's cache is fresh before it asks.
@@ -210,6 +218,7 @@ final class PagerSession: ObservableObject {
             }
             await startNotes(on: session, pagerCaps: Self.caps(of: hello))
             await tasks.attach(session, pagerCaps: Self.caps(of: hello))
+            await settings.attach(session, pagerCaps: Self.caps(of: hello))
         } catch {
             await disconnect()
             state = .failed(String(describing: error))
@@ -349,6 +358,7 @@ final class PagerSession: ObservableObject {
         lastRTT = nil
         await notes.detach()
         tasks.detach()
+        settings.detach()
         state = .disconnected
         if wasConnected {
             appendLog("disconnected")
@@ -365,6 +375,7 @@ final class PagerSession: ObservableObject {
                     self?.notes.fsChanged()
                     self?.tasks.fsChanged()
                 }
+                await self?.settings.handleEvent(name: event.name, params: event.params)
             }
             guard let self, self.session === session else { return }
             await self.disconnect()

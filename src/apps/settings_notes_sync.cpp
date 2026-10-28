@@ -84,14 +84,20 @@ static void refresh_labels()
 static void set_repo_cb(const char *text, void *)
 {
     if (!text) return;
-    apps::nsync_cfg_set_repo(text);
+    std::string why;
+    if (!settings_commit("nsync.repo", settings::Value::of_str(text), false, &why)) {
+        ui_msg_pop_up("Repository rejected", why.c_str());
+    }
     refresh_labels();
 }
 
 static void set_branch_cb(const char *text, void *)
 {
     if (!text) return;
-    apps::nsync_cfg_set_branch(text);
+    std::string why;
+    if (!settings_commit("nsync.branch", settings::Value::of_str(text), false, &why)) {
+        ui_msg_pop_up("Branch rejected", why.c_str());
+    }
     refresh_labels();
 }
 
@@ -102,6 +108,8 @@ static void set_token_cb(const char *text, void *)
     if (!apps::nsync_cfg_set_token(text, &err)) {
         ui_msg_pop_up("Token rejected",
                       err.empty() ? "Save failed." : err.c_str());
+    } else {
+        settings::note_changed("nsync.token");
     }
     refresh_labels();
 }

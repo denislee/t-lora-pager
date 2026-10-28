@@ -8,9 +8,9 @@
 // recovers after a deliberate sequence fault, exercises the fs.* file service
 // end to end (fs.go), and then runs the pager-initiated steps — calls, bulk
 // DATA, chat, notes sync, Telegram and weather via the phone — through the
-// emulator-only test hooks (smoke_link.go, smoke_weather.go), so a full pass
-// needs the emulator. The ls/stat/get/put/rm/mkdir/mv commands are hand tools
-// for the file service.
+// emulator-only test hooks (smoke_link.go, smoke_weather.go), plus the settings
+// catalog (settings.go), so a full pass needs the emulator. The
+// ls/stat/get/put/rm/mkdir/mv commands are hand tools for the file service.
 package main
 
 import (
@@ -73,14 +73,15 @@ var commands = map[string]command{
 	"smoke": func(c *pagerlink.Client, addr string, timeout time.Duration, _ []string) int {
 		return cmdSmoke(c, addr, timeout)
 	},
-	"serve": cmdServe,
-	"ls":    noAddr(cmdLS),
-	"stat":  noAddr(cmdStat),
-	"get":   noAddr(cmdGet),
-	"put":   noAddr(cmdPut),
-	"rm":    noAddr(cmdRM),
-	"mkdir": noAddr(cmdMkdir),
-	"mv":    noAddr(cmdMV),
+	"serve":    cmdServe,
+	"ls":       noAddr(cmdLS),
+	"stat":     noAddr(cmdStat),
+	"get":      noAddr(cmdGet),
+	"put":      noAddr(cmdPut),
+	"rm":       noAddr(cmdRM),
+	"mkdir":    noAddr(cmdMkdir),
+	"mv":       noAddr(cmdMV),
+	"settings": noAddr(cmdSettings),
 }
 
 // noAddr adapts a subcommand that does not need the dial address.
@@ -108,6 +109,7 @@ Commands:
   rm <vol> <path> [--if-size N] [--if-crc CRC]  delete (fs.delete; --if-* only if unchanged)
   mkdir <vol> <path>             create a directory (fs.mkdir)
   mv <vol> <from> <to>           rename a file or directory (fs.rename)
+  settings schema|get [id...]|set [-if-rev N] id=value...|action <id> [json]   settings.* (PROTOCOL §6.4)
 `)
 }
 
@@ -201,6 +203,7 @@ func cmdSmoke(c *pagerlink.Client, addr string, timeout time.Duration) int {
 	next, fsOK := smokeFS(c, addr, timeout)
 	pass = fsOK && pass
 	pass = smokeLink(next, timeout) && pass
+	pass = smokeSettings(next, timeout) && pass
 	if next != c {
 		next.Close()
 	}

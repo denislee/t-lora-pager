@@ -500,6 +500,151 @@ def git_blob_vectors():
     return {"blobs": blobs}
 
 
+# --- settings.* (PROTOCOL.md §6.4) -------------------------------------------
+# A small fixed catalog and the exact compact JSON the pager's registry
+# (src/hal/settings_registry.cpp) answers for it. test_settings_registry builds
+# a registry from "catalog" and checks every case byte for byte; the Go and
+# Swift clients decode the same results.
+
+def _compact(obj):
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
+
+
+SETTINGS_REV0 = 100
+
+SETTINGS_GROUPS = [
+    {"id": "display", "title": "Display & Backlight"},
+    {"id": "storage", "title": "Storage"},
+    {"id": "nsync", "title": "Notes Sync"},
+    {"id": "wifi", "title": "Wi-Fi Networks"},
+]
+
+# Schema items in registry encoding order (settings_registry.cpp encode_item).
+SETTINGS_ITEMS = [
+    {"id": "display.brightness", "group": "display", "title": "Screen brightness",
+     "type": "int", "min": 0, "max": 16, "step": 1, "apply": "live"},
+    {"id": "display.timeout_s", "group": "display", "title": "Screen timeout (s)",
+     "type": "int", "min": 0, "max": 180, "step": 1, "apply": "tick", "hint": "0 = never"},
+    {"id": "display.sleep_mode", "group": "display", "title": "Sleep mode", "type": "enum",
+     "enum": [{"v": "light", "label": "Light"}, {"v": "deep", "label": "Deep"}],
+     "apply": "sleep"},
+    {"id": "storage.msc_target", "group": "storage", "title": "USB drive shows", "type": "enum",
+     "enum": [{"v": "sd", "label": "SD card"}, {"v": "int", "label": "Internal flash"}],
+     "apply": "reboot"},
+    {"id": "nsync.token", "group": "nsync", "title": "GitHub token (PAT)", "type": "secret",
+     "max_len": 255, "apply": "live", "secret": True},
+    {"id": "wifi.saved", "group": "wifi", "title": "Saved networks", "type": "list",
+     "apply": "live", "ro": True},
+]
+
+SETTINGS_ACTIONS = [
+    {"id": "wifi.scan", "group": "wifi", "title": "Scan for networks"},
+]
+
+# Values before any case runs (a secret's initial value is whether it is set).
+SETTINGS_INITIAL = {
+    "display.brightness": 8,
+    "display.timeout_s": 60,
+    "display.sleep_mode": "light",
+    "storage.msc_target": "sd",
+    "nsync.token": False,
+    "wifi.saved": ["home"],
+}
+
+
+def settings_rev_schema():
+    h = 2166136261
+    def mix(b):
+        nonlocal h
+        for c in b:
+            h ^= c
+            h = (h * 16777619) & 0xFFFFFFFF
+    for g in SETTINGS_GROUPS:
+        mix((g["id"] + "\x1f" + g["title"] + "\x1e").encode())
+    for it in SETTINGS_ITEMS:
+        mix(_compact(it).encode())
+    for a in SETTINGS_ACTIONS:
+        mix(_compact(a).encode())
+    return "%08x" % h
+
+
+def settings_vectors():
+    rs = settings_rev_schema()
+    def wire_value(id_, v):
+        return {"set": v} if id_ == "nsync.token" else v
+
+    cases = []
+    def ok(name, method, params, result):
+        cases.append({"name": name, "method": method, "params": params, "result": result,
+                      "result_json": _compact(result)})
+    def err(name, method, params, code, msg):
+        cases.append({"name": name, "method": method, "params": params,
+                      "error": {"code": code, "msg": msg}})
+
+    # Each case runs on a fresh registry built from the catalog + initial values.
+    ok("schema_first_page", "settings.schema", {},
+       {"rev_schema": rs, "groups": SETTINGS_GROUPS, "actions": SETTINGS_ACTIONS,
+        "items": SETTINGS_ITEMS})
+    ok("schema_cursor", "settings.schema", {"cursor": "4"},
+       {"rev_schema": rs, "items": SETTINGS_ITEMS[4:]})
+    err("schema_bad_cursor", "settings.schema", {"cursor": "x"}, "invalid_argument", "bad cursor")
+    ok("get_all", "settings.get", {},
+       {"rev": SETTINGS_REV0, "rev_schema": rs,
+        "values": {k: wire_value(k, v) for k, v in SETTINGS_INITIAL.items()}})
+    ok("get_with_secret", "settings.get", {"ids": ["display.brightness", "nsync.token"]},
+       {"rev": SETTINGS_REV0, "rev_schema": rs,
+        "values": {"display.brightness": 8, "nsync.token": {"set": False}}})
+    err("get_unknown", "settings.get", {"ids": ["nope.x"]}, "invalid_argument",
+        "nope.x: unknown setting")
+    ok("set_ok", "settings.set", {"values": {"display.brightness": 5}, "if_rev": SETTINGS_REV0},
+       {"rev": SETTINGS_REV0 + 1, "applied": ["display.brightness"], "reboot": False})
+    ok("set_unchanged", "settings.set", {"values": {"display.brightness": 8}},
+       {"rev": SETTINGS_REV0, "applied": [], "reboot": False})
+    ok("set_two", "settings.set",
+       {"values": {"display.brightness": 4, "display.sleep_mode": "deep"}},
+       {"rev": SETTINGS_REV0 + 1, "applied": ["display.brightness", "display.sleep_mode"],
+        "reboot": False})
+    ok("set_reboot", "settings.set", {"values": {"storage.msc_target": "int"}},
+       {"rev": SETTINGS_REV0 + 1, "applied": ["storage.msc_target"], "reboot": True})
+    ok("set_secret", "settings.set", {"values": {"nsync.token": "ghp_example"}},
+       {"rev": SETTINGS_REV0 + 1, "applied": ["nsync.token"], "reboot": False})
+    err("set_one_bad", "settings.set",
+        {"values": {"display.brightness": 5, "display.timeout_s": 999}},
+        "invalid_argument", "display.timeout_s: out of range")
+    err("set_stale_rev", "settings.set",
+        {"values": {"display.brightness": 5}, "if_rev": SETTINGS_REV0 - 1},
+        "invalid_argument", "changed")
+    err("set_bad_enum", "settings.set", {"values": {"display.sleep_mode": "nap"}},
+        "invalid_argument", "display.sleep_mode: not one of the choices")
+    err("set_read_only", "settings.set", {"values": {"wifi.saved": []}},
+        "invalid_argument", "wifi.saved: read-only")
+    err("set_wrong_type", "settings.set", {"values": {"display.brightness": "5"}},
+        "invalid_argument", "display.brightness: expected integer")
+    err("set_empty", "settings.set", {"values": {}}, "invalid_argument", "values is empty")
+
+    events = [
+        {"name": "changed", "e": "evt.settings.changed",
+         "p": {"rev": SETTINGS_REV0 + 1, "ids": ["display.brightness"]}},
+        {"name": "job_scan", "e": "evt.settings.job",
+         "p": {"job": "j1", "done": True, "ok": True, "msg": "ok",
+               "result": [{"ssid": "home", "rssi": -50, "secure": True}]}},
+        {"name": "job_failed", "e": "evt.settings.job",
+         "p": {"job": "j2", "done": True, "ok": False, "msg": "NTP timed out"}},
+    ]
+    for e in events:
+        e["p_json"] = _compact(e["p"])
+
+    return {
+        "rev0": SETTINGS_REV0,
+        "catalog": {"groups": SETTINGS_GROUPS, "items": SETTINGS_ITEMS,
+                    "actions": SETTINGS_ACTIONS, "initial": SETTINGS_INITIAL},
+        "rev_schema": rs,
+        "cases": cases,
+        "events": events,
+        "action_job": {"params": {"id": "wifi.scan"}, "result": {"job": "j1"}},
+    }
+
+
 def _openssl_decrypt(openssl, iterations, passphrase, data):
     return subprocess.run(
         [openssl, "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", str(iterations),
@@ -557,6 +702,7 @@ def render():
         "bulk.json": bulk_vectors(),
         "notes_crypto.json": notes_crypto_vectors(),
         "git_blob.json": git_blob_vectors(),
+        "settings.json": settings_vectors(),
     }
 
 
