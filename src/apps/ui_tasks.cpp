@@ -9,6 +9,7 @@
  *                                       — destroyed via lv_obj_del then nulled
  *   timers:  save_debounce_timer        — flushed (pending write forced
  *                                          through) then lv_timer_del + null
+ *            reload_timer               — lv_timer_del + null
  * No tasks or hw sessions. If you add any more timers, list them above AND
  * extend the exit path.
  */
@@ -39,7 +40,7 @@ static const char *tasks_file_path = "/tasks.txt";
 static void ui_tasks_exit();
 static void do_exit();
 
-static void save_tasks() {
+static string serialize_tasks() {
     string content = "";
     for (auto &t : tasks) {
         if (t.is_task) {
@@ -49,7 +50,16 @@ static void save_tasks() {
             content += t.text + "\n";
         }
     }
-    hw_save_preferred_file(tasks_file_path, content.c_str());
+    return content;
+}
+
+// hw_get_filesystem_generation() when the list last matched the file (load
+// or our own save); reload_timer compares against it.
+static uint32_t seen_fs_gen = 0;
+
+static void save_tasks() {
+    hw_save_preferred_file(tasks_file_path, serialize_tasks().c_str());
+    seen_fs_gen = hw_get_filesystem_generation();
 }
 
 // Writing the whole list to flash/SD on every mutation (toggle, add, edit,
@@ -74,6 +84,23 @@ static void schedule_save() {
     lv_timer_set_repeat_count(save_debounce_timer, 1);
 }
 
+// The phone (PagerLink fs.write) can rewrite tasks.txt while the app is open.
+// Once a second, if anything on the filesystem changed since the list last
+// matched the file, re-read it and rebuild when it differs — never mid-edit
+// or with a save pending, which would drop the user's own change.
+static lv_timer_t *reload_timer = NULL;
+static void ui_tasks_refresh();
+static void reload_timer_cb(lv_timer_t *t) {
+    (void)t;
+    if (save_debounce_timer || editing_idx >= 0) return;
+    const uint32_t gen = hw_get_filesystem_generation();
+    if (gen == seen_fs_gen) return;
+    string content;
+    if (!hw_read_file(tasks_file_path, content)) content = "";
+    if (content != serialize_tasks()) ui_tasks_refresh();
+    seen_fs_gen = gen;
+}
+
 static void flush_pending_save() {
     if (save_debounce_timer) {
         lv_timer_del(save_debounce_timer);
@@ -82,7 +109,6 @@ static void flush_pending_save() {
     }
 }
 
-static void ui_tasks_refresh();
 static void rebuild_task_list();
 
 static void task_event_cb(lv_event_t *e) {
@@ -294,6 +320,7 @@ static TaskItem parse_line(const string &line) {
 static void ui_tasks_refresh() {
     if (task_container == NULL) return;
     tasks.clear();
+    seen_fs_gen = hw_get_filesystem_generation();
 
     string content;
     if (!hw_read_file(tasks_file_path, content)) {
@@ -416,6 +443,7 @@ static void ui_tasks_enter(lv_obj_t *parent) {
     lv_obj_set_style_pad_all(task_container, 0, 0);
 
     ui_tasks_refresh();
+    reload_timer = lv_timer_create(reload_timer_cb, 1000, NULL);
 
     lv_menu_set_page(menu, main_page);
     // enterApp hands us an empty, non-editing group (IS.4), and add_ta's
@@ -433,6 +461,10 @@ static void ui_tasks_exit() {
     // save_tasks() serializes the `tasks` model (not widget state); flush
     // before tasks.clear() below.
     flush_pending_save();
+    if (reload_timer) {
+        lv_timer_del(reload_timer);
+        reload_timer = NULL;
+    }
     ui_app_widgets_del(&menu, &quit_btn);
     add_ta = NULL;
     task_container = NULL;

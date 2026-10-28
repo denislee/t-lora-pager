@@ -13,6 +13,8 @@ struct NotesView: View {
     @State private var showConfirm = false
     @State private var showCiphertextNotice = false
     @State private var shownResult: ResultBox?
+    @State private var pendingDelete: NotesModel.Row?
+    @State private var deleteError: String?
 
     var body: some View {
         NavigationStack {
@@ -25,6 +27,30 @@ struct NotesView: View {
             .navigationTitle("Notes")
             .searchable(text: $query, prompt: "Search notes")
             .refreshable { await notes.refresh() }
+            .confirmationDialog(
+                "Delete \(pendingDelete?.entry.name ?? "this note") from the pager?",
+                isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    guard let row = pendingDelete else { return }
+                    Task {
+                        do {
+                            try await notes.delete(row)
+                        } catch {
+                            deleteError = "Delete failed: \(NotesModel.describe(error))"
+                        }
+                    }
+                }
+            } message: {
+                Text("It is removed from the pager's internal storage and SD card. This cannot be undone.")
+            }
+            .alert("Could not delete", isPresented: Binding(
+                get: { deleteError != nil }, set: { if !$0 { deleteError = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(deleteError ?? "")
+            }
             .navigationDestination(for: String.self) { id in
                 if let row = notes.rows.first(where: { $0.id == id }) {
                     NoteDetailView(row: row)
@@ -161,6 +187,15 @@ struct NotesView: View {
                 ForEach(filteredRows) { row in
                     NavigationLink(value: row.id) {
                         rowLabel(row)
+                    }
+                    .swipeActions(edge: .trailing) {
+                        if notes.canEdit(row) {
+                            Button(role: .destructive) {
+                                pendingDelete = row
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }

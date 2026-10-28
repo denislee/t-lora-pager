@@ -96,6 +96,12 @@ uint32_t hw_get_filesystem_generation();
 // P7.35). It must only signal: no locks, no blocking. nullptr clears it.
 void hw_set_filesystem_generation_hook(void (*hook)());
 
+// Record that /notes/<leaf> was written, replaced or deleted (anything else
+// is ignored): its listing stamp changes, so the journal re-reads its
+// preview. The save/delete helpers here call it; writers that bypass them
+// (PagerLink fs.*) must call it themselves. Thread-safe, RAM only.
+void hw_note_touched(const char *path);
+
 // Note writes: the encoded payload goes to internal FFat and is mirrored to
 // the SD card when it is mounted; the result reflects the internal write.
 // `allow_prune` gates the periodic internal-storage eviction sweep that a save
@@ -132,9 +138,11 @@ bool hw_save_pending();
 bool hw_read_preferred_file_snippet(const char *path, std::string &content,
                                     size_t max_bytes, bool *truncated = nullptr);
 
-// Note listing (internal first, then SD-only names), each paired with a
-// modification time that is always 0: reading it costs an f_stat per file
-// on the ESP32 FAT (DC2.3.18). The journal keys its index on the name.
+// Note listing (internal first, then SD-only names), each paired with the
+// note's write stamp (hw_note_touched) in place of a modification time:
+// reading the mtime costs an f_stat per file on the ESP32 FAT (DC2.3.18).
+// The journal keys its index on the name and re-reads a preview whose stamp
+// changed.
 // Optional callback: (current_count, total_count_if_known, current_filename)
 void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t>> &list,
                                      void (*cb)(int, int, const char *) = nullptr);

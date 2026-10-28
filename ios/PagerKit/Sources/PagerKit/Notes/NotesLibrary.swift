@@ -132,6 +132,80 @@ public actor NotesLibrary {
         }
     }
 
+    // MARK: - Editing
+
+    /// Why a save or delete was refused before anything on the pager changed.
+    public enum EditError: Error, Equatable, Sendable {
+        /// The note on the pager is no longer the bytes the edit started
+        /// from (the pager or another phone changed or removed it).
+        case changedOnPager
+    }
+
+    /// Replace a note's bytes on the pager. `entry` is the copy the edit
+    /// started from and `base` the CRC-32 of its bytes; `mirrors` are the
+    /// other volumes' copies of the same name (the pager mirrors a save to
+    /// internal and SD, so a save rewrites every copy, as the pager's own
+    /// does). `entry` is read fresh first: when it no longer has `base`,
+    /// this throws `EditError.changedOnPager` and writes nothing. Returns
+    /// every written copy with its new size (its bytes cached).
+    public func write(_ entry: NoteEntry, mirrors: [NoteEntry], bytes: [UInt8],
+                      base: UInt32) async throws -> [NoteEntry] {
+        guard let session = self.session else { throw Self.notConnected }
+        guard let size = UInt32(exactly: bytes.count) else {
+            throw RPCError(code: "invalid_argument", msg: "too large")
+        }
+        await acquire()
+        defer { release() }
+
+        do {
+            let (current, _) = try await session.readFile(vol: entry.vol, path: entry.path, timeout: readTimeout)
+            guard CRC32.checksum(current) == base else { throw EditError.changedOnPager }
+        } catch let error as RPCError where error.code == "invalid_argument" {
+            throw EditError.changedOnPager  // gone (or the card went out)
+        }
+        var written: [NoteEntry] = []
+        for copy in [entry] + mirrors.filter({ $0.id != entry.id }) {
+            try await session.writeFile(vol: copy.vol, path: copy.path, data: bytes,
+                                        overwrite: true, timeout: readTimeout)
+            var updated = copy
+            updated.size = size
+            updated.mtime = nil
+            updated.crc32 = CRC32.checksum(bytes)
+            updated.protected = NoteCrypto.isEncrypted(bytes)
+            cache.store(updated, bytes: bytes, mtime: nil)
+            written.append(updated)
+        }
+        return written
+    }
+
+    /// Delete a note from the pager: every copy in `copies` (the pager's own
+    /// delete removes the internal and SD copies). With `conditional` (the
+    /// pager's cap `fs.delete.if`) each copy goes only while it still has the
+    /// size and CRC-32 `base` describes (`invalid_argument` "changed"
+    /// otherwise, mapped to `EditError.changedOnPager`).
+    public func delete(_ copies: [NoteEntry], base: (size: UInt32, crc32: UInt32)?,
+                       conditional: Bool) async throws {
+        guard let session = self.session else { throw Self.notConnected }
+        await acquire()
+        defer { release() }
+
+        let fs = FileService(session: session, timeout: readTimeout)
+        for copy in copies {
+            do {
+                if conditional, let base {
+                    try await fs.delete(vol: copy.vol, path: copy.path, ifSize: base.size, ifCRC: base.crc32)
+                } else {
+                    try await fs.delete(vol: copy.vol, path: copy.path)
+                }
+            } catch let error as RPCError where error.isChanged {
+                throw EditError.changedOnPager
+            } catch let error as RPCError where error.code == "invalid_argument" && error.msg == "not found" {
+                // Already gone: what a delete wants.
+            }
+            cache.remove(vol: copy.vol, name: copy.name)
+        }
+    }
+
     // MARK: - Pager events
 
     /// `evt.fs.changed`: the cached listing is stale; the caller re-lists.

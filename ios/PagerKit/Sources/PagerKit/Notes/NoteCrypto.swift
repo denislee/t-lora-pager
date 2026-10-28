@@ -105,6 +105,41 @@ public enum NoteCrypto {
     }
 }
 
+extension NoteCrypto {
+    /// A fresh random 8-byte salt.
+    public static func randomSalt() -> [UInt8] {
+        var generator = SystemRandomNumberGenerator()
+        return (0..<8).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
+    }
+
+    /// Encrypts with an already-derived key and IV into the firmware's
+    /// on-disk format: `Salted__` + `salt` + AES-256-CBC/PKCS7 ciphertext
+    /// (what `notes_crypto_encrypt_buffer` writes).
+    public static func encryptBytes(
+        _ plaintext: [UInt8],
+        salt: [UInt8],
+        key: [UInt8],
+        iv: [UInt8]
+    ) throws -> [UInt8] {
+        precondition(salt.count == 8, "salt is 8 bytes")
+        let body = try AES._CBC.encrypt(
+            plaintext,
+            using: SymmetricKey(data: key),
+            iv: try AES._CBC.IV(ivBytes: iv)
+        )
+        return magic + salt + Array(body)
+    }
+
+    /// Encrypts a note's text with a passphrase and `salt` (default: a fresh
+    /// random one, as the firmware does on every save). `decrypt` with the
+    /// same passphrase returns `text`.
+    public static func encrypt(_ text: String, passphrase: String,
+                               salt: [UInt8] = randomSalt()) throws -> [UInt8] {
+        let keyIV = try deriveKeyIV(passphrase: passphrase, salt: salt)
+        return try encryptBytes(Array(text.utf8), salt: salt, key: keyIV.key, iv: keyIV.iv)
+    }
+}
+
 /// Decrypts notes with one passphrase, keeping each note's derived (key, IV)
 /// by salt (the firmware's MRU key cache: each note has its own salt, so
 /// PBKDF2 runs once per note). Thread-safe; drop the instance to forget the
@@ -151,6 +186,18 @@ public final class NoteDecryptor: @unchecked Sendable {
         }
 
         return try NoteCrypto.decryptBytes(bytes, key: keyIV.key, iv: keyIV.iv)
+    }
+
+    /// Encrypts a note's text under a fresh salt (one PBKDF2 run; the key is
+    /// kept for that salt, so reading the note back costs none).
+    public func encrypt(_ text: String) throws -> [UInt8] {
+        let salt = NoteCrypto.randomSalt()
+        let keyIV = try NoteCrypto.deriveKeyIV(passphrase: passphrase, salt: salt)
+        lock.lock()
+        cache[salt] = keyIV
+        derived += 1
+        lock.unlock()
+        return try NoteCrypto.encryptBytes(Array(text.utf8), salt: salt, key: keyIV.key, iv: keyIV.iv)
     }
 
     /// PBKDF2 runs so far (tests).

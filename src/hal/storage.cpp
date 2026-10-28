@@ -15,7 +15,9 @@
 
 #include <atomic>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <string>
 
 #ifdef ARDUINO
 #include <algorithm>
@@ -365,9 +367,59 @@ void hw_set_filesystem_dirty(bool dirty)
 #endif
 }
 
+/* Per-note write stamps (RAM only). The listing cannot carry an mtime
+ * (DC2.3.18), so the journal's index would reuse a note's cached preview
+ * after the note was rewritten under the same name (its own editor, the
+ * phone over PagerLink). Every write or delete of /notes/<leaf>.txt takes a
+ * fresh stamp from a counter seeded at random per boot; the listing reports
+ * it in the mtime slot, so a changed stamp means "re-read the preview". A
+ * note untouched this boot reports 0: an index entry stamped in an earlier
+ * boot is re-read once and then settles back on 0. */
+namespace {
+std::mutex s_note_stamp_mutex;
+std::map<std::string, uint32_t> s_note_stamps;  // leaf name -> stamp
+uint32_t s_note_stamp_next = 0;
+
+/* The leaf of a "/notes/<leaf>" or "notes/<leaf>" path, or nullptr. */
+const char *note_leaf(const char *path)
+{
+    if (!path) return nullptr;
+    while (*path == '/') path++;
+    const size_t plen = strlen(hal::NOTES_PREFIX);
+    if (strncmp(path, hal::NOTES_PREFIX, plen) != 0) return nullptr;
+    const char *leaf = path + plen;
+    if (!*leaf || strchr(leaf, '/')) return nullptr;
+    return leaf;
+}
+
+uint32_t note_stamp(const std::string &leaf)
+{
+    std::lock_guard<std::mutex> g(s_note_stamp_mutex);
+    auto it = s_note_stamps.find(leaf);
+    return it == s_note_stamps.end() ? 0u : it->second;
+}
+}  // namespace
+
+void hw_note_touched(const char *path)
+{
+    const char *leaf = note_leaf(path);
+    if (!leaf) return;
+    std::lock_guard<std::mutex> g(s_note_stamp_mutex);
+    if (s_note_stamp_next == 0) {
+#ifdef ARDUINO
+        s_note_stamp_next = esp_random();
+#else
+        s_note_stamp_next = 1;
+#endif
+    }
+    if (++s_note_stamp_next == 0) ++s_note_stamp_next;  // 0 means "untouched"
+    s_note_stamps[leaf] = s_note_stamp_next;
+}
+
 bool hw_delete_file(const char *path)
 {
     hw_set_filesystem_dirty(true);
+    hw_note_touched(path);
 #ifdef ARDUINO
     char str[256];
     normalize_path(path, str, sizeof(str));
@@ -925,6 +977,7 @@ static bool save_preferred_file_impl(const char *path, const char *content, std:
                             bool allow_prune)
 {
     hw_set_filesystem_dirty(true);
+    hw_note_touched(path);
 
 #ifdef ARDUINO
     /* Encode once so the internal and SD copies share identical bytes (and
@@ -1205,7 +1258,7 @@ void hw_get_preferred_txt_files_info(std::vector<std::pair<std::string, uint32_t
 
     list.reserve(infos.size());
     for (const auto &name : infos) {
-        list.emplace_back(NOTES_PREFIX + name, 0u);  // no mtime, see list_files
+        list.emplace_back(NOTES_PREFIX + name, note_stamp(name));  // stamp, not mtime
     }
 #endif
 }
@@ -1216,6 +1269,7 @@ bool hw_save_preferred_bytes(const char *path, const uint8_t *buf, size_t len, s
     bool is_index = (strstr(path, "_idx.bin") != nullptr);
     if (!is_index) {
         hw_set_filesystem_dirty(true);
+        hw_note_touched(path);
     }
 
 #ifdef ARDUINO

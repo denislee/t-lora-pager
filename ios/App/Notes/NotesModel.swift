@@ -63,6 +63,10 @@ final class NotesModel: ObservableObject {
     /// Text of the notes read this session (plain or decrypted), by row id.
     /// Memory only.
     private var texts: [String: String] = [:]
+    /// Size and CRC-32 of the bytes each text came from, by row id: what a
+    /// save or delete checks the pager still holds.
+    private var bases: [String: (size: UInt32, crc32: UInt32)] = [:]
+    private var pagerCaps: [String] = []
     private var prefetchTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
     private var active = true
@@ -94,6 +98,7 @@ final class NotesModel: ObservableObject {
     func attach(_ session: LinkSession, sync: NotesSyncService, pagerCaps: [String]) async {
         self.sync = sync
         pagerHasFS = pagerCaps.contains("fs")
+        self.pagerCaps = pagerCaps
         await library.attach(session)
         connected = true
         guard pagerHasFS else { return }
@@ -170,6 +175,7 @@ final class NotesModel: ObservableObject {
         let bytes = try await library.read(row.entry)
         let encrypted = NoteCrypto.isEncrypted(bytes)
         update(row.id) { $0.entry.protected = encrypted }
+        bases[row.id] = Self.base(of: bytes)
         let text = try await decode(bytes)
         texts[row.id] = text
         update(row.id) { current in
@@ -220,6 +226,69 @@ final class NotesModel: ObservableObject {
             allNotes = []
             listedAt = nil
         }
+    }
+
+    // MARK: - Editing
+
+    /// The note can be edited now: the link is up, no move runs, and an
+    /// encrypted note has its passphrase.
+    func canEdit(_ row: Row) -> Bool {
+        connected && pagerHasFS && syncStage == .idle && !(row.locked || (row.entry.protected == true && decryptor == nil))
+    }
+
+    /// The pager deletes only a note that still matches (cap
+    /// `fs.delete.if`).
+    var pagerHasConditionalDelete: Bool { pagerCaps.contains(NotesSyncService.conditionalDeleteCap) }
+
+    /// Write `text` back to the pager as the note's new content, encrypted
+    /// again (fresh salt) when the note was. Every copy of the name (internal
+    /// and SD) is rewritten. Throws `NotesLibrary.EditError.changedOnPager`
+    /// when the note changed on the pager since it was read (nothing
+    /// written: reopen it), or the link error.
+    func save(_ row: Row, text: String) async throws {
+        guard let base = bases[row.id] else { throw NotesLibrary.EditError.changedOnPager }
+        let bytes: [UInt8]
+        if row.entry.protected == true {
+            guard let decryptor else { throw NoteCryptoError.wrongPassphrase }
+            bytes = try await Task.detached(priority: .userInitiated) { try decryptor.encrypt(text) }.value
+        } else {
+            bytes = Array(text.utf8)
+        }
+        let mirrors = allNotes.filter { $0.name == row.entry.name && $0.id != row.id }
+        let written = try await library.write(row.entry, mirrors: mirrors, bytes: bytes, base: base.crc32)
+        log("notes: saved 1 note (\(written.count) copies)")
+        for copy in written {
+            texts[copy.id] = text
+            bases[copy.id] = Self.base(of: bytes)
+            if let index = allNotes.firstIndex(where: { $0.id == copy.id }) { allNotes[index] = copy }
+            update(copy.id) { current in
+                current.entry = copy
+                current.preview = NotePreview.firstLine(text)
+                current.locked = false
+            }
+        }
+    }
+
+    /// Delete the note from the pager (every copy of its name, as the
+    /// pager's own delete does). With `fs.delete.if` a note changed on the
+    /// pager since it was read is kept and this throws
+    /// `NotesLibrary.EditError.changedOnPager`.
+    func delete(_ row: Row) async throws {
+        let copies = allNotes.filter { $0.name == row.entry.name }
+        if bases[row.id] == nil {
+            // Not read yet (a swipe on the list): the precondition is what the
+            // pager holds now.
+            bases[row.id] = Self.base(of: try await library.read(row.entry))
+        }
+        try await library.delete(copies.isEmpty ? [row.entry] : copies, base: bases[row.id],
+                                 conditional: pagerHasConditionalDelete)
+        log("notes: deleted 1 note")
+        for copy in copies + [row.entry] {
+            texts[copy.id] = nil
+            bases[copy.id] = nil
+        }
+        rows.removeAll { $0.entry.name == row.entry.name }
+        allNotes.removeAll { $0.name == row.entry.name }
     }
 
     // MARK: - Sync (move to GitHub)
@@ -295,6 +364,10 @@ final class NotesModel: ObservableObject {
 
     // MARK: - Helpers
 
+    nonisolated private static func base(of bytes: [UInt8]) -> (size: UInt32, crc32: UInt32) {
+        (size: UInt32(bytes.count), crc32: CRC32.checksum(bytes))
+    }
+
     private func apply(_ scan: NotesIndexer.Scan, at date: Date) {
         allNotes = scan.all
         sdMounted = scan.sdMounted
@@ -309,6 +382,7 @@ final class NotesModel: ObservableObject {
                 row.locked = old.locked && decryptor == nil
             } else {
                 texts[entry.id] = nil
+                bases[entry.id] = nil
             }
             return row
         }
@@ -337,6 +411,7 @@ final class NotesModel: ObservableObject {
 
     private func prefetched(_ entry: NoteEntry, _ bytes: [UInt8]) async {
         let encrypted = NoteCrypto.isEncrypted(bytes)
+        bases[entry.id] = Self.base(of: bytes)
         update(entry.id) { row in
             row.entry.mtime = entry.mtime ?? row.entry.mtime
             row.entry.protected = encrypted
@@ -366,6 +441,7 @@ final class NotesModel: ObservableObject {
             guard let bytes = try? await library.read(row.entry),
                   let text = try? await decode(bytes) else { continue }
             texts[row.id] = text
+            bases[row.id] = Self.base(of: bytes)
             update(row.id) { current in
                 current.preview = NotePreview.firstLine(text)
                 current.locked = false
@@ -394,6 +470,12 @@ final class NotesModel: ObservableObject {
 
     nonisolated static func describe(_ error: Error) -> String {
         if let error = error as? RPCError { return error.msg.isEmpty ? error.code : "\(error.code): \(error.msg)" }
+        if let error = error as? NotesLibrary.EditError, error == .changedOnPager {
+            return "the note changed on the pager; reopen it and try again"
+        }
+        if let error = error as? TasksService.TasksError, error == .changedOnPager {
+            return "the tasks changed on the pager; reload and try again"
+        }
         if let error = error as? NoteCryptoError {
             return error == .wrongPassphrase ? "wrong passphrase" : "not a notes ciphertext (\(error))"
         }

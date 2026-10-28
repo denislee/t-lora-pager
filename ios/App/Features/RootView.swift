@@ -5,6 +5,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var session: PagerSession
     @EnvironmentObject private var notes: NotesModel
+    @EnvironmentObject private var tasks: TasksModel
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -18,6 +19,12 @@ struct RootView: View {
                 NotesView()
                     .tabItem {
                         Label("Notes", systemImage: "note.text")
+                    }
+            }
+            if tasks.pagerHasFS || tasks.loaded {
+                TasksView()
+                    .tabItem {
+                        Label("Tasks", systemImage: "checklist")
                     }
             }
             TelegramView()
@@ -43,5 +50,6 @@ struct RootView: View {
     RootView()
         .environmentObject(PagerSession())
         .environmentObject(PagerSession().notes)
+        .environmentObject(PagerSession().tasks)
         .environmentObject(TelegramAccount())
 }

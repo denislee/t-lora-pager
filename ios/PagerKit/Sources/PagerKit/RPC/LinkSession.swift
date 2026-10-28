@@ -373,6 +373,35 @@ public actor LinkSession {
         return (data, info)
     }
 
+    /// `fs.write` client (PROTOCOL.md §6.1): `fs.write.begin` with the
+    /// bytes' size and CRC-32, DATA on the pager's `xfer`, then
+    /// `fs.write.commit` (60 s), which renames the `.part` onto `path`. A send
+    /// failure aborts the transfer (best effort) before it throws. `timeout`
+    /// bounds `begin` and each idle wait for an ACK. Mirrors the Go
+    /// `Client.WriteFile`; RPC errors pass through (e.g. `invalid_argument`
+    /// "exists" without `overwrite`), and a malformed begin reply is
+    /// `internal` "fs.write: bad response".
+    public func writeFile(vol: String, path: String, data: [UInt8], overwrite: Bool,
+                          timeout: Duration) async throws {
+        let begin = try await call("fs.write.begin", params: [
+            "vol": .string(vol),
+            "path": .string(path),
+            "size": .number(Double(data.count)),
+            "crc32": .number(Double(CRC32.checksum(data))),
+            "overwrite": .bool(overwrite),
+        ], timeout: timeout)
+        guard let xfer = Params.uint16(begin["xfer"]), xfer != 0 else {
+            throw RPCError(code: "internal", msg: "fs.write: bad response")
+        }
+        do {
+            try await sendBytes(xfer: xfer, data: data, timeout: timeout)
+        } catch {
+            _ = try? await call("fs.write.abort", params: ["xfer": .number(Double(xfer))], timeout: timeout)
+            throw error
+        }
+        _ = try await call("fs.write.commit", params: ["xfer": .number(Double(xfer))], timeout: .seconds(60))
+    }
+
     // MARK: - Bulk internals
 
     func finishAccept(_ transfer: IncomingTransfer, timeout: Duration) async throws -> [UInt8] {

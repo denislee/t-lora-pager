@@ -529,6 +529,7 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
     }
 
     erase(id); /* the .part is gone; nothing left to clean up */
+    hw_note_touched(path.c_str());
     hw_set_filesystem_dirty(true);
     LINK_LOG("fs.write done id=%u path=%s size=%u", static_cast<unsigned>(id), path.c_str(),
              static_cast<unsigned>(size));
@@ -587,6 +588,7 @@ bool handle_delete(const JsonObject &params, JsonWriter &result, RpcError &err) 
     }
     close_files_under(v, path);
     if (!vol_remove(v, path)) return fail(err, HalError::InternalError, "io error");
+    hw_note_touched(path.c_str());
     hw_set_filesystem_dirty(true);
     result.begin_object().end_object();
     return true;
@@ -637,6 +639,8 @@ bool handle_rename(const JsonObject &params, JsonWriter &result, RpcError &err) 
     close_files_under(v, from);
     close_files_under(v, to);
     if (!vol_rename(v, from, to)) return fail(err, HalError::InternalError, "io error");
+    hw_note_touched(from.c_str());
+    hw_note_touched(to.c_str());
     hw_set_filesystem_dirty(true);
     result.begin_object().end_object();
     return true;

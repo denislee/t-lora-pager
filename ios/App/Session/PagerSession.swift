@@ -62,6 +62,9 @@ final class PagerSession: ObservableObject {
     /// The Notes tab: every note on the pager, and the move to GitHub
     /// (`IOS_NOTES_VIEWER_PLAN.md`). Outlives links; attached in `bringUp`.
     let notes: NotesModel
+    /// The Tasks tab: the pager's `/tasks.txt`, editable. Attached in
+    /// `bringUp` like `notes`.
+    let tasks = TasksModel()
 
     init(telegram: TelegramNative? = nil) {
         self.telegram = telegram
@@ -70,6 +73,7 @@ final class PagerSession: ObservableObject {
             cacheRoot: NotesModel.defaultCacheRoot()
         )
         notes.log = { [weak self] line in self?.appendLog(line) }
+        tasks.log = { [weak self] line in self?.appendLog(line) }
     }
 
     /// The weather key the pager last asked for (`"auto"` or a city), pushed
@@ -205,6 +209,7 @@ final class PagerSession: ObservableObject {
                 await pushWeather(key: key)
             }
             await startNotes(on: session, pagerCaps: Self.caps(of: hello))
+            await tasks.attach(session, pagerCaps: Self.caps(of: hello))
         } catch {
             await disconnect()
             state = .failed(String(describing: error))
@@ -343,6 +348,7 @@ final class PagerSession: ObservableObject {
         info = nil
         lastRTT = nil
         await notes.detach()
+        tasks.detach()
         state = .disconnected
         if wasConnected {
             appendLog("disconnected")
@@ -355,7 +361,10 @@ final class PagerSession: ObservableObject {
         eventsTask = Task { [weak self] in
             for await event in session.events {
                 self?.appendLog("event \(event.name)")
-                if event.name == "evt.fs.changed" { self?.notes.fsChanged() }
+                if event.name == "evt.fs.changed" {
+                    self?.notes.fsChanged()
+                    self?.tasks.fsChanged()
+                }
             }
             guard let self, self.session === session else { return }
             await self.disconnect()

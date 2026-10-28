@@ -33,22 +33,25 @@ ios/
     Local.xcconfig.example        template for per-developer signing
   Resources/Info.plist            app Info.plist (build-setting variables)
   App/
-    PagerCompanionApp.swift       @main, injects PagerSession (+ its NotesModel) + TelegramAccount
+    PagerCompanionApp.swift       @main, injects PagerSession (+ its NotesModel, TasksModel) + TelegramAccount
     Session/PagerSession.swift    @MainActor ObservableObject link state
-    Notes/NotesModel.swift        Notes tab state: list, unlock, move to GitHub
+    Notes/NotesModel.swift        Notes tab state: list, unlock, edit/save/delete, move to GitHub
+    Tasks/TasksModel.swift        Tasks tab state: the pager's /tasks.txt, saved on every change
     Notes/KeychainSecretStore.swift  the GitHub PAT in the Keychain (this device only)
     Session/LocationProvider.swift  CoreLocation fix + city for weather "auto"
     Telegram/…                    TDLib JSON client + the phone's Telegram login
-    Features/RootView.swift       Dashboard / Notes / Telegram / Diagnostics tabs
+    Features/RootView.swift       Dashboard / Notes / Tasks / Telegram / Diagnostics tabs
     Features/Dashboard/…          connection + sys.info
-    Features/Notes/…              note list + detail, unlock, sync sheets, GitHub settings
+    Features/Notes/…              note list + detail/editor, unlock, sync sheets, GitHub settings
+    Features/Tasks/…              task list: check off, add, rename, reorder, delete
     Features/Telegram/…           api keys, phone/code/2FA login, log out
     Features/Diagnostics/…        ping + session log
   PagerKit/                       Swift package (no UIKit/SwiftUI)
     Sources/PagerKit/…            Transport (BLE, TCP) / Link / RPC / Model /
                                   Services (sys, weather, tg + TDLib, chat, notes
                                   sync + move engine, fs) / Notes (indexer,
-                                  cache, library, NoteCrypto, GitBlob, account)
+                                  cache, library, NoteCrypto, GitBlob, account) /
+                                  Tasks (TasksFile format, TasksService)
     Tests/PagerKitTests/…         XCTest (reads ../../protocol/vectors)
   NotesE2E/                       notes viewer + move checks against the emulator
 ```
@@ -157,6 +160,26 @@ PBKDF2-SHA256 10000); plaintext never crosses the link. The list and the raw
 bytes are cached under `Caches/notes` (ciphertext stays ciphertext) for
 offline reading; **Clear cached notes** in the GitHub settings wipes it.
 
+**Editing.** A note's **⋯** menu has **Edit** (the text becomes an editor;
+**Save** writes it back with `fs.write`) and **Delete from pager** (also a
+swipe on the list). A save first re-reads the note and refuses with "changed
+on the pager" if its bytes are no longer the ones the edit started from, so a
+pager-side edit is never overwritten silently. Like the pager's own save it
+rewrites every copy of the name (internal and SD), and an encrypted note is
+encrypted again on the phone under a fresh salt (so it needs the passphrase).
+A delete removes every copy, conditionally (`fs.delete.if`) when the pager
+supports it. Editing needs the link; offline notes are read-only.
+
+## Tasks
+
+The **Tasks** tab shows the pager's Tasks list (`/tasks.txt`, the format of
+`src/apps/ui_tasks.cpp`: `[ ] ` / `[x] ` lines plus plain lines kept
+verbatim). Tap to check off, swipe to delete, **Edit** to reorder, long-press
+to rename, the bottom field to add, **Clear done** to drop finished tasks.
+Every change is written at once to internal and, with a card in, SD, as the
+pager does; a save made after the pager changed the file is refused and the
+list reloads. Nothing is cached: offline, the last list read is read-only.
+
 **Sync moves notes to GitHub.** Set the repo (`owner/name`), branch and a
 fine-grained token with `contents:write` under the Notes tab's gear (the token
 goes to the Keychain, this device only, and is never sent to the pager; a repo
@@ -193,6 +216,11 @@ falls back to the bridge the pager sends, if any.
   encrypted rx/tx characteristics. State restoration is not wired yet, and
   hardware acceptance is still open (`HUB_REMOVAL_PLAN.md` W15). See
   `IOS_COMPANION_PLAN.md` §7.
+- **Notes editing and Tasks tab:** PagerKit parts unit-tested
+  (`NotesEditTests`: `fs.write`, re-encryption, conflict checks, tasks
+  format); the app builds for the Simulator but the screens have not been
+  driven against the emulator or hardware yet. The pager's Tasks app picks up
+  a phone edit within a second while it is open (not mid-edit).
 - **Notes tab (viewer + move to GitHub):** PagerKit parts tested on Linux
   (`make test-linux`, `make notes-e2e` against the emulator); the SwiftUI
   views, `NotesModel` wiring and Keychain store have not been built with Xcode

@@ -21,6 +21,7 @@ struct PagerCompanionApp: App {
             RootView()
                 .environmentObject(session)
                 .environmentObject(session.notes)
+                .environmentObject(session.tasks)
                 .environmentObject(telegram)
         }
     }
