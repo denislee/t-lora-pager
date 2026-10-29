@@ -44,6 +44,10 @@ final class PagerSession: ObservableObject {
 
     private var session: LinkSession?
     private var eventsTask: Task<Void, Never>?
+    /// Periodic sys.time.set while a link is up; cancelled in disconnect().
+    private var clockTask: Task<Void, Never>?
+    /// Observers for the phone's clock / time-zone changes (registered in init).
+    private var clockObservers: [NSObjectProtocol] = []
     /// Tears the active transport down (TCP or BLE).
     private var stopTransport: (() async -> Void)?
     private var weather: WeatherService?
@@ -78,6 +82,17 @@ final class PagerSession: ObservableObject {
         notes.log = { [weak self] line in self?.appendLog(line) }
         tasks.log = { [weak self] line in self?.appendLog(line) }
         settings.log = { [weak self] line in self?.appendLog(line) }
+        // The phone's clock or zone moved: re-send it now rather than at the next tick.
+        for (name, reason) in [
+            (Notification.Name.NSSystemClockDidChange, "phone clock changed"),
+            (Notification.Name.NSSystemTimeZoneDidChange, "time zone changed"),
+        ] {
+            clockObservers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.resyncClockIfConnected(reason: reason) }
+            })
+        }
     }
 
     /// The phone's Telegram login, for screens that talk to Telegram through
@@ -88,6 +103,8 @@ final class PagerSession: ObservableObject {
     /// again on every connect so the pager's cache is fresh before it asks.
     nonisolated private static let weatherKeyDefault = "PagerLink.weatherKey"
     nonisolated private static let autoConnectDefault = "PagerLink.autoConnect"
+    /// How often a live link re-sends the clock, so pager drift never builds up.
+    nonisolated private static let clockResyncInterval: Duration = .seconds(30 * 60)
 
     /// Called on launch and whenever the app becomes active: connect over
     /// Bluetooth right away if auto-connect is on and no link is up.
@@ -210,6 +227,7 @@ final class PagerSession: ObservableObject {
 
             // Auto time sync on connect (plan §4.5: sys.time.set).
             try await setClock(sys)
+            startClockResync()
 
             await refresh()
             location.requestAuthorizationIfNeeded()
@@ -327,9 +345,35 @@ final class PagerSession: ObservableObject {
         }
     }
 
+    /// Automatic resync: re-send the clock if a link is up (foreground,
+    /// phone clock/zone change, periodic timer). A no-op when disconnected.
+    func resyncClockIfConnected(reason: String) {
+        guard case .connected = state, let sys else { return }
+        Task {
+            do {
+                try await setClock(sys)
+            } catch {
+                appendLog("auto time sync (\(reason)) failed: \(error)")
+            }
+        }
+    }
+
+    /// Re-send the clock every clockResyncInterval for as long as this link lives.
+    private func startClockResync() {
+        clockTask?.cancel()
+        clockTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: PagerSession.clockResyncInterval)
+                guard !Task.isCancelled, let self else { return }
+                self.resyncClockIfConnected(reason: "periodic")
+            }
+        }
+    }
+
     /// Set the pager clock to now in the phone's IANA zone.
     private func setClock(_ sys: SysService) async throws {
-        let zone = TimeZone.current.identifier
+        // autoupdatingCurrent: TimeZone.current can stay cached after a zone change.
+        let zone = TimeZone.autoupdatingCurrent.identifier
         try await sys.setTime(epoch: Int(Date().timeIntervalSince1970), tz: zone)
         appendLog("time synced (\(zone))")
     }
@@ -348,6 +392,8 @@ final class PagerSession: ObservableObject {
         weather = nil
         eventsTask?.cancel()
         eventsTask = nil
+        clockTask?.cancel()
+        clockTask = nil
         if let session {
             await session.stop()
         }

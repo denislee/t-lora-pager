@@ -45,9 +45,12 @@ struct RootView: View {
                     Label("Diagnostics", systemImage: "stethoscope")
                 }
         }
-        // Auto-connect (if enabled) on launch and on every return to the foreground.
+        // Auto-connect (if enabled) on launch and on every return to the foreground; a live link re-sends the clock.
         .onChange(of: scenePhase) { phase in
-            if phase == .active { session.autoConnectIfNeeded() }
+            if phase == .active {
+                session.autoConnectIfNeeded()
+                session.resyncClockIfConnected(reason: "foreground")
+            }
             // Background locks the notes and stops a move (foreground only).
             if phase == .active || phase == .background { notes.setActive(phase == .active) }
         }
