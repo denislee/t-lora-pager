@@ -153,6 +153,7 @@ void build_catalog(Registry &r, const BoardProfile &b) {
     r.add_group("display", "Display & Backlight");
     r.add_group("power", "Charger & Performance");
     r.add_group("fonts", "Fonts");
+    r.add_group("editor", "Notes Editor");
     r.add_group("time", "Date & Time");
     r.add_group("conn", "Connectivity");
     r.add_group("wifi", "Wi-Fi Networks");
@@ -239,6 +240,13 @@ void build_catalog(Registry &r, const BoardProfile &b) {
         size.id = base + ".size";
         size.title = std::string(kFontContexts[i].title) + " size";
         r.add(size);
+    }
+
+    /* --- Notes editor --- */
+    {
+        Def d = make("editor.double_space_period", "editor", "\".\" shortcut (double space)", Type::Bool);
+        d.hint = "Two spaces after a word type a period and a space.";
+        r.add(d);
     }
 
     /* --- 3.4 Date & time --- */

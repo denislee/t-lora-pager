@@ -201,6 +201,12 @@ namespace storage_cfg {
     void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
 }
 
+// Notes Editor subpage — typing shortcuts for the notes editor.
+// No cached LVGL state, so no reset_state.
+namespace editor_cfg {
+    void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page);
+}
+
 // Notes Security subpage — encryption-at-rest for *.txt notes. Bundled
 // with storage because both share the storage_loader popup triad used
 // for long-running filesystem ops. g_sub_page is cached so a passphrase

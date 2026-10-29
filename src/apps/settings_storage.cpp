@@ -1,8 +1,8 @@
 /**
  * @file      settings_storage.cpp
- * @brief     Settings » Storage + Notes Security subpages. Extracted from
- *            ui_settings.cpp; see settings_internal.h for the cross-TU
- *            contract.
+ * @brief     Settings » Storage + Notes Editor + Notes Security subpages.
+ *            Extracted from ui_settings.cpp; see settings_internal.h for the
+ *            cross-TU contract.
  *
  * Bundled together because both share the storage_loader popup triad
  * (show_storage_loader / hide_storage_loader / storage_progress_cb) used
@@ -31,6 +31,7 @@
 #include "../hal/secrets.h"
 #include "../hal/storage.h"
 #include "../core/one_shot_job.h"
+#include "app_registry.h"
 #include "settings_internal.h"
 
 #include <functional>
@@ -303,6 +304,32 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
 }
 
 } // namespace storage_cfg
+
+// ============================================================================
+// Notes Editor subpage
+// ============================================================================
+
+namespace editor_cfg {
+
+namespace {
+
+void double_space_cb(lv_event_t *e)
+{
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    settings_commit_bool("editor.double_space_period", lv_obj_has_state(obj, LV_STATE_CHECKED));
+}
+
+} // anonymous namespace
+
+void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
+{
+    (void)menu;
+    lv_obj_set_style_pad_row(sub_page, 2, 0);
+    create_toggle_btn_row(sub_page, "Double space = \".\"",
+                          apps::editor_cfg_get_double_space_period(), double_space_cb);
+}
+
+} // namespace editor_cfg
 
 // ============================================================================
 // Notes Security subpage — encryption-at-rest for *.txt notes

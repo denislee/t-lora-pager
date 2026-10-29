@@ -15,6 +15,7 @@
  *            word_count_debounce_timer  — lv_timer_del + null
  *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
  *   state:   s_pending_open_path        — consumed by editor_build_ui
+ *            s_last_space_pos           — reset (iOS "." shortcut tracker)
  * If you add a new cached LVGL pointer or timer, list it above AND
  * extend editor_exit() — the debounce timer in particular will fire
  * into a destroyed textarea if leaked.
@@ -24,8 +25,11 @@
 #include "../core/notify.h"
 #include "../hal/link.h"
 #include "../hal/notes_crypto.h"
+#include "../hal/nvs.h"
 #include "../hal/storage.h"
+#include "../hal/text_shortcuts.h"
 #include "../hal/wireless.h"
+#include "app_registry.h"
 
 using std::string;
 
@@ -45,6 +49,13 @@ static int sync_pill_last_state = -1;
 static string current_file_path = "";
 static bool content_dirty = false;
 static string s_pending_open_path;
+
+// iOS "." shortcut state (see the LV_EVENT_INSERT branch in
+// text_area_event_cb): the cached setting and the cursor position right after
+// the last space typed, so the next INSERT can tell a deliberate double space
+// from two spaces typed far apart.
+static int s_dbl_space_cache = -1;  // -1 = not loaded
+static uint32_t s_last_space_pos = UINT32_MAX;  // cursor after the last typed space
 
 // Word count is recomputed lazily through this debounce timer instead of
 // inline on every LV_EVENT_VALUE_CHANGED. Counting words walks the entire
@@ -249,6 +260,34 @@ static void text_area_event_cb(lv_event_t *e)
             bool editing = lv_group_get_editing(g);
             lv_group_set_editing(g, !editing);
         }
+    } else if (code == LV_EVENT_INSERT) {
+        // iOS "." shortcut. LVGL raises INSERT before the character reaches
+        // the buffer, so the cursor still sits right after the previous one.
+        // The parameter is the text about to be inserted (LVGL hands '\x7F'
+        // for deletes and the delete_char() call below goes through here
+        // again — ignored, so it cannot disturb the tracking).
+        const char *ins = (const char *)lv_event_get_param(e);
+        if (!ins) return;
+        uint32_t cur = lv_textarea_get_cursor_pos(obj);
+        if (strcmp(ins, " ") != 0) {
+            if (ins[0] != 0x7F) s_last_space_pos = UINT32_MAX;
+            return;
+        }
+        bool consecutive = (cur == s_last_space_pos);
+        s_last_space_pos = cur + 1;
+        if (!consecutive || !apps::editor_cfg_get_double_space_period()) return;
+        const char *txt = lv_textarea_get_text(obj);
+        uint32_t byte = lv_text_encoded_get_byte_id(txt, cur);
+        if (!hal::double_space_period(txt, byte)) return;
+        s_last_space_pos = UINT32_MAX;          // a third space stays a space
+        // Drop the first space, then make LVGL insert ". " in place of this
+        // one. The order is load-bearing: insert_handler() resets
+        // ta_insert_replace before each nested INSERT and only reads it after
+        // our handler returns, so set_insert_replace must come after
+        // delete_char — the other way round, delete_char's nested INSERT would
+        // clear the replacement before it is ever consulted.
+        lv_textarea_delete_char(obj);
+        lv_textarea_set_insert_replace(obj, ". ");
     } else if (code == LV_EVENT_KEY) {
         clip_disarm();  // the textarea's own handler has run (clip_arm_cb)
         uint32_t key = lv_event_get_key(e);
@@ -628,9 +667,8 @@ static void ui_text_editor_exit()
     text_area = NULL;
     disable_keyboard();
     current_file_path = "";
+    s_last_space_pos = UINT32_MAX;  // no cross-entry double-space match
 }
-
-#include "app_registry.h"
 
 namespace {
 class TextEditorApp : public core::App {
@@ -645,5 +683,24 @@ public:
 } // namespace
 
 namespace apps {
+
+// Notes editor settings, read through the settings registry (catalog id
+// editor.double_space_period -> settings_table.cpp bind_editor). The NVS read
+// happens once; every writer goes through the setter below, so the cache
+// cannot go stale.
+bool editor_cfg_get_double_space_period()
+{
+    if (s_dbl_space_cache < 0) {
+        s_dbl_space_cache = hal::nvs_get_bool("editor", "dbl_space", true) ? 1 : 0;
+    }
+    return s_dbl_space_cache != 0;
+}
+
+void editor_cfg_set_double_space_period(bool on)
+{
+    hal::nvs_set_bool("editor", "dbl_space", on);
+    s_dbl_space_cache = on ? 1 : 0;
+}
+
 APP_FACTORY(make_text_editor_app, TextEditorApp)
 } // namespace apps

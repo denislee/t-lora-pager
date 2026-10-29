@@ -81,6 +81,11 @@ void tg_cfg_set_notif_vibrate(bool on);
 bool tg_cfg_get_notif_banner();
 void tg_cfg_set_notif_banner(bool on);
 
+// Notes editor: typing two spaces after a word replaces them with ". "
+// (the iOS "." shortcut). NVS namespace "editor", key "dbl_space"; default ON.
+bool editor_cfg_get_double_space_period();
+void editor_cfg_set_double_space_period(bool on);
+
 // Blocking fetch of the full chat list (via the phone when connected, else
 // direct to the bridge), for the Favorites subpage to render; worker thread
 // only. Returns false with *err populated when there is no uplink, the

@@ -485,6 +485,15 @@ void bind_fonts(Registry &r) {
     }
 }
 
+void bind_editor(Registry &r) {
+    r.bind("editor.double_space_period",
+           [] { return Value::of_bool(apps::editor_cfg_get_double_space_period()); },
+           [](const Value &v, Error &) {
+               apps::editor_cfg_set_double_space_period(v.b);
+               return true;
+           });
+}
+
 void bind_time(Registry &r) {
     r.bind("time.tz",
            [] {
@@ -913,6 +922,7 @@ Registry &build() {
     bind_display(r);
     bind_power(r);
     bind_fonts(r);
+    bind_editor(r);
     bind_time(r);
     bind_conn(r);
     bind_home(r);

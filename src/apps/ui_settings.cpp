@@ -306,6 +306,7 @@ static const SettingsTile kTiles[] = {
     // Notes
     { LV_SYMBOL_REFRESH,   "Notes Sync",          'Y', notes_sync_cfg::build_subpage,   NULL, NULL }, // sYnc
     { LV_SYMBOL_EYE_CLOSE, "Notes Security",      'E', notes_sec_cfg::build_subpage,    notes_sec_cfg::set_sub_page, NULL }, // sEcurity
+    { LV_SYMBOL_KEYBOARD,  "Notes Editor",        'K', editor_cfg::build_subpage,       NULL, NULL }, // Keyboard
     // Storage & files
     { LV_SYMBOL_SD_CARD,   "Storage",             'S', storage_cfg::build_subpage,      NULL, NULL },
     { LV_SYMBOL_DIRECTORY, "Files",               'I', NULL, NULL, "Files" },      // fIles

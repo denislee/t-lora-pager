@@ -1,5 +1,3 @@
-import Foundation
-
 /// A Telegram account the phone holds itself, answering the pager's `tg.*`
 /// with no tg-bridge (PROTOCOL.md §6). `TelegramService` prefers it whenever
 /// `isReady()`; results are already in the pager's trimmed shape.
@@ -41,21 +39,35 @@ public struct TDError: Error, Equatable, Sendable {
 /// `http_error` with the decimal code, and a request TDLib doesn't answer in
 /// time (it waits out network loss rather than failing) → `http_error`
 /// "telegram timeout".
+///
+/// A tg.* call runs many TDLib requests (history pages one after another;
+/// getChat per chat and getUser per sender concurrently, P7.61), so each one
+/// is also capped by the call's `budget`: once it runs out, chats / messages
+/// answer with what they already have rather than letting the pager's 15 s
+/// RPC timeout fire.
 public actor TDTelegram: TelegramNative {
-    /// Per TDLib request; several run per tg.* call, all under the pager's 15 s.
+    /// Per TDLib request. Inside chats / messages the call budget (no longer)
+    /// is what binds, so this mostly matters for `read` and `send`, which run
+    /// one request each.
     public static let requestTimeout: Duration = .seconds(10)
+    /// Whole tg.* call, under the pager's 15 s (TG_LINK_TIMEOUT_MS) with room
+    /// for the reply's trip over the link.
+    public static let callBudget: Duration = .seconds(10)
     static let idShift: Int64 = 20
 
     private let td: TDQuerying
     private let ready: @Sendable () -> Bool
     private let timeout: Duration
+    private let budget: Duration
     private var names: [String: String] = [:]
     private var chatsLoaded = false
 
     public init(td: TDQuerying, timeout: Duration = TDTelegram.requestTimeout,
+                budget: Duration = TDTelegram.callBudget,
                 isReady: @escaping @Sendable () -> Bool) {
         self.td = td
         self.timeout = timeout
+        self.budget = budget
         self.ready = isReady
     }
 
@@ -64,24 +76,48 @@ public actor TDTelegram: TelegramNative {
     // MARK: - tg.*
 
     public func chats(limit: Int) async throws -> JSONValue {
+        let deadline = ContinuousClock.now + budget
         let list: JSONValue = ["@type": "chatListMain"]
         if !chatsLoaded {
             // Pulls the list from the server once; TDLib answers 404 when
             // it already has everything. Either way getChats reads its cache.
             do {
                 _ = try await call(["@type": "loadChats", "chat_list": list, "limit": .number(Double(limit))],
-                                   timeout: .seconds(4))
+                                   timeout: .seconds(4), by: deadline)
                 chatsLoaded = true
             } catch let error as TDError where error.code == 404 {
                 chatsLoaded = true
             } catch {}
         }
-        let reply = try await call(["@type": "getChats", "chat_list": list, "limit": .number(Double(limit))])
+        let reply = try await call(["@type": "getChats", "chat_list": list, "limit": .number(Double(limit))],
+                                   by: deadline)
         guard case .array(let ids)? = reply["chat_ids"] else { throw Self.badReply }
+        let chatIDs = ids.compactMap { Params.int64($0) }
+        // getChat for every id at once (P7.61), answers kept in list order.
+        let answers = await withTaskGroup(of: (Int, Result<JSONValue, Error>).self) { group in
+            for (index, chatID) in chatIDs.enumerated() {
+                group.addTask {
+                    do {
+                        return (index, .success(try await self.call(
+                            ["@type": "getChat", "chat_id": .number(Double(chatID))], by: deadline)))
+                    } catch {
+                        return (index, .failure(error))
+                    }
+                }
+            }
+            // Every index gets an answer before the group finishes.
+            var answers = [Result<JSONValue, Error>](repeating: .failure(Self.badReply), count: chatIDs.count)
+            for await (index, answer) in group { answers[index] = answer }
+            return answers
+        }
         var out: [JSONValue] = []
-        for id in ids {
-            guard let chatID = Params.int64(id) else { continue }
-            let chat = try await call(["@type": "getChat", "chat_id": .number(Double(chatID))])
+        for (chatID, answer) in zip(chatIDs, answers) {
+            let chat: JSONValue
+            do {
+                chat = try answer.get()
+            } catch where !out.isEmpty {
+                break   // failed or out of time: the chats so far beat a pager timeout
+            }
             out.append([
                 "id": .number(Double(chatID)),
                 "title": .string(chat["title"]?.stringValue ?? ""),
@@ -92,25 +128,33 @@ public actor TDTelegram: TelegramNative {
     }
 
     public func messages(chatID: Int64, limit: Int) async throws -> JSONValue {
+        let deadline = ContinuousClock.now + budget
         var out: [JSONValue] = []
         var seen = Set<Int64>()
         var from: Int64 = 0
         // getChatHistory may answer with fewer than asked (often one message
-        // on a cold cache); page back from the oldest seen until full.
+        // on a cold cache); page back from the oldest seen until full. A
+        // later page that fails or runs out of time keeps what is already in.
         for _ in 0..<5 where out.count < limit {
-            let reply = try await call([
-                "@type": "getChatHistory",
-                "chat_id": .number(Double(chatID)),
-                "from_message_id": .number(Double(from)),
-                "offset": 0,
-                "limit": .number(Double(limit - out.count)),
-                "only_local": false,
-            ])
+            let reply: JSONValue
+            do {
+                reply = try await call([
+                    "@type": "getChatHistory",
+                    "chat_id": .number(Double(chatID)),
+                    "from_message_id": .number(Double(from)),
+                    "offset": 0,
+                    "limit": .number(Double(limit - out.count)),
+                    "only_local": false,
+                ], by: deadline)
+            } catch where !out.isEmpty {
+                break
+            }
             guard case .array(let batch)? = reply["messages"] else { throw Self.badReply }
+            await prefetchSenders(batch, by: deadline)
             var added = false
             for message in batch {
                 guard let id = Params.int64(message["id"]), seen.insert(id).inserted else { continue }
-                out.append(try await pagerMessage(message))
+                out.append(try await pagerMessage(message, by: deadline))
                 from = id
                 added = true
                 if out.count == limit { break }
@@ -144,12 +188,12 @@ public actor TDTelegram: TelegramNative {
     // MARK: - Mapping
 
     /// One TDLib `message` → `{id, text, from, out, media?}`.
-    func pagerMessage(_ message: JSONValue) async throws -> JSONValue {
+    func pagerMessage(_ message: JSONValue, by deadline: ContinuousClock.Instant) async throws -> JSONValue {
         let id = Params.int64(message["id"]) ?? 0
         var out: [String: JSONValue] = [
             "id": .number(Double(id >> Self.idShift)),
             "out": .bool(message["is_outgoing"]?.boolValue ?? false),
-            "from": .string(await senderName(message["sender_id"])),
+            "from": .string(await senderName(message["sender_id"], by: deadline)),
         ]
         let (text, media) = Self.content(message["content"])
         out["text"] = .string(text)
@@ -195,53 +239,98 @@ public actor TDTelegram: TelegramNative {
         }
     }
 
-    /// A TDLib `user`'s "first last", skipping empty parts.
+    /// Resolve a page's uncached senders concurrently (P7.61), so mapping its
+    /// messages finds every name cached instead of one getUser at a time.
+    private func prefetchSenders(_ batch: [JSONValue], by deadline: ContinuousClock.Instant) async {
+        var pending: [String: JSONValue] = [:]
+        for message in batch {
+            guard let sender = Sender(message["sender_id"]), names[sender.key] == nil else { continue }
+            pending[sender.key] = message["sender_id"]
+        }
+        guard pending.count > 1 else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for sender in pending.values {
+                group.addTask { _ = await self.senderName(sender, by: deadline) }
+            }
+        }
+    }
+
+    /// A TDLib `messageSender*` this can name; `key` indexes `names`.
+    private enum Sender {
+        case user(Int64)
+        case chat(Int64)
+
+        init?(_ sender: JSONValue?) {
+            switch sender?["@type"]?.stringValue {
+            case "messageSenderUser":
+                guard let id = Params.int64(sender?["user_id"]) else { return nil }
+                self = .user(id)
+            case "messageSenderChat":
+                guard let id = Params.int64(sender?["chat_id"]) else { return nil }
+                self = .chat(id)
+            default:
+                return nil
+            }
+        }
+
+        var key: String {
+            switch self {
+            case .user(let id): return "u\(id)"
+            case .chat(let id): return "c\(id)"
+            }
+        }
+    }
+
+    /// A sender's display name, cached per session ("" when not had in time).
+    func senderName(_ sender: JSONValue?, by deadline: ContinuousClock.Instant) async -> String {
+        guard let who = Sender(sender) else { return "" }
+        if let name = names[who.key] { return name }
+        let name: String
+        switch who {
+        case .user(let userID):
+            guard let user = try? await call(["@type": "getUser", "user_id": .number(Double(userID))],
+                                             by: deadline) else {
+                return ""
+            }
+            name = Self.displayName(user)
+        case .chat(let chatID):
+            guard let chat = try? await call(["@type": "getChat", "chat_id": .number(Double(chatID))],
+                                             by: deadline) else {
+                return ""
+            }
+            name = chat["title"]?.stringValue ?? ""
+        }
+        names[who.key] = name
+        return name
+    }
+
+    /// A TDLib `user`'s first and last name, whichever are set.
     public static func displayName(_ user: JSONValue) -> String {
         [user["first_name"]?.stringValue, user["last_name"]?.stringValue]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
-    /// A sender's display name, cached per session.
-    func senderName(_ sender: JSONValue?) async -> String {
-        let type = sender?["@type"]?.stringValue
-        if type == "messageSenderUser", let userID = Params.int64(sender?["user_id"]) {
-            let key = "u\(userID)"
-            if let name = names[key] { return name }
-            guard let user = try? await call(["@type": "getUser", "user_id": .number(Double(userID))]) else {
-                return ""
-            }
-            let name = Self.displayName(user)
-            names[key] = name
-            return name
-        }
-        if type == "messageSenderChat", let chatID = Params.int64(sender?["chat_id"]) {
-            let key = "c\(chatID)"
-            if let name = names[key] { return name }
-            guard let chat = try? await call(["@type": "getChat", "chat_id": .number(Double(chatID))]) else {
-                return ""
-            }
-            let name = chat["title"]?.stringValue ?? ""
-            names[key] = name
-            return name
-        }
-        return ""
-    }
-
     // MARK: - Transport
 
     static let badReply = RPCError(code: "internal", msg: "bad telegram reply")
+    static let timedOut = RPCError(code: "http_error", msg: "telegram timeout")
 
-    /// One TDLib request under `timeout`, TDLib errors already mapped for
-    /// the pager (loadChats' 404 is let through as `TDError` for the caller).
-    private func call(_ request: JSONValue, timeout: Duration? = nil) async throws -> JSONValue {
+    /// One TDLib request under `timeout` (and `deadline`, when given), TDLib
+    /// errors already mapped for the pager (loadChats' 404 is let through as
+    /// `TDError` for the caller).
+    private func call(_ request: JSONValue, timeout: Duration? = nil,
+                      by deadline: ContinuousClock.Instant? = nil) async throws -> JSONValue {
         let td = self.td
-        let timeout = timeout ?? self.timeout
+        var limit = timeout ?? self.timeout
+        if let deadline { limit = min(limit, deadline - .now) }
+        guard limit > .zero else { throw Self.timedOut }
+        let timeout = limit
         do {
             return try await withThrowingTaskGroup(of: JSONValue.self) { group in
                 group.addTask { try await td.query(request) }
                 group.addTask {
                     try await Task.sleep(for: timeout)
-                    throw RPCError(code: "http_error", msg: "telegram timeout")
+                    throw TDTelegram.timedOut
                 }
                 defer { group.cancelAll() }
                 guard let first = try await group.next() else { throw Self.badReply }

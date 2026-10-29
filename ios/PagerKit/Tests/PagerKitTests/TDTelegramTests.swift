@@ -3,40 +3,87 @@ import XCTest
 
 @testable import PagerKit
 
-/// A scripted TDLib: answers each request by its `@type` and records every
-/// request it saw. `hang` types never answer (until cancelled), which is how
-/// TDLib behaves while it waits out a network loss.
-private final class FakeTD: TDQuerying, @unchecked Sendable {
+/// A scripted TDLib: answers each request by its `@type`, records every
+/// request it saw and the peak number of each type in flight at once.
+/// `hang` types never answer (until cancelled), which is how TDLib behaves
+/// while it waits out a network loss. A `gather` type holds each request
+/// until that many of its type are in flight (or `gatherCap` passes), so a
+/// concurrent caller reaches the count and a serial one never does — no
+/// wall-clock assert needed.
+final class FakeTD: TDQuerying, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [JSONValue] = []
-    private let answer: @Sendable (JSONValue) throws -> JSONValue
+    private var inFlight: [String: Int] = [:]
+    private var peaks: [String: Int] = [:]
+    private let answer: @Sendable (JSONValue) async throws -> JSONValue
     private let hang: Set<String>
+    private let gather: [String: Int]
+    static let gatherCap: Duration = .seconds(2)
 
-    init(hang: Set<String> = [], answer: @escaping @Sendable (JSONValue) throws -> JSONValue) {
+    init(hang: Set<String> = [], gather: [String: Int] = [:],
+         answer: @escaping @Sendable (JSONValue) async throws -> JSONValue) {
         self.answer = answer
         self.hang = hang
+        self.gather = gather
     }
 
     var requests: [JSONValue] {
-        lock.lock()
-        defer { lock.unlock() }
-        return log
-    }
-
-    private func record(_ request: JSONValue) {
-        lock.lock()
-        log.append(request)
-        lock.unlock()
+        lock.withLock { log }
     }
 
     func types() -> [String] { requests.compactMap { $0["@type"]?.stringValue } }
 
+    /// Most requests of `type` ever in flight at once.
+    func peak(_ type: String) -> Int {
+        lock.withLock { peaks[type] ?? 0 }
+    }
+
+    private func enter(_ type: String) {
+        lock.withLock {
+            inFlight[type, default: 0] += 1
+            peaks[type] = max(peaks[type] ?? 0, inFlight[type] ?? 0)
+        }
+    }
+
+    private func leave(_ type: String) {
+        lock.withLock { inFlight[type, default: 0] -= 1 }
+    }
+
     func query(_ request: JSONValue) async throws -> JSONValue {
-        record(request)
-        if let type = request["@type"]?.stringValue, hang.contains(type) {
+        let type = request["@type"]?.stringValue ?? ""
+        lock.withLock { log.append(request) }
+        enter(type)
+        defer { leave(type) }
+        if hang.contains(type) {
             try await Task.sleep(for: .seconds(60))
         }
-        return try answer(request)
+        if let count = gather[type] {
+            let cap = ContinuousClock.now + Self.gatherCap
+            while peak(type) < count, ContinuousClock.now < cap {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        return try await answer(request)
+    }
+}
+
+/// TDLib reply builders shared by the TDTelegram suites.
+enum TDFixture {
+    static let shift = Double(1 << 20)
+
+    static func message(_ server: Int, _ content: JSONValue, out: Bool = false,
+                        sender: JSONValue = ["@type": "messageSenderUser", "user_id": 5]) -> JSONValue {
+        [
+            "@type": "message",
+            "id": .number(Double(server) * shift),
+            "is_outgoing": .bool(out),
+            "sender_id": sender,
+            "content": content,
+        ]
+    }
+
+    static func text(_ s: String) -> JSONValue {
+        ["@type": "messageText", "text": ["@type": "formattedText", "text": .string(s)]]
     }
 }
 
@@ -51,22 +98,7 @@ private struct FakeNative: TelegramNative {
 }
 
 final class TDTelegramTests: XCTestCase {
-    private static let shift = Double(1 << 20)
-
-    private func message(_ server: Int, _ content: JSONValue, out: Bool = false,
-                         sender: JSONValue = ["@type": "messageSenderUser", "user_id": 5]) -> JSONValue {
-        [
-            "@type": "message",
-            "id": .number(Double(server) * Self.shift),
-            "is_outgoing": .bool(out),
-            "sender_id": sender,
-            "content": content,
-        ]
-    }
-
-    private func text(_ s: String) -> JSONValue {
-        ["@type": "messageText", "text": ["@type": "formattedText", "text": .string(s)]]
-    }
+    private static let shift = TDFixture.shift
 
     func testChatsLoadOnceThenListInOrder() async throws {
         let td = FakeTD { req in
@@ -93,12 +125,12 @@ final class TDTelegramTests: XCTestCase {
 
     func testMessagesMapContentSenderAndShiftIds() async throws {
         let history: [JSONValue] = [
-            message(12, text("newest"), out: true),
-            message(11, ["@type": "messagePhoto", "caption": ["text": "pic"],
+            TDFixture.message(12, TDFixture.text("newest"), out: true),
+            TDFixture.message(11, ["@type": "messagePhoto", "caption": ["text": "pic"],
                          "photo": ["sizes": [["width": 90, "height": 60], ["width": 1280, "height": 960]]]]),
-            message(10, ["@type": "messageSticker", "sticker": ["emoji": "👍", "width": 512, "height": 512]],
+            TDFixture.message(10, ["@type": "messageSticker", "sticker": ["emoji": "👍", "width": 512, "height": 512]],
                     sender: ["@type": "messageSenderChat", "chat_id": -100]),
-            message(9, ["@type": "messagePoll"]),
+            TDFixture.message(9, ["@type": "messagePoll"]),
         ]
         let td = FakeTD { req in
             switch req["@type"]?.stringValue {
@@ -163,6 +195,51 @@ final class TDTelegramTests: XCTestCase {
         let tg = TDTelegram(td: td, timeout: .milliseconds(100)) { true }
         do {
             try await tg.send(chatID: 1, text: "x")
+            XCTFail("expected error")
+        } catch let error as RPCError {
+            XCTAssertEqual(error, RPCError(code: "http_error", msg: "telegram timeout"))
+        }
+    }
+
+    // Each request is under its own timeout, but together they must still
+    // answer inside the call budget (the pager gives up at 15 s).
+    func testHistoryPagesStopAtTheBudgetWithWhatTheyHave() async throws {
+        let first = TDFixture.message(12, TDFixture.text("only"))
+        let td = FakeTD(hang: ["getUser"]) { req in
+            let from = req["from_message_id"]?.doubleValue ?? 0
+            if from != 0 { try await Task.sleep(for: .seconds(60)) }
+            return ["@type": "messages", "messages": [first]]
+        }
+        let tg = TDTelegram(td: td, timeout: .seconds(10), budget: .milliseconds(300)) { true }
+        let start = ContinuousClock.now
+        let msgs = try await tg.messages(chatID: 42, limit: 10)
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
+        XCTAssertEqual(msgs, [["id": 12, "text": "only", "from": "", "out": false]])
+    }
+
+    func testChatListStopsAtTheBudgetWithWhatItHas() async throws {
+        let td = FakeTD { req in
+            switch req["@type"]?.stringValue {
+            case "loadChats": throw TDError(code: 404, message: "Not Found")
+            case "getChats": return ["@type": "chats", "chat_ids": [1, 2, 3]]
+            case "getChat":
+                if req["chat_id"]?.doubleValue != 1 { try await Task.sleep(for: .seconds(60)) }
+                return ["@type": "chat", "id": 1, "title": "First", "unread_count": 0]
+            default: throw TDError(code: 400, message: "unexpected")
+            }
+        }
+        let tg = TDTelegram(td: td, timeout: .seconds(10), budget: .milliseconds(300)) { true }
+        let start = ContinuousClock.now
+        let chats = try await tg.chats(limit: 20)
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
+        XCTAssertEqual(chats, [["id": 1, "title": "First", "unread": 0]])
+    }
+
+    func testNothingInTimeIsATimeout() async throws {
+        let td = FakeTD(hang: ["getChatHistory"]) { _ in ["@type": "ok"] }
+        let tg = TDTelegram(td: td, timeout: .seconds(10), budget: .milliseconds(200)) { true }
+        do {
+            _ = try await tg.messages(chatID: 1, limit: 5)
             XCTFail("expected error")
         } catch let error as RPCError {
             XCTAssertEqual(error, RPCError(code: "http_error", msg: "telegram timeout"))
