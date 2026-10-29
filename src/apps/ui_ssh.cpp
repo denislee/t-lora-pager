@@ -22,7 +22,10 @@
  * prompts. The pencil (edit) button forces a fresh prompt chain.
  * A private key set from the phone (settings id ssh.key, slot "ssh"/
  * "key_enc", the same encryption) is tried before the password, and alone
- * is enough for the saved-credentials Connect.
+ * is enough for the saved-credentials Connect. Saved hosts (settings id
+ * ssh.hosts, name=user@host:port entries separated by ';', edited on the
+ * phone) make Connect open a picker first; every host shares the one
+ * key/password, and "Other host…" keeps the prompt chain.
  *
  * State reset on onStop (SshApp::onStop):
  *   timers:  poll_timer_                  — lv_timer_del + nullptr
@@ -32,6 +35,7 @@
  *             after the worker has exited, P7.43)
  *   ui:      ui_hide_back_button()         — releases shared status-bar hook
  *   statics: s_prompt_app                 — cleared if this app owns it
+ *            s_pick_hosts                 — cleared with s_prompt_app
  *            s_live_                      — cleared if this app owns it; a drain
  *                                           posted after exit finds it null
  *   widgets: top_bar_, status_lbl_, conn_btn_, conn_icon_, edit_btn_, term_,
@@ -55,8 +59,11 @@
 #include "../hal/wireless.h"
 #include "../hal/secrets.h"
 #include "../hal/notes_crypto.h"
+#include "../hal/nvs.h"
 #include "../hal/settings.h"
+#include "../hal/ssh_hosts.h"
 #include "app_registry.h"
+#include "../ui_list_picker.h"
 
 #include <atomic>
 #include <cstring>
@@ -681,6 +688,7 @@ public:
     bool try_saved_connect();            // saved host/user/password → connect
     void finish_connect_with_pw(const char* pw);
     void connect_with(const SshConfig& cfg);
+    void use_host(const hal::ssh::Host& h);  // picker choice → saved cfg → connect
 
 private:
     void build_ui();
@@ -763,6 +771,23 @@ static void ssh_output_ready() { core::ui_post(SshApp::drain_live); }
 SshApp*   s_prompt_app = nullptr;
 SshConfig s_prompt_cfg;
 
+// Hosts shown by the Connect picker (S10); index == hosts.size() is "Other host…".
+std::vector<hal::ssh::Host> s_pick_hosts;
+
+void ssh_pick_cb(int index, void* ud) {
+    (void)ud;
+    SshApp* app = s_prompt_app;
+    s_prompt_app = nullptr;
+    std::vector<hal::ssh::Host> hosts;
+    hosts.swap(s_pick_hosts);
+    if (!app || index < 0) return;
+    if (static_cast<size_t>(index) < hosts.size()) {
+        app->use_host(hosts[index]);
+    } else {
+        app->start_prompt_chain();
+    }
+}
+
 void ssh_pw_cb(const char* pw, void* ud) {
     (void)ud;
     SshApp* app = s_prompt_app;
@@ -799,8 +824,20 @@ static bool wifi_ready_or_warn() {
 
 // cfg_ needs no reload here: onStart loads it and connect_with() keeps it
 // equal to what finish_connect_with_pw() saves.
+// With saved hosts (ssh.hosts) a picker comes first; see use_host().
 void SshApp::start_connect_flow() {
     if (!wifi_ready_or_warn()) return;
+    std::vector<hal::ssh::Host> hosts;
+    hal::ssh::parse_hosts(hal::nvs_get_str(SSH_NS, "hosts", ""), &hosts, nullptr);
+    if (!hosts.empty()) {
+        std::vector<std::string> labels;
+        for (const auto& h : hosts) labels.push_back(hal::ssh::host_label(h));
+        labels.push_back("Other host\xE2\x80\xA6");
+        s_pick_hosts.swap(hosts);
+        s_prompt_app = this;
+        ui_list_picker_open("SSH host", labels, ssh_pick_cb, nullptr);
+        return;
+    }
     if (!try_saved_connect()) start_prompt_chain();
 }
 
@@ -831,6 +868,17 @@ void SshApp::start_prompt_chain() {
     ui_text_prompt("SSH host", "hostname or IP",
                    cfg_.host.empty() ? nullptr : cfg_.host.c_str(),
                    ssh_host_cb, nullptr);
+}
+
+// A picked saved host becomes the last-used host (cfg_save, same as a typed
+// one), then connects with the saved key/password or falls into the prompts
+// seeded with this host and user.
+void SshApp::use_host(const hal::ssh::Host& h) {
+    cfg_.host = h.host;
+    cfg_.user = h.user;
+    cfg_.port = h.port;
+    cfg_save(cfg_);
+    if (!try_saved_connect()) start_prompt_chain();
 }
 
 void SshApp::finish_connect_with_pw(const char* pw) {
@@ -904,7 +952,7 @@ void SshApp::onStop() {
     if (poll_timer_) { lv_timer_del(poll_timer_); poll_timer_ = nullptr; }
     if (backend_)    { backend_->disconnect(); backend_.reset(); }
     ui_hide_back_button();
-    if (s_prompt_app == this) s_prompt_app = nullptr;
+    if (s_prompt_app == this) { s_prompt_app = nullptr; s_pick_hosts.clear(); }
     top_bar_ = status_lbl_ = conn_btn_ = conn_icon_ = edit_btn_ = nullptr;
     term_ = input_ = keys_row_ = ctrl_btn_ = ctrl_lbl_ = nullptr;
     ctrl_armed_ = false;

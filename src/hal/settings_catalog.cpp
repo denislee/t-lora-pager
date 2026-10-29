@@ -6,6 +6,7 @@
  * section per group in this order. Ids are wire ids: never rename one.
  */
 #include "settings_catalog.h"
+#include "ssh_hosts.h"
 
 namespace settings {
 
@@ -144,6 +145,13 @@ bool host_check(const Value &v, Error &err) {
         }
     }
     return true;
+}
+
+bool ssh_hosts_check(const Value &v, Error &err) {
+    std::string why;
+    if (hal::ssh::parse_hosts(v.s, nullptr, &why)) return true;
+    err.set("invalid_argument", why);
+    return false;
 }
 
 }  // namespace
@@ -382,6 +390,11 @@ void build_catalog(Registry &r, const BoardProfile &b) {
         d.supported = b.ssh;
         r.add(d);
         d = make_int("ssh.port", "ssh", "Port", 1, 65535, 1);
+        d.supported = b.ssh;
+        r.add(d);
+        d = make_str("ssh.hosts", "ssh", "Saved hosts", 1024,
+                     "name=user@host:port; separated by ';'. All share the key and password.");
+        d.check = ssh_hosts_check;
         d.supported = b.ssh;
         r.add(d);
         d = make_secret("ssh.password", "ssh", "Password", 128);

@@ -887,6 +887,7 @@ void bind_storage(Registry &r) {
 void bind_ssh(Registry &r) {
     str_bind_nvs(r, "ssh.host", "ssh", "host");
     str_bind_nvs(r, "ssh.user", "ssh", "user");
+    str_bind_nvs(r, "ssh.hosts", "ssh", "hosts");
     r.bind("ssh.port", [] { return Value::of_int(hal::nvs_get_u16("ssh", "port", 22)); },
            [](const Value &v, Error &) {
                hal::nvs_set_u16("ssh", "port", static_cast<uint16_t>(v.i));

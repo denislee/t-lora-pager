@@ -36,6 +36,7 @@ func stringTarget(_ id: String) -> String {
     case "nsync.branch": return "e2e"
     case "ssh.host": return "e2e.local"
     case "ssh.user": return "e2e"
+    case "ssh.hosts": return "lab=e2e@e2e.local:2222; box=e2e@box.e2e.local"
     default: return "e2e"
     }
 }

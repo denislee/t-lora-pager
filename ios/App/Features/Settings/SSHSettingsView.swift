@@ -3,7 +3,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// The pager's SSH client settings (S10): host, user, port and password
-/// through the settings registry (`settings.set`), and the private key —
+/// through the settings registry (`settings.set`), the saved-hosts list
+/// (`ssh.hosts`) the pager's Connect offers first, and the private key —
 /// imported from Files or pasted, kept in this phone's Keychain, and pushed
 /// to the pager's write-only `ssh.key` secret (tried before the password).
 /// The key never comes back from the pager. Keys over 3000 bytes or
@@ -15,6 +16,9 @@ struct SSHSettingsView: View {
     @State private var host = ""
     @State private var user = ""
     @State private var port = ""
+    @State private var hosts: [SSHHostList.Host] = []
+    @State private var hostDraft = SSHHostList.Host(name: "", user: "", host: "", port: 22)
+    @State private var hostDraftPort = "22"
     @State private var password = ""
     @State private var keyDraft = ""
     @State private var storedKey: String?
@@ -39,6 +43,9 @@ struct SSHSettingsView: View {
                     .keyboardType(.numberPad)
                 Button("Save host, user and port") { saveHost() }
                     .disabled(!settings.store.canEdit)
+            }
+            if settings.store.schema?.item("ssh.hosts") != nil {
+                savedHostsSection
             }
             if settings.store.schema?.item("ssh.password") != nil {
                 Section {
@@ -78,6 +85,48 @@ struct SSHSettingsView: View {
             }
             keyDraft = text
             checkDraft()
+        }
+    }
+
+    private var savedHostsSection: some View {
+        Section {
+            ForEach(hosts, id: \.self) { h in
+                VStack(alignment: .leading) {
+                    Text(h.name)
+                    Text(SSHHostList.line(h))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .onDelete { offsets in hosts.remove(atOffsets: offsets) }
+            .onMove { from, to in hosts.move(fromOffsets: from, toOffset: to) }
+            TextField("Name (optional)", text: $hostDraft.name)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("user", text: $hostDraft.user)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("host", text: $hostDraft.host)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("Port", text: $hostDraftPort)
+                .keyboardType(.numberPad)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Add host") { addHost() }
+                .disabled(hostDraft.user.isEmpty || hostDraft.host.isEmpty
+                          || hosts.count >= SSHHostList.maxHosts)
+            Button("Save list to pager") { saveHosts() }
+                .disabled(!settings.store.canEdit)
+        } header: {
+            HStack {
+                Text("Saved hosts")
+                Spacer()
+                EditButton()
+            }
+        } footer: {
+            Text("Connect on the pager lists these first. Every host uses the same key and password; "
+                 + "up to \(SSHHostList.maxHosts).")
         }
     }
 
@@ -121,6 +170,9 @@ struct SSHSettingsView: View {
         host = settings.store.value("ssh.host")?.stringValue ?? ""
         user = settings.store.value("ssh.user")?.stringValue ?? ""
         port = settings.store.value("ssh.port")?.intValue.map(String.init) ?? "22"
+        if case .success(let list) = SSHHostList.parse(settings.store.value("ssh.hosts")?.stringValue ?? "") {
+            hosts = list
+        }
         storedKey = Self.keychain.read(Self.keyName)
     }
 
@@ -169,6 +221,36 @@ struct SSHSettingsView: View {
             let ok2 = ok ? await settings.commit("ssh.user", .string(user.trimmingCharacters(in: .whitespaces))) : false
             let ok3 = ok2 ? await settings.commit("ssh.port", .int(portNumber)) : false
             if ok3 { message = "Saved on the pager." }
+        }
+    }
+
+    private func addHost() {
+        let trimmedName = hostDraft.name.trimmingCharacters(in: .whitespaces)
+        let trimmedUser = hostDraft.user.trimmingCharacters(in: .whitespaces)
+        let trimmedHost = hostDraft.host.trimmingCharacters(in: .whitespaces)
+        let candidate = hosts + [SSHHostList.Host(name: trimmedName.isEmpty ? trimmedHost : trimmedName,
+                                                  user: trimmedUser,
+                                                  host: trimmedHost,
+                                                  port: Int(hostDraftPort) ?? -1)]
+        // The pager's own parser decides: it names the line and the reason.
+        switch SSHHostList.parse(SSHHostList.text(candidate)) {
+        case .failure(let error):
+            problem = error.message
+        case .success(let list):
+            hosts = list
+            hostDraft = SSHHostList.Host(name: "", user: "", host: "", port: 22)
+            hostDraftPort = "22"
+            problem = nil
+        }
+    }
+
+    private func saveHosts() {
+        message = nil
+        problem = nil
+        Task {
+            if await settings.commit("ssh.hosts", .string(SSHHostList.text(hosts))) {
+                message = "Host list saved on the pager."
+            }
         }
     }
 

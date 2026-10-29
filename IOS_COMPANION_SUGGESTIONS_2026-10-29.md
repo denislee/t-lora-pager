@@ -235,7 +235,7 @@ screenshot when it exists.
 
 ## 9. Status (2026-10-29, after the implementation pass)
 
-Nothing is committed yet. Verified on this Linux box: `make protocol-test`
+Committed as `19ab133`; the follow-ups below (§10) are not committed yet. Verified on this Linux box: `make protocol-test`
 (vectors fresh, Unity, Go, PagerKit 311 tests), `pio test -e native_test`
 (242 cases), `pagerlink smoke` (77 steps against the emulator),
 `make -C ios settings-e2e`, `notes-e2e` and `files-e2e`, and builds of
@@ -254,7 +254,7 @@ hardware was attached.
 | S7 | Done | `phone.find` (Inbox app button) and `pager.find` (haptic + banner; there is no tone API, only WAV playback) |
 | S8 | Done (app uncompiled) | `PagerKit/Voice`, recordings are `/mental_notes/*.wav` on SD |
 | S9 | Done (app uncompiled) | `PagerKit/Journal`, Journal tab |
-| S10 | Done, single host | `ssh.key` secret setting (pinned secret slot `ssh/key_enc`, `NC_PIN_N` 5), libssh pubkey auth before the password; phone SSH screen. Multi-host list not built. Key login not tested on hardware |
+| S10 | Done, single host | `ssh.key` secret setting (pinned secret slot `ssh/key_enc`, `NC_PIN_N` 5), libssh pubkey auth before the password; phone SSH screen. Multi-host list: `ssh.hosts` setting (`name=user@host:port` entries separated by `;`, max 16, shared key/password; `src/hal/ssh_hosts.cpp`, `PagerKit/SSH/SSHHostList.swift`), host picker on the pager's Connect, editor on the phone. Key login not tested on hardware |
 | S11 | Done (app uncompiled) | `PagerKit/Chat/ChatHistory.swift`; ChatService was never registered in the app before, now is |
 | S12 | Done, untested on hardware | §6.7: upload with `fs.write`, `ota.apply` checks SHA-256 + 0xE9, writes the next slot; app-level rollback after 3 unconfirmed boots (no bootloader rollback). Emulator path verified by smoke. GATT throughput not measured |
 | S13 | Done | §6.6 `screen.capture` → `screen.data` (`rgb565-rle`); `LV_USE_SNAPSHOT` on in both builds; 480x222 capture = 13.5 KB on the emulator |
@@ -266,4 +266,22 @@ hardware was attached.
 | S19 | Done (app uncompiled) | `PagerKit/Diagnostics/DiagnosticsReport.swift`, includes the S13 screenshot |
 
 Found on the way: the emulator aborts on SIGTERM ("terminate called without
-an active exception") at `dd840b4` already; not fixed here.
+an active exception") at `dd840b4` already. Fixed in §10.
+
+## 10. Follow-up pass (2026-10-29)
+
+- **Emulator SIGTERM abort**: the PagerLink TCP listener was a joinable global
+  `std::thread` (`src/hal/link/link_transport_tcp.cpp`); `exit()` destroyed it
+  and called `std::terminate` (exit 134). It is detached now. Before: exit 134;
+  after: exit 0, also after a full `pagerlink smoke`.
+- **S10 multi-host**: done (see the S10 row). The value is one line because the
+  settings registry refuses control characters in strings; the C++ and Swift
+  parsers give the same `entry N: <reason>` errors (`test/test_ssh_hosts`,
+  `SSHHostListTests`). `settings-e2e` writes, reads back and restarts with it.
+  The pager picker is compiled but not driven in a UI test.
+- **S14, S15**: still open, waiting on a decision (radio RX duty cycle / two
+  radios for S14; flash/RAM vs boot-time and battery for S15).
+
+Verified: `make protocol-test` (PagerKit 331 tests), `pio test -e native_test`
+(260 cases), `make -C ios settings-e2e`, `pagerlink smoke`, builds of
+`emulator_lora_pager`, `tlora_pager`, `twatchs3`, `twatch_ultra`.
