@@ -35,7 +35,6 @@ namespace {
 constexpr int DEFAULT_PORT = 7600;
 
 std::atomic<bool> g_started{false};
-std::thread g_thread;
 
 /** Write exactly `len` bytes; false on error (SIGPIPE suppressed). */
 bool write_all(int fd, const uint8_t *buf, size_t len) {
@@ -205,7 +204,10 @@ void hw_link_start() {
 
     g_started.store(true);
     LINK_LOG("listening on 127.0.0.1:%d", port);
-    g_thread = std::thread(thread_main, fd);
+    // Detached: the listener lives for the whole process. A joinable global
+    // std::thread would call std::terminate from its destructor at exit
+    // (SDL turns SIGTERM into a quit, and exit() runs static destructors).
+    std::thread(thread_main, fd).detach();
 }
 
 bool hw_link_connected() { return pagerlink::service_connected(); }
