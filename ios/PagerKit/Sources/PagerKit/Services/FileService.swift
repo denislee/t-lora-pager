@@ -115,6 +115,23 @@ public struct FileService: Sendable {
         _ = try await session.call("fs.delete", params: params, timeout: timeout)
     }
 
+    /// `fs.mkdir` — one level; the parent must exist.
+    public func mkdir(vol: String, path: String) async throws {
+        _ = try await session.call("fs.mkdir", params: [
+            "vol": .string(vol),
+            "path": .string(path),
+        ], timeout: timeout)
+    }
+
+    /// `fs.rename` — `to` must not exist; a directory can't move into itself.
+    public func rename(vol: String, from: String, to: String) async throws {
+        _ = try await session.call("fs.rename", params: [
+            "vol": .string(vol),
+            "from": .string(from),
+            "to": .string(to),
+        ], timeout: timeout)
+    }
+
     // MARK: - Reply parsing
 
     /// One listing entry: a non-empty name, an optional bool `dir` (default

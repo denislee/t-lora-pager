@@ -204,6 +204,7 @@ func cmdSmoke(c *pagerlink.Client, addr string, timeout time.Duration) int {
 	pass = fsOK && pass
 	pass = smokeLink(next, timeout) && pass
 	pass = smokeSettings(next, timeout) && pass
+	pass = smokeMessaging(next, timeout) && pass
 	if next != c {
 		next.Close()
 	}

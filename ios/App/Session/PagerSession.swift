@@ -22,6 +22,10 @@ final class PagerSession: ObservableObject {
     @Published private(set) var state: State = .disconnected
     @Published private(set) var info: JSONValue?
     @Published private(set) var lastRTT: Duration?
+    /// The last `sys.hello` result, kept after a disconnect (Diagnostics export).
+    @Published private(set) var lastHello: JSONValue?
+    /// What the weather service last fetched / pushed / was asked (Weather tab).
+    @Published private(set) var weatherActivity = WeatherActivity()
 
     /// Connect over Bluetooth on launch / foreground and keep retrying (with
     /// backoff) after a failed connect or a dropped link. Persisted; on by default.
@@ -72,6 +76,36 @@ final class PagerSession: ObservableObject {
     /// The Settings tab: the pager's catalog and values
     /// (`IOS_SETTINGS_PLAN.md` §4.4). Attached in `bringUp` like `tasks`.
     let settings = SettingsModel()
+    /// The Files tab: browse, download and upload on both volumes. Attached
+    /// in `bringUp` like `tasks`.
+    let files = FilesModel()
+    /// The Chat tab: every `chat.ask` the phone answered, and the Groq key
+    /// `ChatService` uses.
+    let chat: ChatHistoryModel
+    /// The Voice memos tab: pull + transcribe the pager's recordings.
+    let voiceMemos: VoiceMemosModel
+    /// The battery chart: `evt.battery` and `sys.info` readings, 30 days.
+    let battery = BatteryHistoryModel()
+    /// Last-known state for the Home / Lock Screen widget.
+    private let status = PagerStatusPublisher()
+    /// The notes-sync Live Activity.
+    private let syncActivity = NotesSyncLiveActivity()
+    /// The last `sys.info`, kept after a disconnect (Diagnostics export).
+    private var lastInfo: JSONValue?
+    /// The Inbox tab: messages to the pager, and the clips / find requests
+    /// the pager sent (pasteboard, local notifications).
+    let inbox = InboxModel()
+    /// The Firmware screen: GitHub release images and the OTA install.
+    let firmware = FirmwareModel()
+    /// The connected pager's `sys.hello` caps (empty while disconnected):
+    /// every Phase 4/6 feature checks its cap here so older firmware hides it.
+    @Published private(set) var pagerCaps: [String] = []
+    /// The latest pager screen capture (Diagnostics; attached to the export).
+    @Published private(set) var lastScreenshot: CapturedScreen?
+    /// Messaging, screen capture and OTA on the current link.
+    private var messaging: MessagingService?
+    private var screen: ScreenCaptureService?
+    private var ota: OTAService?
 
     init(telegram: TelegramNative? = nil) {
         self.telegram = telegram
@@ -79,9 +113,16 @@ final class PagerSession: ObservableObject {
             account: GitHubAccountStore(secrets: KeychainSecretStore(service: "PagerCompanion.github")),
             cacheRoot: NotesModel.defaultCacheRoot()
         )
+        let chat = ChatHistoryModel()
+        self.chat = chat
+        voiceMemos = VoiceMemosModel(notes: notes, groqKey: chat.groqKey)
         notes.log = { [weak self] line in self?.appendLog(line) }
         tasks.log = { [weak self] line in self?.appendLog(line) }
         settings.log = { [weak self] line in self?.appendLog(line) }
+        files.log = { [weak self] line in self?.appendLog(line) }
+        voiceMemos.log = { [weak self] line in self?.appendLog(line) }
+        inbox.log = { [weak self] line in self?.appendLog(line) }
+        firmware.log = { [weak self] line in self?.appendLog(line) }
         // The phone's clock or zone moved: re-send it now rather than at the next tick.
         for (name, reason) in [
             (Notification.Name.NSSystemClockDidChange, "phone clock changed"),
@@ -93,6 +134,8 @@ final class PagerSession: ObservableObject {
                 MainActor.assumeIsolated { self?.resyncClockIfConnected(reason: reason) }
             })
         }
+        // App Intents reach the running app's session through this.
+        AppBridge.session = self
     }
 
     /// The phone's Telegram login, for screens that talk to Telegram through
@@ -196,6 +239,7 @@ final class PagerSession: ObservableObject {
         state = .connecting
         await disconnect()
         state = .connecting
+        status.link(.connecting)
         appendLog(line)
         return true
     }
@@ -215,13 +259,18 @@ final class PagerSession: ObservableObject {
         self.session = session
         await registerWeather(on: session)
         await TelegramService(session: session, native: telegram).register()
+        await registerChat(on: session)
+        await registerMessaging(on: session)
         await session.start()
         watchEvents(of: session)
 
         let sys = SysService(session: session)
         do {
-            let hello = try await sys.hello(app: "0.1", caps: ["sys", "weather", "tg"])
+            let hello = try await sys.hello(app: "0.1", caps: ["sys", "weather", "tg", "chat", "clip", "find", "screen"])
             state = .connected(hello: hello)
+            lastHello = hello
+            pagerCaps = Self.caps(of: hello)
+            status.link(.connected, name: hello["name"]?.stringValue)
             reconnectDelay = 2
             appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
 
@@ -237,6 +286,16 @@ final class PagerSession: ObservableObject {
             await startNotes(on: session, pagerCaps: Self.caps(of: hello))
             await tasks.attach(session, pagerCaps: Self.caps(of: hello))
             await settings.attach(session, pagerCaps: Self.caps(of: hello))
+            await files.attach(session, pagerCaps: Self.caps(of: hello))
+            await voiceMemos.attach(session, pagerCaps: Self.caps(of: hello))
+            if pagerCaps.contains("ota") {
+                let ota = OTAService(session: session)
+                self.ota = ota
+                // An image left by an install that rebooted the pager.
+                if await ota.removeLeftover() { appendLog("ota: removed the previous /ota.bin") }
+            }
+            firmware.attach(self)
+            await flushOutbox()
         } catch {
             await disconnect()
             state = .failed(String(describing: error))
@@ -256,6 +315,10 @@ final class PagerSession: ObservableObject {
                                        pagerCaps: pagerCaps)
         await service.onPagerMove { [weak self] result in
             await MainActor.run { self?.notes.pagerMoveFinished(result) }
+        }
+        await service.onSyncEvent { [weak self] params in
+            guard let event = NotesSyncProgressEvent(params: params) else { return }
+            await MainActor.run { self?.syncActivity.handle(event) }
         }
         await service.register()
         if !pagerCaps.contains(NotesSyncService.conditionalDeleteCap) {
@@ -277,27 +340,72 @@ final class PagerSession: ObservableObject {
         weather = service
         await service.register { [weak self] key in
             UserDefaults.standard.set(key, forKey: PagerSession.weatherKeyDefault)
-            Task { @MainActor in self?.appendLog("weather.get for \"\(key)\"") }
+            Task { @MainActor in
+                self?.appendLog("weather.get for \"\(key)\"")
+                // The reply is built after this callback; pick the fetch up shortly.
+                try? await Task.sleep(for: .seconds(2))
+                self?.weatherActivity = service.activity()
+            }
         }
     }
 
-    /// `weather.push` — fetch the forecast for `key` and send it to the pager.
-    func pushWeather(key: String? = nil) async {
+    /// One `ChatService` per link: answers the pager's `chat.audio.begin` /
+    /// `chat.ask` with Groq (the key from the Chat tab; without one the
+    /// pager gets `unauthorized`) and records every turn in the history.
+    private func registerChat(on session: LinkSession) async {
+        let service = ChatService(session: session, backend: GroqChatBackend(apiKey: chat.groqKey))
+        await service.onRecord { [weak self] record in
+            await MainActor.run { self?.chat.append(record) }
+        }
+        await service.register()
+    }
+
+    /// The weather key the pager last asked for (`"auto"`, a city), if any.
+    var weatherKey: String? {
+        UserDefaults.standard.string(forKey: Self.weatherKeyDefault)
+    }
+
+    /// Fetch the forecast for the pager's key without pushing it (the
+    /// Weather tab's preview refresh).
+    func fetchWeatherPreview() async {
+        guard let weather else {
+            appendLog("weather: not connected")
+            return
+        }
+        guard let key = weatherKey else {
+            appendLog("weather: open Weather on the pager once so the phone learns its location")
+            return
+        }
+        do {
+            _ = try await weather.payload(key: key)
+        } catch {
+            appendLog("weather fetch failed: \(error)")
+        }
+        weatherActivity = weather.activity()
+    }
+
+    /// `weather.push` — fetch the forecast for `key` and send it to the
+    /// pager. Returns nil on success, else why it failed (App Intents).
+    @discardableResult
+    func pushWeather(key: String? = nil) async -> String? {
         guard let weather else {
             appendLog("weather push: not connected")
-            return
+            return "No pager is connected."
         }
         // The pager's key ("auto", a city, or the "Sao Paulo" first-boot
         // default) is only known once it has asked.
         guard let key = key ?? UserDefaults.standard.string(forKey: Self.weatherKeyDefault) else {
             appendLog("weather push: open Weather on the pager once so the phone learns its location")
-            return
+            return "Open Weather on the pager once so the phone learns its location."
         }
+        defer { weatherActivity = weather.activity() }
         do {
             try await weather.push(key: key)
             appendLog("weather pushed for \"\(key)\"")
+            return nil
         } catch {
             appendLog("weather push failed: \(error)")
+            return NotesModel.describe(error)
         }
     }
 
@@ -308,7 +416,10 @@ final class PagerSession: ObservableObject {
             return
         }
         do {
-            info = try await sys.info()
+            let info = try await sys.info()
+            self.info = info
+            lastInfo = info
+            if let sample = BatterySample.fromInfo(info, at: Date()) { recordBattery(sample) }
             appendLog("sys.info updated")
         } catch {
             appendLog("sys.info failed: \(error)")
@@ -405,6 +516,15 @@ final class PagerSession: ObservableObject {
         await notes.detach()
         tasks.detach()
         settings.detach()
+        await files.detach()
+        voiceMemos.detach()
+        status.link(.disconnected)
+        await ota?.linkClosed()
+        ota = nil
+        messaging = nil
+        screen = nil
+        pagerCaps = []
+        firmware.detach()
         state = .disconnected
         if wasConnected {
             appendLog("disconnected")
@@ -420,8 +540,14 @@ final class PagerSession: ObservableObject {
                 if event.name == "evt.fs.changed" {
                     self?.notes.fsChanged()
                     self?.tasks.fsChanged()
+                    self?.files.fsChanged()
+                    self?.voiceMemos.fsChanged()
+                }
+                if event.name == "evt.battery" {
+                    self?.batteryEvent(event.params)
                 }
                 await self?.settings.handleEvent(name: event.name, params: event.params)
+                await self?.ota?.handleEvent(name: event.name, params: event.params)
             }
             guard let self, self.session === session else { return }
             await self.disconnect()
@@ -429,6 +555,143 @@ final class PagerSession: ObservableObject {
             self.appendLog("link dropped")
             self.scheduleReconnect()
         }
+    }
+
+    // MARK: - Messaging, screen capture, OTA (PROTOCOL.md §6.5–6.7)
+
+    /// Whether the link is up and the pager advertises `cap`.
+    func has(_ cap: String) -> Bool {
+        guard case .connected = state else { return false }
+        return pagerCaps.contains(cap)
+    }
+
+    /// Install the pager → phone `clip.push` / `phone.find` handlers and the
+    /// `screen.data` receiver; keep the phone → pager calls for this link.
+    private func registerMessaging(on session: LinkSession) async {
+        let messaging = MessagingService(session: session)
+        self.messaging = messaging
+        await messaging.register(
+            onClip: { [weak self] text in await MainActor.run { self?.inbox.pagerClip(text) } },
+            onFind: { [weak self] in await MainActor.run { self?.inbox.pagerFind() } })
+        let screen = ScreenCaptureService(session: session)
+        self.screen = screen
+        await screen.register()
+    }
+
+    private static let notConnected = RPCError(code: "disconnected", msg: "not connected")
+
+    private func messaging(for cap: String) throws -> MessagingService {
+        guard let messaging, has(cap) else {
+            throw pagerCaps.isEmpty ? Self.notConnected
+                : RPCError(code: "unsupported", msg: "this pager firmware has no \"\(cap)\"")
+        }
+        return messaging
+    }
+
+    func notifyPost(_ message: NotifyMessage) async throws -> NotifyResult {
+        let result = try await messaging(for: "notify").notifyPost(message)
+        appendLog("notify.post \(result.dup ? "dup" : "stored")")
+        return result
+    }
+
+    func clipPush(_ text: String) async throws -> Bool {
+        let pasted = try await messaging(for: "clip").clipPush(text)
+        appendLog("clip.push \(pasted ? "pasted" : "kept in inbox")")
+        return pasted
+    }
+
+    func textSend(_ text: String, target: TextTarget) async throws -> Int {
+        let typed = try await messaging(for: "text").textSend(text, target: target)
+        appendLog("text.send \(target.rawValue): \(typed) bytes")
+        return typed
+    }
+
+    func findPager(stop: Bool = false) async throws {
+        try await messaging(for: "find").findPager(stop: stop)
+        appendLog(stop ? "pager.find stop" : "pager.find")
+    }
+
+    /// Send what the share extension queued (App Group outbox) with
+    /// `notify.post`; called on connect and on every return to the foreground.
+    func flushOutbox() async {
+        guard let store = inbox.outbox, has("notify"), let messaging else { return }
+        guard !store.pending().isEmpty else { return }
+        let report = await PagerOutbox.flush(store) { message in try await messaging.notifyPost(message) }
+        appendLog("outbox: sent \(report.sent), dup \(report.duplicates), dropped \(report.dropped.count)"
+                  + (report.stoppedBy.map { ", stopped: \($0.code)" } ?? ""))
+        inbox.outboxChanged()
+    }
+
+    /// `screen.capture` → PNG, kept as `lastScreenshot`.
+    @discardableResult
+    func captureScreen() async throws -> CapturedScreen {
+        guard let screen, has("screen") else { throw Self.notConnected }
+        let image = try await screen.capture()
+        guard let captured = CapturedScreen(image) else {
+            throw RPCError(code: "internal", msg: "could not make a PNG")
+        }
+        lastScreenshot = captured
+        appendLog("screen.capture \(image.width)x\(image.height)")
+        return captured
+    }
+
+    func otaStatus() async throws -> OTAStatus {
+        guard let ota, has("ota") else { throw Self.notConnected }
+        return try await ota.status()
+    }
+
+    func installFirmware(_ image: [UInt8], progress: @escaping @Sendable (OTAProgress) -> Void) async throws -> OTAOutcome {
+        guard let ota, has("ota") else { throw Self.notConnected }
+        appendLog("ota: installing \(image.count) bytes")
+        let outcome = try await ota.install(image, progress: progress)
+        appendLog("ota: \(outcome == .reboot ? "pager rebooting into the new image" : "installed (emulator)")")
+        return outcome
+    }
+
+    /// `evt.battery`: log it, show it on the Dashboard, tell the widget.
+    private func batteryEvent(_ params: JSONValue) {
+        guard let sample = BatterySample.fromEvent(params, at: Date()) else { return }
+        recordBattery(sample)
+        if case .object(var object)? = info {
+            object["batt_pct"] = .number(Double(sample.pct))
+            object["charging"] = .bool(sample.charging)
+            info = .object(object)
+            lastInfo = info
+        }
+    }
+
+    private func recordBattery(_ sample: BatterySample) {
+        battery.record(sample)
+        status.battery(sample)
+    }
+
+    /// The Diagnostics export: app version, last `sys.hello` / `sys.info`,
+    /// battery summary and the session log (`DiagnosticsReport`).
+    func diagnosticsReport() -> DiagnosticsReport {
+        let bundle = Bundle.main
+        let stateText: String
+        switch state {
+        case .disconnected: stateText = "disconnected"
+        case .connecting: stateText = "connecting"
+        case .connected: stateText = "connected"
+        case .failed(let message): stateText = "failed: \(message)"
+        }
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        return DiagnosticsReport(
+            generatedAt: Date(),
+            appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
+            appBuild: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?",
+            system: "iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
+            linkState: stateText,
+            hello: lastHello,
+            info: info ?? lastInfo,
+            battery: battery.summary,
+            log: log.lines.map(\.text),
+            screenshot: lastScreenshot.map {
+                DiagnosticsReport.Screenshot(png: [UInt8]($0.png), width: $0.width, height: $0.height,
+                                             capturedAt: $0.capturedAt)
+            }
+        )
     }
 
     /// Format a duration the way the Diagnostics screen shows it.

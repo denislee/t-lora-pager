@@ -178,6 +178,47 @@ public actor NotesLibrary {
         return written
     }
 
+    /// Write a new note `/notes/<name>` (never overwriting: `invalid_argument`
+    /// "exists" passes through) to internal flash and, with `mirrorSD`, to the
+    /// SD card too, as the pager's own save does (`hw_save_preferred_bytes`:
+    /// internal, then a best-effort SD copy). An SD copy that fails — no
+    /// `/notes` folder yet, the card went out — is retried once after
+    /// `fs.mkdir /notes` and then skipped. Returns the written copies (bytes
+    /// cached).
+    public func create(name: String, bytes: [UInt8], mirrorSD: Bool) async throws -> [NoteEntry] {
+        guard let session = self.session else { throw Self.notConnected }
+        guard let size = UInt32(exactly: bytes.count) else {
+            throw RPCError(code: "invalid_argument", msg: "too large")
+        }
+        await acquire()
+        defer { release() }
+
+        func entry(_ vol: String) -> NoteEntry {
+            NoteEntry(vol: vol, name: name, size: size, mtime: nil,
+                      protected: NoteCrypto.isEncrypted(bytes), crc32: CRC32.checksum(bytes))
+        }
+        let path = NotesIndexer.notesDir + "/" + name
+        try await session.writeFile(vol: "int", path: path, data: bytes, overwrite: false, timeout: readTimeout)
+        var written = [entry("int")]
+        if mirrorSD {
+            do {
+                try await session.writeFile(vol: "sd", path: path, data: bytes, overwrite: false, timeout: readTimeout)
+                written.append(entry("sd"))
+            } catch let error as RPCError where !error.isSDNotMounted && error.code != "disconnected" {
+                let fs = FileService(session: session, timeout: readTimeout)
+                if (try? await fs.mkdir(vol: "sd", path: NotesIndexer.notesDir)) != nil,
+                   (try? await session.writeFile(vol: "sd", path: path, data: bytes, overwrite: false,
+                                                 timeout: readTimeout)) != nil {
+                    written.append(entry("sd"))
+                }
+            } catch {
+                // Best effort, like the pager's redundant SD save.
+            }
+        }
+        for copy in written { cache.store(copy, bytes: bytes, mtime: nil) }
+        return written
+    }
+
     /// Delete a note from the pager: every copy in `copies` (the pager's own
     /// delete removes the internal and SD copies). With `conditional` (the
     /// pager's cap `fs.delete.if`) each copy goes only while it still has the

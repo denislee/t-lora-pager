@@ -896,6 +896,10 @@ void bind_ssh(Registry &r) {
         /* Passwords keep their spaces (no trim), like the SSH app's own prompt. */
         return hal::secret_store("ssh", "pw_enc", v, e, false);
     });
+    bind_secret(r, "ssh.key", "ssh", "key_enc", [](const char *v, std::string *e) {
+        /* PEM framing keeps its line breaks; trimming only the ends is safe. */
+        return hal::secret_store("ssh", "key_enc", v, e, true);
+    });
 }
 
 void power_off_confirmed(bool yes, void *) {

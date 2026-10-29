@@ -108,6 +108,12 @@ void register_fs_handlers(Rpc &rpc);
 void register_weather_handlers(Rpc &rpc);
 /** Register the settings.* handlers on `rpc` (handlers_settings.cpp). */
 void register_settings_handlers(Rpc &rpc);
+/** Register notify.post / clip.push / text.send / pager.find (handlers_notify.cpp). */
+void register_notify_handlers(Rpc &rpc);
+/** Register screen.capture (handlers_screen.cpp). */
+void register_screen_handlers(Rpc &rpc);
+/** Register ota.status / ota.apply (handlers_ota.cpp). */
+void register_ota_handlers(Rpc &rpc);
 /**
  * The settings registry changed `ids` (now at `rev`). Any task. Merged into
  * one evt.settings.changed {"rev","ids"} that service_tick() emits at most

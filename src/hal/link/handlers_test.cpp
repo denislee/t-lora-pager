@@ -19,7 +19,10 @@
 
 #include "apps/telegram_test.h"
 #include "apps/weather_test.h"
+#include "core/system.h"
+#include "core/ui_post.h"
 #include "hal/chat_link.h"
+#include "hal/companion.h"
 #include "hal/link.h"
 #include "hal/link/fs_volume.h"
 #include "hal/link/link_json.h"
@@ -503,9 +506,41 @@ bool handle_test_settings_local(const JsonObject &params, JsonWriter &result, Rp
     return true;
 }
 
+/** test.inbox {} — the stored inbox ring as its /inbox.jsonl text (§6.5), so
+ * the smoke can check what notify.post / clip.push kept. */
+bool handle_test_inbox(const JsonObject &, JsonWriter &result, RpcError &) {
+    result.begin_object()
+        .key("jsonl")
+        .str_val(hal::msg::inbox_encode(hal::companion::inbox_snapshot()))
+        .end_object();
+    return true;
+}
+
+/** test.ui.open {"app"} — open an app the way a home tile does (posted to the
+ * LVGL thread), so the smoke can reach the editor for text.send / clip.push. */
+bool handle_test_ui_open(const JsonObject &params, JsonWriter &result, RpcError &err) {
+    std::string app;
+    if (!params.get_string("app", app) || app.empty()) {
+        err.code = hal_error_code(HalError::InvalidArgument);
+        err.msg = "app required";
+        return false;
+    }
+    core::ui_post([app]() {
+        // queueEnterApp keeps the pointer: hand it a string that outlives us.
+        static std::string s_app;
+        s_app = app;
+        core::System::getInstance().hideMenu();
+        core::System::getInstance().queueEnterApp(s_app.c_str());
+    });
+    result.begin_object().end_object();
+    return true;
+}
+
 }  // namespace
 
 void register_test_handlers(Rpc &rpc) {
+    rpc.handle("test.inbox", handle_test_inbox);
+    rpc.handle("test.ui.open", handle_test_ui_open);
     rpc.handle("test.settings.local", handle_test_settings_local);
     rpc.handle("test.callback", handle_test_callback);
     rpc.handle("test.weather.cache", handle_test_weather_cache);

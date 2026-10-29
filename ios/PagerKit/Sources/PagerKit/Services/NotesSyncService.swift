@@ -445,6 +445,8 @@ public actor NotesSyncService {
     private var tail: Task<Void, Never>?
     /// Told after every pager-initiated move (session log, viewer refresh).
     private var reporter: (@Sendable (NotesMoveResult) async -> Void)?
+    /// Told every `evt.notes.sync` this service sends (the app's Live Activity).
+    private var eventObserver: (@Sendable (JSONValue) async -> Void)?
 
     /// `pagerCaps` are the pager's `sys.hello` caps: without
     /// `"fs.delete.if"` a move uploads and verifies but deletes nothing.
@@ -471,6 +473,12 @@ public actor NotesSyncService {
     /// counts and reasons, never note contents or the token.
     public func onPagerMove(_ reporter: @escaping @Sendable (NotesMoveResult) async -> Void) {
         self.reporter = reporter
+    }
+
+    /// Called with the params of every `evt.notes.sync` sent to the pager,
+    /// after it is queued (progress of pager-initiated jobs).
+    public func onSyncEvent(_ observer: @escaping @Sendable (JSONValue) async -> Void) {
+        self.eventObserver = observer
     }
 
     /// Wait for a job's background work (tests).
@@ -823,5 +831,6 @@ public actor NotesSyncService {
         if let deleted { params["deleted"] = .number(Double(deleted)) }
         if let kept { params["kept"] = .number(Double(kept)) }
         await session.emit("evt.notes.sync", params: .object(params))
+        await eventObserver?(.object(params))
     }
 }

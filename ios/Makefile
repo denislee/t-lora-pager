@@ -50,7 +50,7 @@ LEGACY_DEVICE = $(shell command -v ios-deploy >/dev/null 2>&1 && \
 m = [re.search(r'Found (\S+) .*?, iphoneos, [^,]*, (\d+)\.(\d+)', l) for l in sys.stdin]; \
 print(next((f'{x.group(1)} {x.group(2)}.{x.group(3)}' for x in m if x and int(x.group(2)) < 17), ''))")
 
-.PHONY: gen test test-linux notes-e2e settings-e2e sim device device-run device-console device-log clean clean-device help
+.PHONY: gen test test-linux notes-e2e files-e2e settings-e2e sim device device-run device-console device-log clean clean-device help
 
 # Regenerate PagerCompanion.xcodeproj from project.yml. The .xcodeproj is not
 # committed, so run this after any change to project.yml or to the file layout.
@@ -71,6 +71,17 @@ test-linux:
 # GitHub. Linux/Docker; host networking reaches 127.0.0.1:7600.
 notes-e2e:
 	docker run --rm --network host --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(REPO):/repo -w /repo/ios/NotesE2E swift:6.0-jammy swift run
+
+# Files screen engine end to end against the running emulator (TCP 7600):
+# phone <-> SD round trips with CRC-32 both ways, folder changes, and
+# evt.fs.changed refreshing a cached listing. The emulator's state root
+# (PAGERLINK_FS_ROOT, default /tmp/pagerlink-fs) is mounted so the check can
+# write a file on the pager's side of the SD volume. Linux/Docker.
+FS_ROOT ?= $(or $(PAGERLINK_FS_ROOT),/tmp/pagerlink-fs)
+files-e2e:
+	docker run --rm --network host --user $$(id -u):$$(id -g) -e HOME=/tmp -v $(REPO):/repo \
+		-v $(FS_ROOT):/pagerlink-fs -e FILES_E2E_SD_ROOT=/pagerlink-fs/sd \
+		-w /repo/ios/FilesE2E swift:6.0-jammy swift run
 
 # Every writable pager setting over PagerLink: set, read back, kill -9 the
 # emulator, restart it on the same state, read back again
@@ -154,7 +165,7 @@ clean-device:
 	rm -rf $(DD)
 
 clean:
-	rm -rf PagerKit/.build NotesE2E/.build DerivedData
+	rm -rf PagerKit/.build NotesE2E/.build FilesE2E/.build DerivedData
 
 help:
 	@echo "PagerCompanion — iOS companion app"
@@ -164,6 +175,7 @@ help:
 	@echo "  make test        - run PagerKit tests on this host (macOS: swift test)"
 	@echo "  make test-linux  - run PagerKit tests on Linux in Docker (swift:6.0-jammy)"
 	@echo "  make notes-e2e   - notes viewer/move checks against the running emulator (Docker)"
+	@echo "  make files-e2e   - Files screen round trips + evt.fs.changed against the running emulator (Docker)"
 	@echo "  make settings-e2e - every setting: set, read back, kill -9 + restart, read back (starts the emulator)"
 	@echo "  make sim         - build for the iOS Simulator (xcodebuild)"
 	@echo "  make device      - build, sign and install on the connected iPhone"

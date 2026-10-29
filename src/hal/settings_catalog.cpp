@@ -387,6 +387,12 @@ void build_catalog(Registry &r, const BoardProfile &b) {
         d = make_secret("ssh.password", "ssh", "Password", 128);
         d.supported = b.ssh;
         r.add(d);
+        /* An unencrypted OpenSSH/PEM private key (ed25519, ECDSA or RSA up to
+         * 2048 bits fits), tried before the password. Set from the phone. */
+        d = make_secret("ssh.key", "ssh", "Private key", 3000);
+        d.hint = "Unencrypted OpenSSH or PEM key; tried before the password.";
+        d.supported = b.ssh;
+        r.add(d);
     }
 
     /* --- 3.14 System --- */

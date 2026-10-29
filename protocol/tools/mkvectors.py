@@ -645,6 +645,246 @@ def settings_vectors():
     }
 
 
+# ---- messaging.json (PROTOCOL.md §6.5) -------------------------------------
+#
+# An independent Python statement of the §6.5 rules; the pager
+# (src/hal/companion_msg.cpp, test/test_companion_msg), PagerKit and the Go
+# tool must reach the same verdict for every case.
+
+MSG_LIMITS = {"title": 64, "body": 512, "id": 32, "src": 32, "clip": 4000, "text_send": 2000}
+_ID_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-")
+
+
+def _msg_text(params, key, required, max_len, allowed_ctl):
+    """Returns (value or None, error or None)."""
+    if key not in params:
+        return (None, key + ": required") if required else ("", None)
+    v = params[key]
+    if not isinstance(v, str):
+        return None, key + ": expected string"
+    b = v.encode("utf-8", "surrogatepass")
+    if required and not b:
+        return None, key + ": empty"
+    if len(b) > max_len:
+        return None, key + ": too long"
+    try:
+        b.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, key + ": not valid UTF-8"
+    for ch in v:
+        o = ord(ch)
+        if (o < 0x20 or o == 0x7F) and ch not in allowed_ctl:
+            return None, key + ": control character"
+    return v, None
+
+
+def msg_notify_post(params):
+    title, err = _msg_text(params, "title", True, MSG_LIMITS["title"], "")
+    if err:
+        return None, err
+    body, err = _msg_text(params, "body", False, MSG_LIMITS["body"], "\n")
+    if err:
+        return None, err
+    mid = ""
+    if "id" in params:
+        mid = params["id"]
+        if not isinstance(mid, str):
+            return None, "id: expected string"
+        if not mid:
+            return None, "id: empty"
+        if len(mid.encode()) > MSG_LIMITS["id"]:
+            return None, "id: too long"
+        if any(c not in _ID_CHARS for c in mid):
+            return None, "id: bad character"
+    src, err = _msg_text(params, "src", False, MSG_LIMITS["src"], "")
+    if err:
+        return None, err
+    ts = 0
+    if "ts" in params:
+        ts = params["ts"]
+        if not isinstance(ts, int) or isinstance(ts, bool):
+            return None, "ts: expected integer"
+        if ts < 0 or ts > 0xFFFFFFFF:
+            return None, "ts: out of range"
+    prio = "normal"
+    if "prio" in params:
+        prio = params["prio"]
+        if prio not in ("low", "normal", "high"):
+            return None, "prio: not one of low, normal, high"
+    return {"title": title, "body": body, "id": mid, "src": src, "ts": ts, "prio": prio}, None
+
+
+def msg_clip_push(params):
+    text, err = _msg_text(params, "text", True, MSG_LIMITS["clip"], "\n\t")
+    return (None, err) if err else ({"text": text}, None)
+
+
+def msg_text_send(params):
+    text, err = _msg_text(params, "text", True, MSG_LIMITS["text_send"], "\n\t")
+    if err:
+        return None, err
+    if "target" not in params:
+        return None, "target: required"
+    if params["target"] not in ("editor", "kb"):
+        return None, "target: not one of editor, kb"
+    return {"text": text, "target": params["target"]}, None
+
+
+MSG_CASES = [
+    ("notify.post", "minimal", {"title": "Hi"}),
+    ("notify.post", "full", {"title": "Build done", "body": "line 1\nline 2", "id": "ci:42",
+                             "src": "Shortcuts", "ts": 1760000000, "prio": "high"}),
+    ("notify.post", "low", {"title": "fyi", "prio": "low"}),
+    ("notify.post", "utf8_title", {"title": "Café ☕"}),
+    ("notify.post", "title_max", {"title": "x" * 64}),
+    ("notify.post", "body_max", {"title": "t", "body": "b" * 512}),
+    ("notify.post", "ts_max", {"title": "t", "ts": 4294967295}),
+    ("notify.post", "no_title", {"body": "x"}),
+    ("notify.post", "empty_title", {"title": ""}),
+    ("notify.post", "title_type", {"title": 5}),
+    ("notify.post", "title_long", {"title": "x" * 65}),
+    ("notify.post", "title_long_utf8", {"title": "é" * 33}),
+    ("notify.post", "title_newline", {"title": "a\nb"}),
+    ("notify.post", "title_del", {"title": "a\u007fb"}),
+    ("notify.post", "body_long", {"title": "t", "body": "b" * 513}),
+    ("notify.post", "body_tab", {"title": "t", "body": "a\tb"}),
+    ("notify.post", "id_empty", {"title": "t", "id": ""}),
+    ("notify.post", "id_long", {"title": "t", "id": "i" * 33}),
+    ("notify.post", "id_space", {"title": "t", "id": "a b"}),
+    ("notify.post", "src_long", {"title": "t", "src": "s" * 33}),
+    ("notify.post", "ts_negative", {"title": "t", "ts": -1}),
+    ("notify.post", "ts_big", {"title": "t", "ts": 4294967296}),
+    ("notify.post", "ts_string", {"title": "t", "ts": "1"}),
+    ("notify.post", "prio_bad", {"title": "t", "prio": "urgent"}),
+    ("notify.post", "order_title_first", {"title": "", "prio": "urgent"}),
+    ("clip.push", "clip_ok", {"text": "copy\tthis\nplease"}),
+    ("clip.push", "clip_max", {"text": "c" * 4000}),
+    ("clip.push", "clip_long", {"text": "c" * 4001}),
+    ("clip.push", "clip_empty", {"text": ""}),
+    ("clip.push", "clip_missing", {}),
+    ("clip.push", "clip_cr", {"text": "a\rb"}),
+    ("text.send", "send_editor", {"text": "hello", "target": "editor"}),
+    ("text.send", "send_kb", {"text": "ls -la\n", "target": "kb"}),
+    ("text.send", "send_max", {"text": "t" * 2000, "target": "kb"}),
+    ("text.send", "send_long", {"text": "t" * 2001, "target": "kb"}),
+    ("text.send", "send_no_target", {"text": "x"}),
+    ("text.send", "send_bad_target", {"text": "x", "target": "screen"}),
+    ("text.send", "send_text_first", {"target": "screen"}),
+]
+
+_MSG_FN = {"notify.post": msg_notify_post, "clip.push": msg_clip_push, "text.send": msg_text_send}
+
+
+def _inbox_line(e):
+    o = {}
+    if e.get("id"):
+        o["id"] = e["id"]
+    o["kind"] = e.get("kind", "msg")
+    o["title"] = e["title"]
+    if e.get("body"):
+        o["body"] = e["body"]
+    if e.get("src"):
+        o["src"] = e["src"]
+    if e.get("ts"):
+        o["ts"] = e["ts"]
+    if e.get("rx"):
+        o["rx"] = e["rx"]
+    o["prio"] = e.get("prio", "normal")
+    if e.get("read"):
+        o["read"] = True
+    return json.dumps(o, separators=(",", ":"), ensure_ascii=False)
+
+
+def messaging_vectors():
+    cases = []
+    for method, name, params in MSG_CASES:
+        ok, err = _MSG_FN[method](params)
+        c = {"method": method, "name": name, "params": params,
+             "params_json": json.dumps(params, separators=(",", ":"), ensure_ascii=False)}
+        if err:
+            c["error"] = {"code": "invalid_argument", "msg": err}
+        else:
+            c["ok"] = ok
+        cases.append(c)
+
+    # Inbox ring: adds with dedupe on id and a small cap, then the file text.
+    cap = 3
+    adds = [
+        {"id": "a", "kind": "msg", "title": "one", "rx": 1760000001},
+        {"kind": "msg", "title": "two", "body": "x\ny", "src": "Safari", "ts": 5, "prio": "high"},
+        {"id": "a", "kind": "msg", "title": "one again"},
+        {"kind": "clip", "title": "Clipboard", "body": "pasted", "prio": "low", "read": True},
+        {"id": "b", "kind": "msg", "title": "four"},
+    ]
+    ring, added = [], []
+    for e in adds:
+        if e.get("id") and any(x.get("id") == e["id"] for x in ring):
+            added.append(False)
+            continue
+        ring.append(e)
+        ring = ring[-cap:]
+        added.append(True)
+    text = "".join(_inbox_line(e) + "\n" for e in ring)
+    unread = sum(1 for e in ring if not e.get("read"))
+    # A torn/garbage line and an entry without a title are skipped on load.
+    damaged = text + '{"kind":"msg"}\n' + '{"title":"cut'
+    return {
+        "limits": MSG_LIMITS,
+        "cases": cases,
+        "inbox": {"cap": cap, "adds": adds, "added": added, "jsonl": text, "unread": unread,
+                  "damaged_jsonl": damaged, "damaged_titles": [e["title"] for e in ring]},
+        "delivery": [
+            {"prio": p, "fake_sleep": fs, "can_wake": cw,
+             "banner": (p == "high") or (p == "normal" and not fs),
+             "haptic": (p == "high") or (p == "normal" and not fs),
+             "wake": p == "high" and fs and cw}
+            for p in ("low", "normal", "high") for fs in (False, True) for cw in (False, True)
+        ],
+    }
+
+
+# ---- screen.json (PROTOCOL.md §6.6) ------------------------------------------
+
+def rle565_encode(px):
+    out = bytearray()
+    i = 0
+    while i < len(px):
+        v = px[i]
+        run = 1
+        while i + run < len(px) and px[i + run] == v and run < 0xFFFF:
+            run += 1
+        out += struct.pack("<HH", run, v)
+        i += run
+    return bytes(out)
+
+
+def screen_vectors():
+    images = []
+    def add(name, w, h, px):
+        img = {"name": name, "w": w, "h": h, "rle_hex": rle565_encode(px).hex()}
+        if len(set(px)) == 1 and len(px) > 64:
+            img["fill"] = px[0]  # every pixel this colour (keeps the file small)
+        else:
+            img["pixels_hex"] = struct.pack("<%dH" % len(px), *px).hex()
+        images.append(img)
+    add("single", 1, 1, [0xF800])
+    add("row_runs", 4, 1, [0x001F, 0x001F, 0x07E0, 0xFFFF])
+    add("cross_rows", 3, 2, [0x1234] * 4 + [0x0000] * 2)
+    add("checker", 2, 2, [0xFFFF, 0x0000, 0x0000, 0xFFFF])
+    # One colour longer than a u16 count: the run splits at 65535.
+    add("long_run", 300, 220, [0x0841] * (300 * 220))
+    return {
+        "fmt": "rgb565-rle",
+        "images": images,
+        "malformed": [
+            {"name": "odd_length", "w": 1, "h": 1, "rle_hex": "010000f8ff"},
+            {"name": "zero_count", "w": 1, "h": 1, "rle_hex": "0000ffff0100ffff"},
+            {"name": "too_few", "w": 2, "h": 2, "rle_hex": "0300ffff"},
+            {"name": "too_many", "w": 2, "h": 2, "rle_hex": "0500ffff"},
+        ],
+    }
+
+
 def _openssl_decrypt(openssl, iterations, passphrase, data):
     return subprocess.run(
         [openssl, "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter", str(iterations),
@@ -703,6 +943,8 @@ def render():
         "notes_crypto.json": notes_crypto_vectors(),
         "git_blob.json": git_blob_vectors(),
         "settings.json": settings_vectors(),
+        "messaging.json": messaging_vectors(),
+        "screen.json": screen_vectors(),
     }
 
 

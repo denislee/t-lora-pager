@@ -1,11 +1,14 @@
 import PagerKit
 import SwiftUI
 
-/// Connection state, live `sys.info` (battery, storage, Wi-Fi) and the
-/// Phase-1 actions. Bluetooth is the primary connect path; the emulator TCP
-/// endpoint lives under a disclosure group.
+/// Connection state, quick actions, live `sys.info` (battery, storage,
+/// Wi-Fi) and the connect actions. Bluetooth is the primary connect path;
+/// the emulator TCP endpoint lives under a disclosure group.
 struct DashboardView: View {
     @EnvironmentObject private var session: PagerSession
+    @EnvironmentObject private var settings: SettingsModel
+    /// The root `TabView`'s selection, for "Open pager settings".
+    @Binding var selectedTab: AppTab
 
     @State private var host = TCPTransport.defaultHost
     @State private var port = String(TCPTransport.defaultPort)
@@ -14,6 +17,7 @@ struct DashboardView: View {
         NavigationStack {
             List {
                 connectionSection
+                quickActionsSection
                 if let info = session.info {
                     powerSection(info)
                     storageSection(info)
@@ -39,6 +43,53 @@ struct DashboardView: View {
         }
     }
 
+    /// One-tap actions on a live link (suggestion S3).
+    @ViewBuilder
+    private var quickActionsSection: some View {
+        Section("Quick actions") {
+            Button {
+                Task { await session.syncTime() }
+            } label: {
+                Label("Sync time now", systemImage: "clock.arrow.2.circlepath")
+            }
+            .disabled(!isConnected)
+            Button {
+                Task { await session.pushWeather() }
+            } label: {
+                Label("Refresh weather on the pager", systemImage: "cloud.sun")
+            }
+            .disabled(!isConnected)
+            Button {
+                selectedTab = .settings
+            } label: {
+                Label("Open pager settings", systemImage: "gearshape")
+            }
+            .disabled(!settings.available)
+            // Messaging (PROTOCOL.md §6.5), each behind its cap.
+            if session.has("notify") || session.has("text") || session.has("clip") {
+                Button {
+                    selectedTab = .inbox
+                } label: {
+                    Label("Send text to pager", systemImage: "text.bubble")
+                }
+            }
+            if session.has("find") {
+                HStack {
+                    Button {
+                        Task { try? await session.findPager() }
+                    } label: {
+                        Label("Find pager", systemImage: "dot.radiowaves.left.and.right")
+                    }
+                    Spacer()
+                    Button("Stop") {
+                        Task { try? await session.findPager(stop: true) }
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private func powerSection(_ info: JSONValue) -> some View {
         Section("Power") {
@@ -46,6 +97,9 @@ struct DashboardView: View {
             LabeledContent("Charging", value: yesNo(info["charging"]?.boolValue))
             LabeledContent("VBUS", value: yesNo(info["vbus"]?.boolValue))
             LabeledContent("Uptime", value: uptime(info["uptime_s"]?.intValue))
+            NavigationLink("Battery history") {
+                BatteryHistoryView()
+            }
         }
     }
 
@@ -90,14 +144,6 @@ struct DashboardView: View {
             .disabled(isConnecting)
             Button("Refresh") {
                 Task { await session.refresh() }
-            }
-            .disabled(!isConnected)
-            Button("Sync time") {
-                Task { await session.syncTime() }
-            }
-            .disabled(!isConnected)
-            Button("Push weather") {
-                Task { await session.pushWeather() }
             }
             .disabled(!isConnected)
             Button("Disconnect", role: .destructive) {
@@ -181,6 +227,9 @@ struct DashboardView: View {
 }
 
 #Preview {
-    DashboardView()
-        .environmentObject(PagerSession())
+    let session = PagerSession()
+    return DashboardView(selectedTab: .constant(.dashboard))
+        .environmentObject(session)
+        .environmentObject(session.settings)
+        .environmentObject(session.battery)
 }

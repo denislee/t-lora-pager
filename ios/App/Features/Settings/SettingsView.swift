@@ -15,6 +15,8 @@ struct SettingsView: View {
     /// Settings a custom screen owns, so no generic row is drawn for them.
     private static let handledItems: Set<String> = [
         "wifi.saved", "time.tz", "weather.location", "tg.favorites",
+        // The SSH screen (host, user, port, password, key).
+        "ssh.host", "ssh.user", "ssh.port", "ssh.password", "ssh.key",
     ]
     /// Actions a custom screen owns, so no generic `ActionRow` is drawn.
     private static let handledActions: Set<String> = [
@@ -110,6 +112,12 @@ struct SettingsView: View {
         case "tg":
             NavigationLink("Favorite chats") {
                 TelegramFavoritesView()
+            }
+        case "ssh":
+            NavigationLink {
+                SSHSettingsView()
+            } label: {
+                LabeledContent("SSH host & key", value: settings.store.value("ssh.host")?.stringValue ?? "")
             }
         case "nsync":
             Button {

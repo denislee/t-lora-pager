@@ -296,7 +296,8 @@ private struct ResultBox: Identifiable {
 
 /// The passphrase prompt. One entry unlocks every encrypted note; the value is
 /// never logged and is cleared as soon as it is submitted.
-private struct UnlockNotesView: View {
+/// Shared with the Journal tab.
+struct UnlockNotesView: View {
     @EnvironmentObject private var notes: NotesModel
     @Environment(\.dismiss) private var dismiss
 

@@ -209,6 +209,9 @@ public actor ChatService {
     private var history: [ChatTurn] = []
     private var uploads: [UInt16: Upload] = [:]
     private var uploadOrder: [UInt16] = []
+    /// Told every answered turn, reset and failed ask (the phone's chat
+    /// history, `ChatHistoryStore`).
+    private var recorder: (@Sendable (ChatRecord) async -> Void)?
 
     public init(session: LinkSession, backend: ChatBackend, audioWait: Duration = ChatService.defaultAudioWait,
                 askBudget: Duration = ChatService.defaultAskBudget) {
@@ -232,6 +235,17 @@ public actor ChatService {
 
     /// Turns currently held (user + assistant).
     public var historyCount: Int { history.count }
+
+    /// Report every `chat.ask` outcome to `recorder`: a turn (prompt or
+    /// transcript + reply), a `reset`, or a failure with its message. The
+    /// RES goes to the pager after `recorder` returns.
+    public func onRecord(_ recorder: @escaping @Sendable (ChatRecord) async -> Void) {
+        self.recorder = recorder
+    }
+
+    private func record(_ record: ChatRecord) async {
+        await recorder?(record)
+    }
 
     // MARK: - chat.audio.begin
 
@@ -329,6 +343,7 @@ public actor ChatService {
 
         if reset?.boolValue == true {
             history.removeAll()
+            await record(ChatRecord(kind: .reset))
             return ["reply": ""]
         }
 
@@ -351,7 +366,9 @@ public actor ChatService {
             do {
                 transcript = try await backend.transcribe(wav: wav, deadline: deadline)
             } catch {
-                throw Self.backendFailure(error, stage: "stt")
+                let failure = Self.backendFailure(error, stage: "stt")
+                await record(ChatRecord(kind: .error, voice: true, error: failure.msg))
+                throw failure
             }
             prompt = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -370,9 +387,12 @@ public actor ChatService {
         do {
             reply = try await backend.complete(history: snapshot, deadline: deadline)
         } catch {
-            throw Self.backendFailure(error, stage: "llm")
+            let failure = Self.backendFailure(error, stage: "llm")
+            await record(ChatRecord(kind: .error, prompt: prompt, voice: !transcript.isEmpty, error: failure.msg))
+            throw failure
         }
         history.append(ChatTurn(role: "assistant", content: HTTP.truncate(reply, Self.maxContent)))
+        await record(ChatRecord(kind: .turn, prompt: prompt, voice: !transcript.isEmpty, reply: reply))
 
         var result: [String: JSONValue] = ["reply": .string(reply)]
         if !transcript.isEmpty { result["transcript"] = .string(transcript) }

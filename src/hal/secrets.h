@@ -52,13 +52,13 @@ bool secret_mask_peek(const char *ns, const char *key, std::string &out);
 
 /* Derive and pin (notes_crypto_pin_key) the key of every secret slot in the
  * pinned table that holds ciphertext — Telegram token, Notes Sync token, SSH
- * password. One PBKDF2 per slot present; BLOCKS, worker only. Called by
+ * password and key. One PBKDF2 per slot present; BLOCKS, worker only. Called by
  * notes_crypto_prewarm_fixed() after an unlock. secret_store re-pins a slot
  * it rewrites (from the key the encrypt just cached, no extra derive). */
 void secret_prewarm_pinned();
 
 /* Raw access to every encrypted secret slot (the pinned table: Telegram
- * token, Notes Sync token, SSH password) for the bulk passphrase operations in
+ * token, Notes Sync token, SSH password, SSH key) for the bulk passphrase operations in
  * notes_crypto.cpp, which must re-encrypt (change) or erase (disable) them in
  * the same flow as the notes. No crypto here: these move ciphertext only.
  * Slot `i` is in [0, secret_slot_count()). */

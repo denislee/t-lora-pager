@@ -22,6 +22,7 @@ void register_all() {
     am.registerApp(make_notes_sync_app());
     am.registerApp(make_ssh_app());
     am.registerApp(make_chat_app());
+    am.registerApp(make_inbox_app());
     // Drop any plaintext token (GitHub PAT, Telegram bearer) left over from
     // a pre-encryption-required build; doing it here means it runs exactly
     // once per boot, before any UI can read the legacy slot. The namespaces

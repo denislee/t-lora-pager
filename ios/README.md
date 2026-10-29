@@ -26,7 +26,7 @@ services; it has no UIKit/SwiftUI imports and builds (and tests) without Xcode.
 ios/
   README.md                       this file
   project.yml                     XcodeGen spec (source of truth)
-  Makefile                        gen / test / test-linux / notes-e2e / settings-e2e / sim / device* / clean*
+  Makefile                        gen / test / test-linux / notes-e2e / files-e2e / settings-e2e / sim / device* / clean*
   .swift-format                   swift-format style config
   Config/
     Base.xcconfig                 shared build settings
@@ -41,14 +41,27 @@ ios/
     Notes/KeychainSecretStore.swift  the GitHub PAT in the Keychain (this device only)
     Session/LocationProvider.swift  CoreLocation fix + city for weather "auto"
     Telegram/…                    TDLib JSON client + the phone's Telegram login
-    Features/RootView.swift       Dashboard / Notes / Tasks / Telegram / Settings / Diagnostics tabs
-    Features/Dashboard/…          connection + sys.info
+    Files/, Voice/, Chat/, Battery/  per-tab models (FilesModel, VoiceMemosModel, ChatHistoryModel,
+                                  BatteryHistoryModel), owned by PagerSession like TasksModel
+    Status/PagerStatusPublisher.swift  widget snapshot (App Group) + notes-sync Live Activity
+    Features/RootView.swift       Dashboard / Notes / Files / Journal / Settings, then (More) Tasks /
+                                  Weather / Voice memos / Chat / Telegram / Diagnostics
+    Features/Dashboard/…          connection, quick actions, sys.info, battery history link
+    Features/Files/…              browse Internal/SD, download + preview/share, upload (Files, Photos)
+    Features/Journal/…            notes by day, calendar, append to today
+    Features/Weather/…            location source, last fetch/push, Push now, pager-style preview
+    Features/Voice/…              pager voice memos → Whisper transcript → note / journal
+    Features/Chat/…               chat.ask history (search, copy, export) + Groq API key
+    Features/Battery/…            battery chart (Swift Charts)
     Features/Notes/…              note list + detail/editor, unlock, sync sheets, GitHub settings
     Features/Tasks/…              task list: check off, add, rename, reorder, delete
     Features/Telegram/…           api keys, phone/code/2FA login, log out
     Features/Settings/…           the pager's settings: generic form + Wi-Fi, time zone,
                                   weather location, Telegram favorites screens
-    Features/Diagnostics/…        ping + session log
+    Features/Diagnostics/…        ping, diagnostics export (ShareLink), session log
+  Shared/                         types compiled into the app and PagerWidgets (Live Activity attributes)
+  Widgets/                        PagerWidgets extension: status widget + notes-sync Live Activity
+  ShareExtension/                 PagerShare extension: "Share -> Pager" into the App Group outbox
   PagerKit/                       Swift package (no UIKit/SwiftUI)
     Sources/PagerKit/…            Transport (BLE, TCP) / Link / RPC / Model /
                                   Services (sys, weather, tg + TDLib, chat, notes
@@ -58,6 +71,7 @@ ios/
                                   settings (SettingsService, SettingsStore)
     Tests/PagerKitTests/…         XCTest (reads ../../protocol/vectors)
   NotesE2E/                       notes viewer + move checks against the emulator
+  FilesE2E/                       Files engine: SD round trips with CRC-32, folders, evt.fs.changed
   SettingsE2E/                    every pager setting: set, read back, kill -9, read back
 ```
 
@@ -116,6 +130,11 @@ checkout still generates and builds (unsigned, Simulator-only).
 
   ```sh
   make -C ios notes-e2e   # ios/NotesE2E: listing order, both sync triggers, edit during verify
+  ```
+
+  ```sh
+  make -C ios files-e2e   # ios/FilesE2E: phone <-> SD round trips (CRC-32), folders,
+                          # evt.fs.changed; mounts $PAGERLINK_FS_ROOT (default /tmp/pagerlink-fs)
   ```
 
 - Every pager setting end to end (Linux via Docker, or macOS). Starts the
@@ -266,6 +285,21 @@ falls back to the bridge the pager sends, if any.
   (`make settings-e2e`); `SettingsModel`, `SettingsView` and the custom
   screens were written on Linux and have not been built with Xcode or run in
   the Simulator yet (`IOS_SETTINGS_PLAN.md` W10, W11).
+- **Companion screens (Files, Weather, Journal, Voice memos, Chat history,
+  battery chart, diagnostics export, widget + Live Activity):** the PagerKit
+  parts (`FileBrowser`, `WeatherForecast`/`WeatherActivity`, `Journal`,
+  `VoiceMemoImporter`, `ChatHistoryStore`, `BatteryHistoryStore`,
+  `PagerStatusStore`, `DiagnosticsReport`) are tested on Linux
+  (`make test-linux`); the SwiftUI views, the PagerWidgets extension and the
+  App Group were written on Linux and have not been built with Xcode yet, and
+  `make files-e2e` has not been run against the emulator.
+- **Phase 4/6 screens (Inbox, share extension, App Intents, screen
+  capture, Firmware/OTA, SSH key):** PagerKit `MessagingService` (every
+  `vectors/messaging.json` verdict), `PagerOutbox`, `RLE565` /
+  `ScreenCaptureService` (`vectors/screen.json`), `OTAService`,
+  `FirmwareReleases` and `SSHKeyCheck` are tested on Linux; the app and
+  extension code (`App/Inbox`, `App/Intents`, `ShareExtension/`, Firmware,
+  SSH and screen views) has not been built with Xcode yet.
 - **The app target builds on macOS** (`make gen && make sim`, Xcode 26, no
   warnings under strict concurrency). `TCPTransportTests` drives
   `TCPTransport` + `LinkSession` against a loopback-socket pager: connect

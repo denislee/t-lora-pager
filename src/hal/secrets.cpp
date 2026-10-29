@@ -55,6 +55,7 @@ void mask_forget(const char *ns, const char *key)
  *   ui_telegram.cpp   TG_PREFS_NS "tgbridge"  / "token_enc"
  *   ui_notes_sync.cpp NSYNC_PREFS_NS "notesync" / "token_enc"
  *   ui_ssh.cpp        SSH_NS "ssh"           / SSH_PW_KEY "pw_enc"
+ *   ui_ssh.cpp        SSH_NS "ssh"           / SSH_KEY_KEY "key_enc" (private key)
  * This is also the full list of encrypted secret slots: change-passphrase
  * re-encrypts and disable erases exactly these (secret_slot_*, P7.7), so a
  * new secret_store slot MUST be added here or it stops decrypting after the
@@ -64,6 +65,7 @@ constexpr PinnedSlot kPinnedSlots[] = {
     {"tgbridge", "token_enc"},
     {"notesync", "token_enc"},
     {"ssh",      "pw_enc"},
+    {"ssh",      "key_enc"},
 };
 static_assert(NC_PIN_SECRET_FIRST + sizeof(kPinnedSlots) / sizeof(kPinnedSlots[0]) <= NC_PIN_N,
               "notes_crypto.h NC_PIN_N too small for the pinned secret slots");

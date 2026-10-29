@@ -6,7 +6,8 @@
  *
  * State reset on onStop (editor_exit):
  *   widgets: menu, text_area, quit_btn, word_count_label, float_bar,
- *            float_sync_btn, float_sync_icon, float_journal_btn
+ *            float_sync_btn, float_sync_icon, float_journal_btn,
+ *            float_phone_btn
  *                                       — destroyed via lv_obj_del then nulled
  *   unlock:  s_unlock_gate              — nulled, so an unlock prompt that
  *                                          completes after exit builds nothing
@@ -16,6 +17,8 @@
  *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
  *   state:   s_pending_open_path        — consumed by editor_build_ui
  *            s_last_space_pos           — reset (iOS "." shortcut tracker)
+ *   phone:   ui_companion editor sink   — cleared (text.send / clip.push
+ *                                          stop landing here)
  * If you add a new cached LVGL pointer or timer, list it above AND
  * extend editor_exit() — the debounce timer in particular will fire
  * into a destroyed textarea if leaked.
@@ -29,6 +32,7 @@
 #include "../hal/storage.h"
 #include "../hal/text_shortcuts.h"
 #include "../hal/wireless.h"
+#include "../ui_companion.h"
 #include "app_registry.h"
 
 using std::string;
@@ -44,6 +48,7 @@ static lv_obj_t *float_bar = NULL;
 static lv_obj_t *float_sync_btn = NULL;
 static lv_obj_t *float_sync_icon = NULL;
 static lv_obj_t *float_journal_btn = NULL;
+static lv_obj_t *float_phone_btn = NULL;
 static lv_timer_t *sync_pill_timer = NULL;
 static int sync_pill_last_state = -1;
 static string current_file_path = "";
@@ -332,6 +337,16 @@ static void float_btn_click_cb(lv_event_t *e)
     core::System::getInstance().queueEnterApp(app_name);
 }
 
+/* "To phone" pill: the whole note to the phone's clipboard (clip.push,
+ * PROTOCOL.md §6.5). Disabled with no phone connected. */
+static void phone_btn_click_cb(lv_event_t *e)
+{
+    lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
+    hw_feedback();
+    if (!text_area || (btn && lv_obj_has_state(btn, LV_STATE_DISABLED))) return;
+    ui_companion_send_clip(lv_textarea_get_text(text_area));
+}
+
 /* Notes Sync needs a route out: WiFi (GitHub / the hub) or the phone over
  * PagerLink (H2.5). The pill is gated on that live state. Disabled state
  * blocks input and makes encoder nav skip the pill, matching the behaviour of
@@ -367,6 +382,10 @@ static void apply_sync_pill_state(bool connected)
 static void sync_pill_tick(lv_timer_t *t)
 {
     (void)t;
+    if (float_phone_btn) {
+        if (hw_link_connected()) lv_obj_remove_state(float_phone_btn, LV_STATE_DISABLED);
+        else lv_obj_add_state(float_phone_btn, LV_STATE_DISABLED);
+    }
     int now = sync_route_up() ? 1 : 0;
     if (now != sync_pill_last_state) {
         apply_sync_pill_state(now != 0);
@@ -382,6 +401,7 @@ static void pill_focused_cb(lv_event_t *e)
     (void)e;
     if (float_sync_btn)    lv_obj_set_style_opa(float_sync_btn,    LV_OPA_COVER, 0);
     if (float_journal_btn) lv_obj_set_style_opa(float_journal_btn, LV_OPA_COVER, 0);
+    if (float_phone_btn)   lv_obj_set_style_opa(float_phone_btn,   LV_OPA_COVER, 0);
 }
 
 /* Re-evaluate visibility once LVGL has finished moving focus. We defer via
@@ -395,10 +415,12 @@ static void pill_recheck_async(void *unused)
     if (!float_sync_btn || !float_journal_btn) return;
     lv_group_t *g = lv_obj_get_group(float_sync_btn);
     lv_obj_t *focused = g ? lv_group_get_focused(g) : NULL;
-    bool show = (focused == float_sync_btn || focused == float_journal_btn);
+    bool show = (focused == float_sync_btn || focused == float_journal_btn ||
+                 (float_phone_btn && focused == float_phone_btn));
     lv_opa_t target = show ? LV_OPA_COVER : LV_OPA_TRANSP;
     lv_obj_set_style_opa(float_sync_btn,    target, 0);
     lv_obj_set_style_opa(float_journal_btn, target, 0);
+    if (float_phone_btn) lv_obj_set_style_opa(float_phone_btn, target, 0);
 }
 
 static void pill_defocused_cb(lv_event_t *e)
@@ -553,12 +575,29 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_add_event_cb(float_sync_btn, pill_defocused_cb,
                         LV_EVENT_DEFOCUSED, NULL);
 
+    float_phone_btn = make_editor_pill(float_bar, LV_SYMBOL_UPLOAD,
+                                       LV_PALETTE_PURPLE);
+    lv_obj_add_event_cb(float_phone_btn, phone_btn_click_cb,
+                        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(float_phone_btn, pill_focused_cb,
+                        LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(float_phone_btn, pill_defocused_cb,
+                        LV_EVENT_DEFOCUSED, NULL);
+    if (!hw_link_connected()) lv_obj_add_state(float_phone_btn, LV_STATE_DISABLED);
+
     /* Pills join the default group so the encoder can rotate to them past
      * the textarea. They start invisible and fade in only on focus. */
     if (lv_group_t *def_grp = lv_group_get_default()) {
         lv_group_add_obj(def_grp, float_journal_btn);
         lv_group_add_obj(def_grp, float_sync_btn);
+        lv_group_add_obj(def_grp, float_phone_btn);
     }
+
+    /* Phone text (text.send "editor", clip.push) lands at the cursor while
+     * the editor is open; the textarea's VALUE_CHANGED marks the note dirty. */
+    ui_companion_set_editor_sink([](const std::string &t) {
+        if (text_area) lv_textarea_add_text(text_area, t.c_str());
+    });
 
     /* Apply the initial route-gated state for the Sync pill and start a
      * lightweight tick that re-evaluates it — the user can flip WiFi from
@@ -662,6 +701,8 @@ static void ui_text_editor_exit()
     float_sync_btn = NULL;
     float_sync_icon = NULL;
     float_journal_btn = NULL;
+    float_phone_btn = NULL;
+    ui_companion_set_editor_sink(nullptr);
 
     ui_app_widgets_del(&menu, &quit_btn);
     text_area = NULL;

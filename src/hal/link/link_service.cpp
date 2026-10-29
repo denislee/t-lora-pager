@@ -372,6 +372,9 @@ void service_on_connect(const TransportOps &ops) {
     register_fs_handlers(*s.rpc);
     register_weather_handlers(*s.rpc);
     register_settings_handlers(*s.rpc);
+    register_notify_handlers(*s.rpc);
+    register_screen_handlers(*s.rpc);
+    register_ota_handlers(*s.rpc);
 #ifndef ARDUINO
     register_test_handlers(*s.rpc);
 #endif

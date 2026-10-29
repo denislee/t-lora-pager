@@ -72,6 +72,12 @@ void register_sys_handlers(Rpc &rpc) {
             .str_val("fs.delete.if")  // fs.delete honours size/crc32 (§6.1)
             .str_val("weather")
             .str_val("settings")
+            .str_val("notify")  // §6.5
+            .str_val("clip")
+            .str_val("text")
+            .str_val("find")
+            .str_val("screen")  // §6.6
+            .str_val("ota")     // §6.7
             .end_array()
             .key("mtu")
             .uint_val(static_cast<uint64_t>(service_packet_size() + 3))

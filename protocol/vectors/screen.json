@@ -1,0 +1,66 @@
+{
+ "fmt": "rgb565-rle",
+ "images": [
+  {
+   "h": 1,
+   "name": "single",
+   "pixels_hex": "00f8",
+   "rle_hex": "010000f8",
+   "w": 1
+  },
+  {
+   "h": 1,
+   "name": "row_runs",
+   "pixels_hex": "1f001f00e007ffff",
+   "rle_hex": "02001f000100e0070100ffff",
+   "w": 4
+  },
+  {
+   "h": 2,
+   "name": "cross_rows",
+   "pixels_hex": "341234123412341200000000",
+   "rle_hex": "0400341202000000",
+   "w": 3
+  },
+  {
+   "h": 2,
+   "name": "checker",
+   "pixels_hex": "ffff00000000ffff",
+   "rle_hex": "0100ffff020000000100ffff",
+   "w": 2
+  },
+  {
+   "fill": 2113,
+   "h": 220,
+   "name": "long_run",
+   "rle_hex": "ffff4108d1014108",
+   "w": 300
+  }
+ ],
+ "malformed": [
+  {
+   "h": 1,
+   "name": "odd_length",
+   "rle_hex": "010000f8ff",
+   "w": 1
+  },
+  {
+   "h": 1,
+   "name": "zero_count",
+   "rle_hex": "0000ffff0100ffff",
+   "w": 1
+  },
+  {
+   "h": 2,
+   "name": "too_few",
+   "rle_hex": "0300ffff",
+   "w": 2
+  },
+  {
+   "h": 2,
+   "name": "too_many",
+   "rle_hex": "0500ffff",
+   "w": 2
+  }
+ ]
+}

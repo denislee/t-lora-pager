@@ -57,6 +57,7 @@ public struct WeatherService: Sendable {
     private let locator: (@Sendable () async throws -> WeatherPlace)?
     private let now: @Sendable () -> Date
     private let cache = WeatherCache()
+    private let log = WeatherActivityLog()
 
     public init(
         session: LinkSession,
@@ -79,14 +80,32 @@ public struct WeatherService: Sendable {
                 throw RPCError(code: "invalid_argument", msg: "key must be 1..64 bytes")
             }
             onRequest?(key)
+            service.log.request(key: key, at: service.now())
             return try await service.payload(key: key)
         }
     }
 
     /// Fetch the forecast for `key` and send it with `weather.push`.
     public func push(key: String) async throws {
-        guard case .object(let params) = try await payload(key: key) else { return }
-        _ = try await session.call("weather.push", params: params)
+        do {
+            guard case .object(let params) = try await payload(key: key) else { return }
+            _ = try await session.call("weather.push", params: params)
+            log.push(WeatherActivity.Push(at: now(), key: key, error: nil))
+        } catch {
+            log.push(WeatherActivity.Push(at: now(), key: key, error: Self.describe(error)))
+            throw error
+        }
+    }
+
+    /// What this service last fetched, pushed and was asked for (the
+    /// Weather screen). Shared by copies of one service.
+    public func activity() -> WeatherActivity {
+        log.snapshot()
+    }
+
+    private static func describe(_ error: Error) -> String {
+        if let rpc = error as? RPCError { return rpc.msg.isEmpty ? rpc.code : "\(rpc.code): \(rpc.msg)" }
+        return "\(error)"
     }
 
     /// The ForecastPayload for `key`.
@@ -94,7 +113,7 @@ public struct WeatherService: Sendable {
         guard Self.validKey(key) else {
             throw RPCError(code: "invalid_argument", msg: "key must be 1..64 bytes")
         }
-        let place = try await resolve(key: key)
+        let (place, source) = try await resolveWithSource(key: key)
         let url = Self.forecastQuery(lat: place.lat, lon: place.lon)
         let cached = cache.forecast(url.absoluteString, now: now(), ttl: Self.forecastTTL)
         let body: Data
@@ -110,7 +129,10 @@ public struct WeatherService: Sendable {
             throw RPCError(code: "http_error", msg: "forecast: bad response")
         }
         if cached == nil { cache.store(forecast: body, for: url.absoluteString, at: now()) }
-        return Self.build(key: key, place: place, forecast: forecast, ts: now())
+        let built = Self.build(key: key, place: place, forecast: forecast, ts: now())
+        log.fetch(WeatherActivity.Fetch(at: now(), key: key, city: place.city, source: source,
+                                        fromCache: cached != nil, payload: built))
+        return built
     }
 
     // MARK: - Location
@@ -161,13 +183,18 @@ public struct WeatherService: Sendable {
     }
 
     func resolve(key: String) async throws -> WeatherPlace {
+        try await resolveWithSource(key: key).place
+    }
+
+    /// The place for `key` and where it came from.
+    func resolveWithSource(key: String) async throws -> (place: WeatherPlace, source: WeatherActivity.Source) {
         if key == "auto" {
             if let locator, let place = try? await locator() {
-                return place
+                return (place, .phoneLocation)
             }
-            return try await ipPlace()
+            return (try await ipPlace(), .ipGeolocation)
         }
-        return try await geocode(city: key)
+        return (try await geocode(city: key), .city)
     }
 
     private func geocode(city: String) async throws -> WeatherPlace {
@@ -354,5 +381,96 @@ final class WeatherCache: @unchecked Sendable {
             if forecasts.count >= Self.maxEntries, forecasts[key] == nil { forecasts.removeAll() }
             forecasts[key] = (body, at)
         }
+    }
+}
+
+/// What a `WeatherService` last did, for the Weather screen: the last
+/// forecast built (with where its location came from), the last
+/// `weather.push` and the last `weather.get` the pager sent.
+public struct WeatherActivity: Sendable, Equatable {
+    /// Where the forecast's location came from.
+    public enum Source: String, Sendable, Equatable, Codable {
+        /// Key `"auto"`, the phone's CoreLocation fix.
+        case phoneLocation
+        /// Key `"auto"` without a phone fix: IP geolocation.
+        case ipGeolocation
+        /// Any other key: a city name geocoded with Open-Meteo.
+        case city
+
+        /// How the Weather screen names it.
+        public var label: String {
+            switch self {
+            case .phoneLocation: return "Phone location (GPS)"
+            case .ipGeolocation: return "IP geolocation"
+            case .city: return "City"
+            }
+        }
+    }
+
+    /// One built ForecastPayload.
+    public struct Fetch: Sendable, Equatable {
+        public let at: Date
+        public let key: String
+        public let city: String
+        public let source: Source
+        /// Served from the 10-minute forecast cache, not a new request.
+        public let fromCache: Bool
+        public let payload: JSONValue
+
+        public init(at: Date, key: String, city: String, source: Source, fromCache: Bool, payload: JSONValue) {
+            self.at = at
+            self.key = key
+            self.city = city
+            self.source = source
+            self.fromCache = fromCache
+            self.payload = payload
+        }
+    }
+
+    /// One `weather.push` attempt; `error` nil when the pager took it.
+    public struct Push: Sendable, Equatable {
+        public let at: Date
+        public let key: String
+        public let error: String?
+
+        public init(at: Date, key: String, error: String?) {
+            self.at = at
+            self.key = key
+            self.error = error
+        }
+    }
+
+    /// One `weather.get` from the pager.
+    public struct Request: Sendable, Equatable {
+        public let at: Date
+        public let key: String
+
+        public init(at: Date, key: String) {
+            self.at = at
+            self.key = key
+        }
+    }
+
+    public var lastFetch: Fetch?
+    public var lastPush: Push?
+    public var lastRequest: Request?
+
+    public init(lastFetch: Fetch? = nil, lastPush: Push? = nil, lastRequest: Request? = nil) {
+        self.lastFetch = lastFetch
+        self.lastPush = lastPush
+        self.lastRequest = lastRequest
+    }
+}
+
+/// Lock-protected `WeatherActivity` shared by copies of one `WeatherService`.
+final class WeatherActivityLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = WeatherActivity()
+
+    func snapshot() -> WeatherActivity { lock.withLock { value } }
+    func fetch(_ fetch: WeatherActivity.Fetch) { lock.withLock { value.lastFetch = fetch } }
+    func push(_ push: WeatherActivity.Push) { lock.withLock { value.lastPush = push } }
+    func request(key: String, at: Date) {
+        lock.withLock { value.lastRequest = WeatherActivity.Request(at: at, key: key) }
     }
 }

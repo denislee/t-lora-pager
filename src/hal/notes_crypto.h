@@ -66,7 +66,7 @@ void notes_crypto_prewarm();
 enum : int {
     NC_PIN_JOURNAL_INDEX = 0,   /* /journal_idx.bin (ui_journal.cpp) */
     NC_PIN_SECRET_FIRST  = 1,   /* secrets.cpp kPinnedSlots, in table order */
-    NC_PIN_N             = 4,
+    NC_PIN_N             = 5,
 };
 
 /* Pin the session key for the salt of OpenSSL-`enc` blob `ct` (only its

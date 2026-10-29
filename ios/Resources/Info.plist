@@ -31,6 +31,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Pager Companion uses your location for the pager's "auto" weather forecast.</string>
 	<key>UIApplicationSceneManifest</key>

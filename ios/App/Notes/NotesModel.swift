@@ -291,6 +291,84 @@ final class NotesModel: ObservableObject {
         allNotes.removeAll { $0.name == row.entry.name }
     }
 
+    // MARK: - New notes (Journal tab, voice memos)
+
+    /// Why a new note was not written.
+    enum NewNoteError: Error, Equatable {
+        /// The pager's notes are encrypted and the passphrase is not entered:
+        /// a new note would have to go up as plaintext.
+        case locked
+    }
+
+    /// Whether a new note can be written now (link up, no move running).
+    var canCreate: Bool { connected && pagerHasFS && syncStage == .idle }
+
+    /// Write `text` as a new note `/notes/<preferredName>` (a free variant
+    /// `<stem>_2.txt`, … when the name is taken), on internal flash and,
+    /// with a card in, the SD card, as the pager's editor saves. Encrypted
+    /// with the held passphrase when the notes are unlocked; while encrypted
+    /// notes are locked it throws `NewNoteError.locked` rather than add a
+    /// plaintext note beside them. Returns the leaf name written.
+    @discardableResult
+    func createNote(text: String, preferredName: String) async throws -> String {
+        let bytes = try await newNoteBytes(text)
+        var taken = Set(allNotes.map(\.name))
+        for _ in 0..<2 {
+            let name = Self.freeName(preferredName, taken: taken)
+            do {
+                let written = try await library.create(name: name, bytes: bytes, mirrorSD: sdMounted)
+                log("notes: created 1 note (\(written.count) copies)")
+                await refresh()
+                for copy in written {
+                    texts[copy.id] = text
+                    bases[copy.id] = Self.base(of: bytes)
+                    update(copy.id) { row in
+                        row.preview = NotePreview.firstLine(text)
+                        row.locked = false
+                    }
+                }
+                return name
+            } catch let error as RPCError where error.code == "invalid_argument" && error.msg == "exists" {
+                taken.insert(name)  // listed before the pager saved it: take the next one
+            }
+        }
+        throw RPCError(code: "invalid_argument", msg: "exists")
+    }
+
+    /// The Journal's "Append to today": add `text` as a new paragraph to
+    /// today's newest entry (`Journal.todayEntry`), or start today's first
+    /// entry. Same conflict rules as an edit (`changedOnPager`).
+    func appendToToday(_ text: String, now: Date = Date()) async throws {
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: now)
+        if let entry = Journal.todayEntry(rows.map(\.entry), today: today),
+           let row = rows.first(where: { $0.id == entry.id }) {
+            if row.locked || (row.entry.protected == true && decryptor == nil) { throw NewNoteError.locked }
+            let existing = try await self.text(for: row)
+            guard let fresh = rows.first(where: { $0.id == entry.id }) else { throw NotesLibrary.EditError.changedOnPager }
+            try await save(fresh, text: Journal.appending(text, to: existing))
+        } else {
+            try await createNote(text: Journal.appending(text, to: ""), preferredName: Journal.noteName(for: now))
+        }
+    }
+
+    /// The bytes a new note is written as (see `createNote`).
+    private func newNoteBytes(_ text: String) async throws -> [UInt8] {
+        if let decryptor {
+            return try await Task.detached(priority: .userInitiated) { try decryptor.encrypt(text) }.value
+        }
+        if rows.contains(where: { $0.locked || $0.entry.protected == true }) { throw NewNoteError.locked }
+        return Array(text.utf8)
+    }
+
+    /// `name`, or `<stem>_2.txt`, `<stem>_3.txt`, … — the first not in `taken`.
+    nonisolated static func freeName(_ name: String, taken: Set<String>) -> String {
+        guard taken.contains(name) else { return name }
+        let stem = name.hasSuffix(".txt") ? String(name.dropLast(4)) : name
+        var n = 2
+        while taken.contains("\(stem)_\(n).txt") { n += 1 }
+        return "\(stem)_\(n).txt"
+    }
+
     // MARK: - Sync (move to GitHub)
 
     /// The first sync with encrypted notes shows the ciphertext notice once.
@@ -472,6 +550,19 @@ final class NotesModel: ObservableObject {
         if let error = error as? RPCError { return error.msg.isEmpty ? error.code : "\(error.code): \(error.msg)" }
         if let error = error as? NotesLibrary.EditError, error == .changedOnPager {
             return "the note changed on the pager; reopen it and try again"
+        }
+        if let error = error as? NewNoteError, error == .locked {
+            return "the pager's notes are encrypted; unlock notes first"
+        }
+        if let error = error as? VoiceMemoImporter.ImportError {
+            return error == .tooLarge ? "the recording is too long to transcribe (25 MB limit)"
+                : "no speech was recognised"
+        }
+        if let error = error as? ChatBackendError {
+            switch error {
+            case .missingKey: return "set a Groq API key under Chat first"
+            case .upstream(let text): return text
+            }
         }
         if let error = error as? TasksService.TasksError, error == .changedOnPager {
             return "the tasks changed on the pager; reload and try again"

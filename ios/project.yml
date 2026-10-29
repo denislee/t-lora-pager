@@ -27,6 +27,9 @@ targets:
     platform: iOS
     sources:
       - App
+      # Types shared with the PagerWidgets extension (the Live Activity's
+      # ActivityAttributes).
+      - Shared
       # The asset catalog (app icon). Info.plist is wired through `info.path`
       # below, so it must stay out of the copy phase.
       - path: Resources
@@ -44,6 +47,8 @@ targets:
         NSBluetoothAlwaysUsageDescription: Pager Companion talks to your LilyGo pager over Bluetooth.
         NSLocationWhenInUseUsageDescription: Pager Companion uses your location for the pager's "auto" weather forecast.
         NSLocalNetworkUsageDescription: Pager Companion reaches your Telegram bridge (and, in debug builds, the pager emulator) on this network.
+        # The notes-sync Live Activity (App/Status/PagerStatusPublisher.swift).
+        NSSupportsLiveActivities: true
         # The tg-bridge URL is user-configured and often plain http:// on a LAN
         # box or VPS; without this ATS refuses every tg.* call (RH9).
         NSAppTransportSecurity:
@@ -57,12 +62,24 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+    # The App Group the widget extension reads the last pager status from
+    # (PagerKit PagerStatusStore). XcodeGen writes the file from `properties`.
+    entitlements:
+      path: Config/PagerCompanion.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(BUNDLE_ID_PREFIX).pagercompanion.shared
+        # The pager's "Find phone" rings a locked / Focus-silenced phone.
+        com.apple.developer.usernotifications.time-sensitive: true
     configFiles:
       Debug: Config/Base.xcconfig
       Release: Config/Base.xcconfig
     dependencies:
       - package: PagerKit
       - package: TDLibFramework
+      # Embedded in PlugIns/ (app extensions embed by default).
+      - target: PagerWidgets
+      - target: PagerShare
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -70,6 +87,88 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).pagercompanion"
         TARGETED_DEVICE_FAMILY: "1"
+
+  # Home / Lock Screen status widget + the notes-sync Live Activity (S16).
+  # 16.1 because ActivityConfiguration needs it; the app itself stays at 16.0
+  # and simply has no widget on 16.0.
+  PagerWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.1"
+    sources:
+      - Widgets
+      - Shared
+    info:
+      path: Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Pager
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Config/PagerWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(BUNDLE_ID_PREFIX).pagercompanion.shared
+    configFiles:
+      Debug: Config/Base.xcconfig
+      Release: Config/Base.xcconfig
+    dependencies:
+      - package: PagerKit
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).pagercompanion.widgets"
+        TARGETED_DEVICE_FAMILY: "1"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        # Must match the app's version keys or App Store validation refuses it.
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+
+  # "Share -> Pager" (S4): queues shared text/URLs in the App Group outbox;
+  # the app sends them with notify.post on its next connect (an extension
+  # has no PagerLink of its own).
+  PagerShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ShareExtension
+    info:
+      path: ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: Pager
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+    entitlements:
+      path: Config/PagerShare.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.$(BUNDLE_ID_PREFIX).pagercompanion.shared
+    configFiles:
+      Debug: Config/Base.xcconfig
+      Release: Config/Base.xcconfig
+    dependencies:
+      - package: PagerKit
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        PRODUCT_BUNDLE_IDENTIFIER: "$(BUNDLE_ID_PREFIX).pagercompanion.share"
+        TARGETED_DEVICE_FAMILY: "1"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
 
 schemes:
   PagerCompanion:

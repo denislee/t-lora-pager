@@ -254,6 +254,7 @@ notes sync, and
 `{"tg":"chats"|"msgs"|"send"|"notify","bridge","token","chat_id"?,"text"?,"reset"?,"link_down"?}`
 runs one step of the Telegram worker code (list, open chat + mark-read, send,
 one unread-notifier tick). The outcome arrives as `evt.test.result`. `test.weather.cache` `{"key"}` (P→D) answers synchronously with the forecast the pager has cached under `key`, re-encoded as a ForecastPayload (§6.3), or ERR `not_found` (test-only code) when there is none. `test.weather.fetch` `{"key"}` runs the Weather app's phone step (`weather.get` → key check → cache save) and reports `{"step":"weather","ok","msg","city","hourly_count","daily_count"}` as `evt.test.result`.
+`test.inbox` `{}` answers `{"jsonl"}`, the stored messaging inbox (§6.5), and `test.ui.open` `{"app"}` opens an app (e.g. `"Editor"`) the way its home tile does.
 `test.settings.local` `{"id","value"}` writes one setting the way the pager's own Settings app does, so the smoke can see the resulting `evt.settings.changed` (§6.4).
 Hardware builds never register it (`src/hal/link/handlers_test.cpp`): it
 would let a phone make the pager call arbitrary methods.
@@ -332,7 +333,69 @@ off"` / `"<id>: notes locked"`. Action parameters: `wifi.add`
 `{"ssid","password"?}` (connects, saves on success); `wifi.forget`
 `{"ssid"}` or `{"all":true}`. Wi-Fi passwords travel phone → pager only.
 
-The rest of the catalog (notify.*, …) is specified in
+## 6.5 Methods — messaging (`caps` `"notify"`, `"clip"`, `"text"`, `"find"`)
+
+Phase 4 of `IOS_COMPANION_PLAN.md`. Each family is its own cap, so a phone
+hides exactly what the firmware lacks. Text fields are UTF-8; sizes are in
+bytes. A field that breaks a rule is refused whole with `invalid_argument` and a
+`msg` naming it (`"title: too long"`); nothing is stored. `src/hal/companion_msg.cpp`
+implements the rules and `vectors/messaging.json` pins them.
+
+| Field | Rule |
+|---|---|
+| `title` | required string, 1..64 bytes, no control characters |
+| `body` | optional string, ≤ 512 bytes; `\n` allowed, other control characters not |
+| `id` | optional string, 1..32 bytes of `[A-Za-z0-9._:-]` |
+| `src` | optional string, ≤ 32 bytes, no control characters (e.g. `"Shortcuts"`, `"Safari"`) |
+| `ts` | optional integer, 0..4294967295 (unix seconds; 0 or absent = unknown) |
+| `prio` | optional `"low"`, `"normal"` (default) or `"high"` |
+| `text` (`clip.push`) | required string, 1..4000 bytes; `\n` and `\t` allowed |
+| `text` (`text.send`) | required string, 1..2000 bytes; `\n` and `\t` allowed |
+| `target` | required `"editor"` or `"kb"` |
+
+| Method / event | Dir | Params → result |
+|---|---|---|
+| `notify.post` | P→D | `{"title","body"?,"id"?,"src"?,"ts"?,"prio"?}` → `{"stored":true}`, or `{"stored":false,"dup":true}` when `id` is already in the inbox (a retry is not shown twice). The pager keeps the last 32 messages in an inbox ring on internal flash (`/inbox.jsonl`). `low`: inbox only. `normal`: a banner (and the haptic, when enabled) while the display is on; during fake sleep it is queued silently (inbox + home badge). `high`: a banner and haptic, and on the T-LoRa-Pager it also wakes the display from fake sleep |
+| `clip.push` | P→D | `{"text"}` → `{"pasted":bool}`. `true`: inserted at the cursor of the open note editor. `false`: no editor open, so it is kept in the inbox (kind `clip`) with a banner |
+| `clip.push` | D→P | `{"text"}` → `{}`. The phone puts it on its pasteboard in the foreground, or posts a local notification whose tap copies it in the background. The pager sends it from the editor's "to phone" pill (the note, cut to 4000 bytes on a UTF-8 boundary) |
+| `text.send` | P→D | `{"text","target"}` → `{"typed":<bytes>}`. `editor` types into the open note editor (else `invalid_argument` `"editor not open"`); `kb` types into whichever text field has focus (SSH, Telegram reply, …; else `invalid_argument` `"no text input"`). Never stored |
+| `phone.find` | D→P | `{}` → `{}`. The phone plays a sound and posts a time-sensitive local notification (rings a locked phone). Sent from the pager's Inbox app |
+| `pager.find` | P→D | `{"stop"?:bool}` → `{}`. The pager wakes its display, shows a sticky "Find pager" banner and buzzes every 2 s for 30 s; `{"stop":true}` ends it early |
+
+## 6.6 Methods — screen capture (`caps` `"screen"`)
+
+| Method / event | Dir | Params → result |
+|---|---|---|
+| `screen.capture` | P→D | `{}` → `{"job"}`, at once. The pager snapshots its screen (top layer — banners, popups — blended over it) on the UI thread, then calls `screen.data`. One capture at a time (`busy`) |
+| `screen.data` | D→P | `{"job","w","h","fmt":"rgb565-rle","size","crc32"}` → `{"xfer"}`; the phone allocates `xfer` (even, §4), then the pager streams `size` bytes as DATA, like `chat.audio.begin`. Timeout 10 s |
+
+`rgb565-rle` is a sequence of 4-byte runs `u16 count, u16 pixel` (both
+little-endian), row-major from the top-left pixel; `count` is 1..65535 and a run
+may cross rows; the counts add up to exactly `w × h`. `pixel` is RGB565
+(`r5 g6 b5`, red in the high bits) — the same pixels the emulator's screenshot
+sweep (`UI_SHOTS_DIR`, `src/emu_shots.cpp`) writes as PPM, expanded to 8 bits
+per channel with `v * 255 / max`. `vectors/screen.json` pins encode and decode.
+
+## 6.7 Methods — firmware update (`caps` `"ota"`)
+
+The image travels as an ordinary file upload (`fs.write.*`, §6.1) and is then
+applied from that file, so OTA reuses the tested, CRC-checked transfer path;
+"resume" after a dropped link is a new upload.
+
+| Method / event | Dir | Params → result |
+|---|---|---|
+| `ota.status` | P→D | `{}` → `{"running","next","pending","boots","max_size"}`: the running and the next app slot (`"app0"`/`"app1"`; `"emu"` on the emulator), whether the running image has yet to confirm itself, how many times it has booted unconfirmed, and the largest image the next slot takes |
+| `ota.apply` | P→D | `{"vol","path","size","sha256"}` → `{"job"}`. `sha256` is 64 lowercase hex digits. Refused up front (`invalid_argument`): a missing file, a size that differs from the file or exceeds `max_size`, a bad `sha256`. `busy` while a job runs. The job then checks the file's SHA-256 and the ESP image header (magic `0xE9`), writes the next slot, makes it the boot slot and reboots about 1 s after `phase:"reboot"`. The emulator verifies, copies the file to `$PAGERLINK_FS_ROOT/ota/installed.bin` and ends with `phase:"installed"` instead of rebooting |
+| `evt.ota` | D→P | `{"job","phase","done","total","msg"?}`. `phase` is `"verify"`, `"write"` (`done`/`total` in bytes), then `"reboot"` (`"installed"` on the emulator) or `"error"` with `msg` |
+
+Rollback: a freshly applied image boots *pending*. It confirms itself once it
+has run for 60 s; until then every boot counts, and the third unconfirmed boot
+switches the boot slot back to the previous image and restarts. An image that
+crashes before `setup()` is not covered (that needs bootloader rollback,
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, which the prebuilt Arduino bootloader
+lacks).
+
+The rest of the catalog (`loc.get`, `lora.*`) is specified in
 `IOS_COMPANION_PLAN.md` §4.5 and moves here as each phase lands. A side
 that doesn't implement a method answers ERR `unsupported`; `caps` lists the
 method families each side implements (`"sys"`, `"fs"`, `"weather"`, …).
@@ -352,3 +415,10 @@ hex with no separators. Files:
 - `settings.json` — §6.4: a small catalog, and for each case the params and
   the exact compact result (or error) the pager's registry answers;
   `test/test_settings_registry` checks them byte for byte.
+- `messaging.json` — §6.5: for each case the method, the params and either
+  the normalized fields the pager stores or the exact error; also inbox-ring
+  add/dedupe/cap sequences and their `/inbox.jsonl` text.
+  `test/test_companion_msg` checks the pager; PagerKit and Go validate the
+  same params client-side and must reach the same verdict.
+- `screen.json` — §6.6: small RGB565 images and their `rgb565-rle` bytes, plus
+  malformed streams the decoder must refuse.

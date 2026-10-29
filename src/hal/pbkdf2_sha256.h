@@ -51,6 +51,22 @@ bool pbkdf2_hmac_sha256(const uint8_t *pw, size_t pw_len,
                         uint32_t iterations,
                         uint8_t *out, size_t out_len);
 
+/* Streaming SHA-256 state (the same compression as the PBKDF2 above). */
+struct Sha256Stream {
+    uint32_t st[8];
+    uint8_t buf[64];
+    size_t n;
+    uint64_t total;
+    uint32_t blk[16];
+    uint32_t W[64];
+};
+
+/* Plain SHA-256: init, absorb any number of chunks, then final (which leaves
+ * `s` spent; init again to reuse). Used to check OTA images (hal/ota.cpp). */
+void sha256_init(Sha256Stream *s);
+void sha256_update(Sha256Stream *s, const uint8_t *p, size_t len);
+void sha256_final(Sha256Stream *s, uint8_t out[32]);
+
 /* Wipe `n` bytes in a way the compiler cannot elide. The project's one
  * secure-wipe primitive (DC2.4.27b): notes_crypto and hal::secret_scrub()
  * use it too. */

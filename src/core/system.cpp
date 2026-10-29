@@ -9,6 +9,7 @@
 #include "input_profile.h"
 #include "notify.h"
 #include "ui_post.h"
+#include "../ui_companion.h"
 #include "../ui_define.h"
 #include "../hal/hub.h"
 #include "../hal/storage.h"
@@ -592,6 +593,9 @@ void System::loop() {
     // call from any task; actual banner creation has to happen here so it
     // runs under the instance lock held by the LVGL task.
     notify::pump();
+    // The link task asks whether a text field has focus (text.send "kb");
+    // it can't walk the LVGL tree itself, so keep a copy fresh here.
+    ui_companion_refresh_focus();
     INPUT_PROF(prof::report_tick());
 }
 

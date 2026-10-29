@@ -882,7 +882,8 @@
  *==================*/
 
 /*1: Enable API to take snapshot for object*/
-#define LV_USE_SNAPSHOT 0
+/* LOCAL: on for PagerLink screen.capture (src/ui_screen_capture.cpp). */
+#define LV_USE_SNAPSHOT 1
 
 /*1: Enable system monitor component*/
 #define LV_USE_SYSMON   0

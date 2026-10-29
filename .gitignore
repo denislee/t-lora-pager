@@ -18,6 +18,8 @@ lib/LilyGoLib/firmware/*.bin
 # PagerLink golden-vector header, generated from protocol/vectors/ at test build.
 test/test_link_frame/link_vectors_gen.h
 test/test_settings_registry/settings_vectors_gen.h
+test/test_companion_msg/messaging_vectors_gen.h
+test/test_rle565/screen_vectors_gen.h
 
 # iOS companion — generated project, build products, per-user state.
 /ios/*.xcodeproj/

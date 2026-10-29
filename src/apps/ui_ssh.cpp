@@ -20,6 +20,9 @@
  * notes_crypto is enabled+unlocked we save it on prompt submit, and the
  * Connect button uses the saved password directly on subsequent runs — no
  * prompts. The pencil (edit) button forces a fresh prompt chain.
+ * A private key set from the phone (settings id ssh.key, slot "ssh"/
+ * "key_enc", the same encryption) is tried before the password, and alone
+ * is enough for the saved-credentials Connect.
  *
  * State reset on onStop (SshApp::onStop):
  *   timers:  poll_timer_                  — lv_timer_del + nullptr
@@ -91,6 +94,7 @@ struct SshConfig {
     std::string host;
     std::string user;
     std::string password;
+    std::string key;  // private key (PEM/OpenSSH), tried before the password
     uint16_t    port = 22;
 };
 
@@ -327,7 +331,22 @@ private:
         // TODO: real host key verification. For now the user implicitly
         // trusts the network — same posture as a fresh `ssh -o
         // StrictHostKeyChecking=no` session.
-        int auth = ssh_userauth_password(sess, nullptr, cfg_.password.c_str());
+        int auth = SSH_AUTH_DENIED;
+        if (!cfg_.key.empty()) {
+            ssh_key pk = nullptr;
+            if (ssh_pki_import_privkey_base64(cfg_.key.c_str(), nullptr, nullptr, nullptr,
+                                              &pk) == SSH_OK) {
+                auth = ssh_userauth_publickey(sess, nullptr, pk);
+                ssh_key_free(pk);
+                if (auth == SSH_AUTH_SUCCESS) push_output("[i] Signed in with the saved key.\n");
+            } else {
+                push_output("[!] Saved key could not be read (passphrase-protected?).\n");
+            }
+        }
+        hal::secret_scrub(cfg_.key);
+        if (auth != SSH_AUTH_SUCCESS && !cfg_.password.empty()) {
+            auth = ssh_userauth_password(sess, nullptr, cfg_.password.c_str());
+        }
         hal::secret_scrub(cfg_.password);  // not needed past auth
         if (auth != SSH_AUTH_SUCCESS) {
             std::string e = ssh_get_error(sess);
@@ -579,6 +598,7 @@ private:
 
 constexpr const char* SSH_NS    = "ssh";
 constexpr const char* SSH_PW_KEY = "pw_enc";
+constexpr const char* SSH_KEY_KEY = "key_enc";
 
 void cfg_load(SshConfig& out) {
 #ifdef ARDUINO
@@ -616,6 +636,8 @@ void cfg_save(const SshConfig& cfg) {
 // crypto is locked. Caller is responsible for scrubbing.
 // The hal stub returns "" on the emulator.
 std::string pw_load() { return hal::secret_load(SSH_NS, SSH_PW_KEY); }
+// The private key the phone set (settings id ssh.key); same rules as pw_load.
+std::string key_load() { return hal::secret_load(SSH_NS, SSH_KEY_KEY); }
 
 // Returns true on successful save, false (with `*err` populated) when the
 // notes session is not unlocked. Passing "" clears the slot unconditionally.
@@ -788,12 +810,16 @@ void SshApp::start_connect_flow() {
 bool SshApp::try_saved_connect() {
     if (cfg_.host.empty() || cfg_.user.empty()) return false;
     std::string saved_pw = pw_load();
-    if (saved_pw.empty()) return false;
+    std::string saved_key = key_load();
+    if (saved_pw.empty() && saved_key.empty()) return false;
     SshConfig cfg = cfg_;
     cfg.password = saved_pw;
+    cfg.key = saved_key;
     connect_with(cfg);
     hal::secret_scrub(saved_pw);
+    hal::secret_scrub(saved_key);
     hal::secret_scrub(cfg.password);
+    hal::secret_scrub(cfg.key);
     return true;
 }
 
@@ -833,6 +859,7 @@ void SshApp::connect_with(const SshConfig& cfg) {
     // the password, so never let it linger in the App.
     cfg_ = cfg;
     hal::secret_scrub(cfg_.password);
+    hal::secret_scrub(cfg_.key);
     if (!backend_) return;
     ansi_.reset();
     append_terminal("Connecting to " + cfg.host + "...\n");

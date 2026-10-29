@@ -88,6 +88,9 @@ public actor LinkSession {
         var lastActivity = ContinuousClock.now
         var waiter: CheckedContinuation<Void, Error>?
         var watchdog: Task<Void, Never>?
+        /// Told the bytes received (inbound) or acknowledged (outbound) so
+        /// far, after every DATA / ACK; nil when nobody asked.
+        var progress: (@Sendable (UInt32) -> Void)?
 
         /// Stop the watchdog and fail the waiter, if any.
         func fail(_ error: Error) {
@@ -319,9 +322,17 @@ public actor LinkSession {
     /// acknowledged. `timeout` bounds each idle wait for an ACK. Throws
     /// `RPCError`: `internal` ("transfer failed"), `timeout` ("timeout") or
     /// `disconnected`. Mirrors the Go `Client.SendBytes`.
-    public func sendBytes(xfer: UInt16, data: [UInt8], timeout: Duration) async throws {
+    ///
+    /// `progress`, when given, is told the bytes acknowledged so far and the
+    /// total after every ACK (on the session's actor: keep it cheap).
+    public func sendBytes(xfer: UInt16, data: [UInt8], timeout: Duration,
+                          progress: (@Sendable (_ done: UInt32, _ total: UInt32) -> Void)? = nil) async throws {
         if closed { throw RPCError.disconnected() }
         let transfer = Outbound()
+        if let progress {
+            let total = UInt32(data.count)
+            transfer.progress = { done in progress(done, total) }
+        }
         let sender = XferSender(
             size: UInt32(data.count), chunk: Xfer.maxDataChunk, start: 0,
             read: { offset, count in Array(data[Int(offset)..<Int(offset) + count]) },
@@ -355,8 +366,11 @@ public actor LinkSession {
     /// for DATA. Mirrors the Go `Client.ReadFile`; RPC errors pass through, and
     /// local failures are `RPCError`s: `internal` ("fs.read: bad response",
     /// "fs.read: transfer failed"), `timeout` ("fs.read: timeout"),
-    /// `invalid_argument` ("crc mismatch").
-    public func readFile(vol: String, path: String, timeout: Duration) async throws -> ([UInt8], FileInfo) {
+    /// `invalid_argument` ("crc mismatch"). `progress`, when given, is told
+    /// the bytes received so far and the file size after every DATA.
+    public func readFile(vol: String, path: String, timeout: Duration,
+                         progress: (@Sendable (_ done: UInt32, _ total: UInt32) -> Void)? = nil)
+        async throws -> ([UInt8], FileInfo) {
         let id = openIncoming()
         defer { closeIncoming(id) }
         let result = try await call("fs.read", params: [
@@ -368,7 +382,13 @@ public actor LinkSession {
             throw RPCError(code: "internal", msg: "fs.read: bad response")
         }
         let info = FileInfo(size: size, crc32: crc, protected: result["protected"]?.boolValue ?? false)
+        if let progress, let transfer = inbound[id] {
+            transfer.progress = { done in progress(done, size) }
+        }
         arm(id, size: size)
+        if let progress, let transfer = inbound[id] {
+            progress(UInt32(clamping: transfer.data.count), size)
+        }
         let data = try await finishIncoming(id, crc32: crc, timeout: timeout, label: "fs.read")
         return (data, info)
     }
@@ -380,9 +400,14 @@ public actor LinkSession {
     /// bounds `begin` and each idle wait for an ACK. Mirrors the Go
     /// `Client.WriteFile`; RPC errors pass through (e.g. `invalid_argument`
     /// "exists" without `overwrite`), and a malformed begin reply is
-    /// `internal` "fs.write: bad response".
+    /// `internal` "fs.write: bad response". `progress` is `sendBytes`'s.
+    ///
+    /// There is no resume: `fs.write.begin` with `resume:true` is
+    /// `unsupported` in v1 and a dropped link deletes the `.part`, so a
+    /// caller that wants "resume after disconnect" starts over from byte 0.
     public func writeFile(vol: String, path: String, data: [UInt8], overwrite: Bool,
-                          timeout: Duration) async throws {
+                          timeout: Duration,
+                          progress: (@Sendable (_ done: UInt32, _ total: UInt32) -> Void)? = nil) async throws {
         let begin = try await call("fs.write.begin", params: [
             "vol": .string(vol),
             "path": .string(path),
@@ -394,7 +419,7 @@ public actor LinkSession {
             throw RPCError(code: "internal", msg: "fs.write: bad response")
         }
         do {
-            try await sendBytes(xfer: xfer, data: data, timeout: timeout)
+            try await sendBytes(xfer: xfer, data: data, timeout: timeout, progress: progress)
         } catch {
             _ = try? await call("fs.write.abort", params: ["xfer": .number(Double(xfer))], timeout: timeout)
             throw error
@@ -584,6 +609,7 @@ public actor LinkSession {
         }
         receiver.onData(message.payload)
         flushAcks(transfer, xfer: message.id)
+        transfer.progress?(UInt32(clamping: transfer.data.count))
         if receiver.state != .active { transfer.wake() }
     }
 
@@ -596,6 +622,7 @@ public actor LinkSession {
         sender.onAck(message.payload)
         sender.pump()
         flushData(transfer, xfer: message.id)
+        transfer.progress?(sender.acked)
         if sender.state != .active { transfer.wake() }
     }
 

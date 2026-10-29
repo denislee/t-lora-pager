@@ -60,7 +60,7 @@ struct HomeItem {
 
 // Order groups apps by what the user is doing:
 //   [create/capture]        Notes, Tasks, Recorder
-//   [communicate]           Telegram, Chat
+//   [communicate]           Telegram, Chat, Inbox (phone messages)
 //   [consume/check]         Weather
 //   [system]                SSH
 // Settings lives in the top toggle strip as a small icon rather than the grid.
@@ -73,6 +73,7 @@ static const HomeItem kItems[] = {
     {"Recorder", LV_SYMBOL_AUDIO,     "Recorder", nullptr,              false, false},
     {"Telegram", LV_SYMBOL_ENVELOPE,  "Telegram", tg_get_unread_count,  true,  true },
     {"Chat",     LV_SYMBOL_BELL,      "Chat",     nullptr,              true,  true },
+    {"Inbox",    LV_SYMBOL_DOWNLOAD,  "Inbox",    inbox_unread_count,   false, false},
     {"Weather",  LV_SYMBOL_TINT,      "Weather",  nullptr,              false, false},
     {"SSH",      LV_SYMBOL_KEYBOARD,  "SSH",      nullptr,              true,  false},
 };

@@ -13,6 +13,7 @@
 #include <esp_sntp.h>
 #include "hal_interface.h"
 #include "hal/notes_crypto.h"
+#include "hal/ota.h"
 #include "core/system_hooks.h"
 #include "core/input_focus.h"
 #include "core/kb_lock.h"
@@ -75,6 +76,9 @@ void setup()
 
     Serial.begin(115200);
     INPUT_PROF(core::prof::boot_mark("setup"));
+    // OTA rollback (PROTOCOL.md §6.7): count a pending image's boot first, so
+    // an image that dies anywhere later in setup still counts toward rollback.
+    hw_ota_boot_check();
 
     core::instance_lock_init();
     core::kb_lock_init();

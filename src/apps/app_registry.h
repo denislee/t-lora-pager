@@ -36,6 +36,10 @@ std::shared_ptr<core::App> make_telegram_app();
 std::shared_ptr<core::App> make_notes_sync_app();
 std::shared_ptr<core::App> make_ssh_app();
 std::shared_ptr<core::App> make_chat_app();
+std::shared_ptr<core::App> make_inbox_app();
+
+// Unread phone messages (hal/companion.h) for the Inbox home tile badge.
+int inbox_unread_count();
 
 // Starts the persistent Telegram unread-count poll (see ui_telegram.cpp).
 // Safe to call multiple times. Runs on the emulator too (phone path).

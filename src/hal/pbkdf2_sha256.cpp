@@ -73,17 +73,10 @@ void sha256_compress(uint32_t st[8], const uint32_t blk[16], uint32_t W[64])
     st[4] += e; st[5] += f; st[6] += g; st[7] += h;
 }
 
-/* Minimal streaming SHA-256, used only for the variable-length parts: the
- * passphrase pre-hash (> 64 B) and the first inner HMAC over salt || INT(i).
- * Everything secret lives inside the struct; wipe it when done. */
-struct Sha256Stream {
-    uint32_t st[8];
-    uint8_t buf[64];
-    size_t n;
-    uint64_t total;
-    uint32_t blk[16];
-    uint32_t W[64];
-};
+/* The streaming SHA-256 (hal::Sha256Stream, declared in the header) is used
+ * for the variable-length parts: the passphrase pre-hash (> 64 B) and the
+ * first inner HMAC over salt || INT(i). Everything secret lives inside the
+ * struct; wipe it when done. */
 
 void stream_init(Sha256Stream *s, const uint32_t st[8], uint64_t already_absorbed)
 {
@@ -132,6 +125,17 @@ void stream_final(Sha256Stream *s, uint32_t out[8])
 }
 
 }  // namespace
+
+void sha256_init(Sha256Stream *s) { stream_init(s, IV256, 0); }
+
+void sha256_update(Sha256Stream *s, const uint8_t *p, size_t len) { stream_update(s, p, len); }
+
+void sha256_final(Sha256Stream *s, uint8_t out[32])
+{
+    uint32_t d[8];
+    stream_final(s, d);
+    for (int i = 0; i < 8; i++) store_be32(out + 4 * i, d[i]);
+}
 
 void secure_wipe(void *buf, size_t n)
 {
