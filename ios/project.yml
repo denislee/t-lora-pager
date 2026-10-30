@@ -101,6 +101,8 @@ targets:
     info:
       path: Widgets/Info.plist
       properties:
+        # Pinned: XcodeGen 2.46 would write the literal XPC! default here.
+        CFBundlePackageType: $(PRODUCT_BUNDLE_PACKAGE_TYPE)
         CFBundleDisplayName: Pager
         CFBundleShortVersionString: "0.1"
         CFBundleVersion: "1"
@@ -140,6 +142,8 @@ targets:
     info:
       path: ShareExtension/Info.plist
       properties:
+        # Pinned: XcodeGen 2.46 would write the literal XPC! default here.
+        CFBundlePackageType: $(PRODUCT_BUNDLE_PACKAGE_TYPE)
         CFBundleDisplayName: Pager
         CFBundleShortVersionString: "0.1"
         CFBundleVersion: "1"
