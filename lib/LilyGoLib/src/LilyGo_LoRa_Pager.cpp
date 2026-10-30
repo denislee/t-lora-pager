@@ -79,7 +79,8 @@ void LilyGoLoRaPager::setMSCPreferSD(bool prefer_sd)
 }
 
 #ifndef RADIOLIB_EXCLUDE_NRF24
-nRF24 nrf24 = new Module(44/*CS*/, 9/*IRQ*/, 43/*CE*/);
+// [LOCAL PATCH] Shared bus passed explicitly, see newModule() in the header.
+nRF24 nrf24 = new Module(44/*CS*/, 9/*IRQ*/, 43/*CE*/, RADIOLIB_NC, SPI);
 #endif
 
 // [LOCAL PATCH P7.44] Init-table delays. 0x80 = delay(120) after the entry,

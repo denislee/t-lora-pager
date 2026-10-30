@@ -41,7 +41,12 @@
 #endif
 #include "BrightnessController.h"
 
-#define newModule()   new Module(LORA_CS,LORA_IRQ,LORA_RST,LORA_BUSY)
+// [LOCAL PATCH] Hand RadioLib the shared bus explicitly. Without an SPIClass
+// its ArduinoHal owns SPI (initInterface = true): a failed chip probe in
+// begin() runs Module::term() -> SPI.end(), which detaches SCK/MOSI/MISO from
+// the display, SD and NFC too, and the panel never gets another frame. The
+// display init in begin() has already started SPI on the pager's pins.
+#define newModule()   new Module(LORA_CS,LORA_IRQ,LORA_RST,LORA_BUSY,SPI)
 
 using custom_feedback_t = void(*)(void *args);
 
