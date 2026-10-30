@@ -51,9 +51,10 @@ final class PagerStatusPublisher {
 /// Live Activities are off or unavailable.
 @MainActor
 final class NotesSyncLiveActivity {
-    /// `Activity<NotesSyncActivityAttributes>` (iOS 16.1+), type-erased so
-    /// this class needs no availability annotation.
-    private var current: Any?
+    /// The running activity's `id`. `Activity` is not `Sendable`, so only the
+    /// id is kept here and each end/update looks the activity up off the main
+    /// actor.
+    private var currentID: String?
     private var job: Int?
 
     func handle(_ event: NotesSyncProgressEvent) {
@@ -68,27 +69,34 @@ final class NotesSyncLiveActivity {
         let state = NotesSyncActivityAttributes.ContentState(
             phase: event.phaseLabel, summary: event.summary, uploaded: event.uploaded, already: event.already,
             deleted: event.deleted ?? 0, errors: event.errors, done: event.done)
-        if let activity = current as? Activity<NotesSyncActivityAttributes>, job == event.job {
+        if let id = currentID, job == event.job {
             if event.done {
-                current = nil
+                currentID = nil
                 job = nil
-                Task { await activity.end(using: state, dismissalPolicy: .after(Date().addingTimeInterval(60))) }
+                Task.detached {
+                    await Self.activity(id)?.end(using: state, dismissalPolicy: .after(Date().addingTimeInterval(60)))
+                }
             } else {
-                Task { await activity.update(using: state) }
+                Task.detached { await Self.activity(id)?.update(using: state) }
             }
             return
         }
-        if let stale = current as? Activity<NotesSyncActivityAttributes> {
-            Task { await stale.end(dismissalPolicy: .immediate) }
-            current = nil
+        if let stale = currentID {
+            Task.detached { await Self.activity(stale)?.end(dismissalPolicy: .immediate) }
+            currentID = nil
             job = nil
         }
         // A job that is already done (one message) is not worth an activity.
         guard !event.done, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-        current = try? Activity.request(
+        currentID = try? Activity.request(
             attributes: NotesSyncActivityAttributes(job: event.job, startedAt: Date()),
-            contentState: state, pushType: nil)
+            contentState: state, pushType: nil).id
         job = event.job
+    }
+
+    @available(iOS 16.1, *)
+    private nonisolated static func activity(_ id: String) -> Activity<NotesSyncActivityAttributes>? {
+        Activity<NotesSyncActivityAttributes>.activities.first { $0.id == id }
     }
     #endif
 }
