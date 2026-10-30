@@ -469,6 +469,7 @@ static void play_pause_click_cb(lv_event_t* e) {
 // the home screen below; LV_EVENT_KEY only fires on the focused widget, so
 // this is dormant elsewhere in the app.
 //   d → low-power loop (real ESP lightSleep / sleep, per sleep_mode)
+//   q → power off
 //   w → toggle WiFi
 //   b → toggle Bluetooth
 //   p → run internet ping test
@@ -488,6 +489,10 @@ static void home_shortcut_key_cb(lv_event_t* e) {
     if (key == 'd' || key == 'D') {
         hw_feedback();
         hw_low_power_loop();
+    } else if (key == 'q' || key == 'Q') {
+        hw_feedback();
+        lv_delay_ms(200);
+        hw_shutdown();
     } else if (key == 'w' || key == 'W') {
         bool new_state = !hw_get_wifi_enable();
         hw_set_wifi_enable(new_state);
