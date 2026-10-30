@@ -53,7 +53,7 @@ Only `SX1262` (default) and `LR1121` build as-is. `CC1101` and `SX1280` have dri
 
 ## Selecting an alternate source tree
 
-`src_dir = src` is the default. To build a LilyGoLib example instead, comment that line and point `src_dir` at an example directory (browse `lib/LilyGoLib/examples/`); the commented `src_dir = lib/LilyGoLib/examples/helloworld` line under `[platformio]` shows the form.
+`src_dir = src` is the default. To build a LilyGoLib example instead, point `src_dir` at an example directory (browse `lib/LilyGoLib/examples/`); the commented `src_dir = lib/LilyGoLib/examples/helloworld` line under `[platformio]` shows the form. Examples don't link as-is: our patched LilyGoLib calls six firmware hooks (`ui_lock`, `ui_unlock`, `ui_pause_timers`, `ui_resume_timers`, `ui_request_editor_switch`, `ui_request_wheel_sleep`, see `core/system_hooks.h`), so add a throwaway `.cpp` of empty `void f() {}` stubs to the example directory. `examples/factory` additionally needs `BleKeyboard.h`, which isn't in `lib_deps`, so it doesn't build.
 
 ## Architecture
 

@@ -13,7 +13,8 @@ panel shows random memory (looks like analog TV noise). This script:
      is set, and opening the port with default pyserial lines can drop the chip
      back into download mode.
 
-Requires: pip install pyserial esptool
+Requires: pyserial + esptool for this python3 (Arch: pacman -S python-pyserial esptool,
+          elsewhere: pip install pyserial esptool)
 Usage:    tools/pager_rescue.py [--port PORT] [--seconds N] [--no-reset]
 Exit:     0 log captured, 1 no board found / port never came back, 2 missing deps.
 
@@ -30,7 +31,7 @@ try:
     import serial
     from serial.tools import list_ports
 except ImportError:
-    sys.exit("pyserial missing: pip install pyserial esptool")
+    sys.exit("pyserial missing: pacman -S python-pyserial (Arch) or pip install pyserial")
 
 ESPRESSIF_VID = 0x303A
 PID_ROM = 0x1001
@@ -73,7 +74,7 @@ def esptool(port, *args):
 def rtc_wdt_reset(port):
     if subprocess.run([sys.executable, "-m", "esptool", "version"],
                       capture_output=True).returncode != 0:
-        print("esptool missing: pip install esptool")
+        print("esptool missing: pacman -S esptool (Arch) or pip install esptool")
         sys.exit(2)
     for i, (addr, val) in enumerate(RTC_WDT_WRITES):
         r = esptool(port, "write_mem", addr, val)
@@ -88,7 +89,16 @@ def read_log(port, seconds):
     s = serial.Serial()
     s.port, s.baudrate, s.timeout = port, 115200, 0.5
     s.rts, s.dtr = False, True  # set before open(): RTS low, DTR high
-    s.open()
+    # A freshly re-enumerated node is root-only until udev applies its group.
+    deadline = time.time() + 5
+    while True:
+        try:
+            s.open()
+            break
+        except serial.SerialException:
+            if time.time() > deadline:
+                raise
+            time.sleep(0.25)
     print(f"--- reading {port} for {seconds}s (Ctrl-C to stop) ---", flush=True)
     end = time.time() + seconds
     try:
