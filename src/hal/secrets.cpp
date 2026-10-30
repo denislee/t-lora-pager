@@ -221,9 +221,9 @@ bool secret_store(const char *ns, const char *key, const char *plaintext,
     if (!clear) {
         if (!notes_crypto_is_enabled()) {
             refusal = "Enable Notes encryption first "
-                      "(Settings \xC2\xBB Notes Security).";
+                      "(Settings > Notes Security).";
         } else if (!notes_crypto_is_unlocked()) {
-            refusal = "Notes session locked \xE2\x80\x94 unlock first.";
+            refusal = "Notes session locked - unlock first.";
         } else if (!notes_crypto_encrypt_buffer((const uint8_t *)value.data(),
                                                 value.size(), ct)) {
             refusal = "Encryption failed.";

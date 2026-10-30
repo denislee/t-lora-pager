@@ -48,8 +48,8 @@ static void enable_toggle_cb(lv_event_t *e)
         set_status("Set a URL to start using the hub",
                    lv_palette_main(LV_PALETTE_ORANGE));
     } else {
-        set_status(en ? "Hub on — used first, falls back direct"
-                      : "Hub off — direct internet only",
+        set_status(en ? "Hub on - used first, falls back direct"
+                      : "Hub off - direct internet only",
                    en ? lv_palette_main(LV_PALETTE_GREEN) : UI_COLOR_MUTED);
     }
 }
@@ -69,10 +69,10 @@ static void url_entered_cb(const char *text, void *ud)
     if (v.empty()) {
         set_status("URL cleared", UI_COLOR_MUTED);
     } else if (!hal::hub_get_enabled_pref()) {
-        set_status("URL saved — toggle on to use",
+        set_status("URL saved - toggle on to use",
                    lv_palette_main(LV_PALETTE_ORANGE));
     } else {
-        set_status("URL saved — hub active",
+        set_status("URL saved - hub active",
                    lv_palette_main(LV_PALETTE_GREEN));
     }
 }

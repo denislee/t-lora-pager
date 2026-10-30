@@ -15,6 +15,8 @@
  *   timers:  sync_pill_timer            — lv_timer_del + null
  *            word_count_debounce_timer  — lv_timer_del + null
  *   save:    dirty buffer handed to hw_save_preferred_file_async (IS.2)
+ *   status:  status-bar clock           — hidden on narrow screens beside the
+ *                                         word counter, re-shown with it (VB.6)
  *   state:   s_pending_open_path        — consumed by editor_build_ui
  *            s_last_space_pos           — reset (iOS "." shortcut tracker)
  *   phone:   ui_companion editor sink   — cleared (text.send / clip.push
@@ -134,7 +136,11 @@ static void update_word_count()
         }
     }
     
-    lv_label_set_text_fmt(word_count_label, "%zu words | %zu chars", words, chars);
+    // 240 px watch: the status bar can't fit the long form beside the back
+    // button (VB.6); the clock is hidden there while the editor is open.
+    lv_label_set_text_fmt(word_count_label,
+                          ui_is_narrow() ? "%zuw %zuc" : "%zu words | %zu chars",
+                          words, chars);
 }
 
 static void word_count_debounce_cb(lv_timer_t *t)
@@ -509,6 +515,9 @@ static void editor_build_ui(lv_obj_t *parent)
     lv_obj_set_style_bg_color(text_area, UI_COLOR_SURFACE, 0);
     lv_obj_set_style_bg_opa(text_area, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(text_area, UI_RADIUS, 0);
+    /* Inner air so the block cursor doesn't sit on the frame corner (VB.19). */
+    lv_obj_set_style_pad_hor(text_area, 4, 0);
+    lv_obj_set_style_pad_ver(text_area, 3, 0);
     /* Same border width in both states: border_width is a layout property, so
      * changing it on focus/defocus re-wrapped the whole note and made the
      * first scroll off the textarea (e.g. to the back button) lag. Only
@@ -610,7 +619,8 @@ static void editor_build_ui(lv_obj_t *parent)
     }
 
     word_count_label = lv_label_create(lv_obj_get_parent(back_btn));
-    lv_label_set_text(word_count_label, "0 words | 0 chars");
+    lv_label_set_text(word_count_label, ui_is_narrow() ? "0w 0c" : "0 words | 0 chars");
+    if (ui_is_narrow()) core::System::getInstance().setClockVisible(false);
     lv_obj_set_style_text_color(word_count_label, ui_color_title_muted()  /* lives in the status bar */, 0);
     lv_obj_set_style_text_font(word_count_label, &lv_font_montserrat_12, 0);
     lv_obj_align_to(word_count_label, back_btn, LV_ALIGN_OUT_RIGHT_MID, 6, 0);
@@ -680,6 +690,7 @@ static void ui_text_editor_exit()
     if (word_count_label) {
         lv_obj_del(word_count_label);
         word_count_label = NULL;
+        core::System::getInstance().setClockVisible(true);
     }
 
     if (sync_pill_timer) {

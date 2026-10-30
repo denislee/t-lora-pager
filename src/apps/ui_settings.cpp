@@ -263,8 +263,14 @@ static void build_device_probe(lv_obj_t *menu, lv_obj_t *sub_page)
         // truncated rather than the one-glyph status.
         lv_obj_t *name = lv_obj_get_child(lv_obj_get_parent(status), 0);
         lv_obj_remove_local_style_prop(name, LV_STYLE_TEXT_COLOR, LV_PART_MAIN);
+        // VB.5: a LV_PCT max width resolved against the not-yet-laid-out
+        // page and baked "..." into every name. Take the space the status
+        // glyph leaves instead, one line, dotted only when it overflows.
+        lv_obj_set_width(name, 1);
+        lv_obj_set_flex_grow(name, 1);
+        lv_obj_set_height(name, lv_font_get_line_height(
+                                    lv_obj_get_style_text_font(name, LV_PART_MAIN)));
         lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_max_width(name, LV_PCT(65), 0);
     }
 }
 
@@ -410,6 +416,7 @@ static void settings_page_changed_cb(lv_event_t *e)
         subpage_builder_t builder = (subpage_builder_t)lv_obj_get_user_data(page);
         if (builder) {
             builder(menu, page);
+            ui_reserve_float_button_space(page);
             lv_obj_set_user_data(page, NULL); // Only build once
         }
         activate_subpage_group(page);
@@ -535,7 +542,7 @@ void settings_refresh_token_labels(lv_obj_t *tok_label, lv_obj_t *note_label,
         if (!notes_crypto_is_enabled()) {
             note = disabled_note;
         } else if (!notes_crypto_is_unlocked()) {
-            note = "Notes session locked — unlock (open Notes) to "
+            note = "Notes session locked - unlock (open Notes) to "
                    "save or read the token.";
         } else {
             note = ready_note;
@@ -718,18 +725,17 @@ static void ui_sys_enter(lv_obj_t *parent)
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_column(main_page, 6, 0);
     lv_obj_set_style_pad_row(main_page, 6, 0);
-    // Gutter for the style's scrollbar (up to 8 px on BeOS) so it doesn't
-    // overdraw the right-column shortcut badges.
+    // Keep the right column's shortcut badges clear of the page scrollbar
+    // (hotel/BeOS draw an 8 px one) (VB.9).
     lv_obj_set_style_pad_right(main_page, 10, 0);
+    // 240 px watch: two ~100 px columns broke labels mid-word; one column.
+    const bool one_col = ui_is_narrow();
 
     // Grid tile with a single-letter keyboard shortcut (badge + key wiring).
     // The keys live in kTiles above.
     auto add_grid_item_sc = [&](lv_obj_t *c, char key) {
         if (!c) return;
-        // One column on the 240 px watches, where half-width tiles wrap
-        // "Display & Backlight" over three lines.
-        lv_obj_set_width(c, lv_display_get_horizontal_resolution(NULL) < 320
-                                ? LV_PCT(100) : LV_PCT(48));
+        lv_obj_set_width(c, one_col ? LV_PCT(100) : LV_PCT(48));
         add_main_page_group_item(c);
         settings_register_shortcut(c, key);
     };
@@ -767,6 +773,7 @@ static void ui_sys_enter(lv_obj_t *parent)
     }
 
 #ifdef USING_TOUCHPAD
+    ui_reserve_float_button_space(main_page);
     quit_btn = create_floating_button(settings_exit_cb, NULL);
 #endif
 }

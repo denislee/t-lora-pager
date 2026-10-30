@@ -664,10 +664,13 @@ void style_pill(lv_obj_t* btn) {
     lv_obj_set_style_border_width(btn, 1, 0);
     lv_obj_set_style_border_color(btn, UI_COLOR_ACCENT, 0);
     lv_obj_set_style_border_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_outline_width(btn, 2, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_color(btn, UI_COLOR_FG, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_pad(btn, 2, LV_STATE_FOCUSED);
+    // Focus as a heavier FG border, inside the pill's own bounds: the old
+    // outline (2 px + 2 px pad) was clipped by the 28 px rows into broken
+    // white arcs (VB.15), and those rows must clip — they collapse to 0.
+    lv_obj_set_style_outline_width(btn, 0, LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(btn, 2, LV_STATE_FOCUSED);
+    lv_obj_set_style_border_color(btn, UI_COLOR_FG, LV_STATE_FOCUSED);
+    lv_obj_set_style_border_opa(btn, LV_OPA_COVER, LV_STATE_FOCUSED);
 }
 
 // --- App ------------------------------------------------------------------
@@ -832,7 +835,7 @@ void SshApp::start_connect_flow() {
     if (!hosts.empty()) {
         std::vector<std::string> labels;
         for (const auto& h : hosts) labels.push_back(hal::ssh::host_label(h));
-        labels.push_back("Other host\xE2\x80\xA6");
+        labels.push_back("Other host...");
         s_pick_hosts.swap(hosts);
         s_prompt_app = this;
         ui_list_picker_open("SSH host", labels, ssh_pick_cb, nullptr);

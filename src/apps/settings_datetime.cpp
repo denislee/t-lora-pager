@@ -294,6 +294,10 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     auto add_btn = [&](lv_obj_t *parent, const char *text, lv_event_cb_t cb,
                        void *ud, bool grow) {
         lv_obj_t *b = lv_btn_create(parent);
+        // Content height with a little vertical air: on the S3 the theme's
+        // height left "Apply" shorter than its label (VB.18).
+        lv_obj_set_height(b, LV_SIZE_CONTENT);
+        lv_obj_set_style_pad_ver(b, 6, 0);
         if (grow) lv_obj_set_flex_grow(b, 1);
         else      lv_obj_set_width(b, LV_PCT(100));
         lv_obj_t *l = lv_label_create(b);
@@ -323,6 +327,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
         lv_spinbox_set_digit_format(sb, digits, 0);
         lv_spinbox_set_value(sb, val);
         lv_obj_set_width(sb, digits == 4 ? 70 : 50);
+        // Centre the value under its centred title (VB.18).
+        lv_obj_set_style_text_align(sb, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_add_event_cb(sb, spinbox_event_cb, LV_EVENT_ALL, NULL);
         lv_obj_add_event_cb(sb, invert_scroll_key_cb,
                             (lv_event_code_t)(LV_EVENT_KEY | LV_EVENT_PREPROCESS), NULL);
@@ -345,6 +351,15 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
     lv_label_set_text(colon, ":");
     lv_obj_set_style_text_font(colon, &lv_font_montserrat_24, 0);
     dt_setup.min  = create_sb(time_row, "Min", 0, 59, timeinfo.tm_min, 2);
+    // The row centres the colon on the whole title+value column; nudge it
+    // down onto the value boxes (VB.18).
+    lv_obj_update_layout(time_row);
+    {
+        int32_t sb_mid = lv_obj_get_y(dt_setup.hour) + lv_obj_get_height(dt_setup.hour) / 2
+                       + lv_obj_get_y(lv_obj_get_parent(dt_setup.hour));
+        int32_t colon_mid = lv_obj_get_y(colon) + lv_obj_get_height(colon) / 2;
+        lv_obj_set_style_translate_y(colon, sb_mid - colon_mid, 0);
+    }
 
     add_btn(manual_card, LV_SYMBOL_OK "  Apply", save_datetime_cb, &dt_setup, false);
 

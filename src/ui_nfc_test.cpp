@@ -150,7 +150,7 @@ static void render(NfcTestCtx *ctx)
         } else {
             char buf[96];
             if (ctx->last_preview[0]) {
-                snprintf(buf, sizeof(buf), "Last: %s — %s",
+                snprintf(buf, sizeof(buf), "Last: %s - %s",
                          kind_name(ctx->last_kind), ctx->last_preview);
             } else {
                 snprintf(buf, sizeof(buf), "Last: %s",

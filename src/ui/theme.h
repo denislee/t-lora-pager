@@ -69,6 +69,9 @@ lv_color_t ui_color_title_fg();  // text on the title bar
 lv_color_t ui_color_title_icon();// status icons on the title bar
 lv_color_t ui_color_title_muted();// secondary title-bar text
 int32_t ui_radius();
+// Narrow display (< 320 px wide: the 240 px T-Watch-S3). Pages switch to
+// single-column / stacked layouts and compact labels below this width.
+bool ui_is_narrow();
 #define UI_COLOR_ACCENT     ui_color_accent()
 #define UI_COLOR_MUTED      ui_color_muted()
 #define UI_COLOR_BG         ui_color_bg()

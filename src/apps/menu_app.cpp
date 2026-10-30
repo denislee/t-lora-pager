@@ -791,9 +791,11 @@ void MenuApp::onStart(lv_obj_t* parent) {
     lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    // Pixel Iso / Hotel / BeOS: the extrusion spills past the tile bounds into
-    // the panel padding, so let it draw outside the grid container.
-    if (ui_style_is_pixel() || ui_style_has_chrome()) lv_obj_add_flag(grid, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    // The focus halo (and Pixel Iso / Hotel / BeOS's extrusion) spills past
+    // the tile bounds into the panel padding, so let it draw outside the grid
+    // container. Classic clipped the halo's top/left, which read as an offset
+    // second edge on the focused tile (VB.20).
+    lv_obj_add_flag(grid, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
 
     lv_obj_update_layout(parent);
     int32_t grid_h = lv_obj_get_content_height(grid);
@@ -856,14 +858,19 @@ void MenuApp::onStart(lv_obj_t* parent) {
     int32_t tile_h = (grid_h - (rows - 1) * gap) / rows;
     if (tile_w < 50) tile_w = 50;
     if (tile_h < kMinTileH) {
-        // Still too many rows for the panel (small watch screens): keep the
-        // minimum height and let the grid scroll from the top instead of
-        // clipping the first row behind the toggle strip.
+        // Still too many rows (240 px watch): keep the minimum tile height and
+        // let the grid scroll, top-aligned, so every tile is reachable and the
+        // focused one is scrolled into view.
         tile_h = kMinTileH;
         lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scroll_dir(grid, LV_DIR_VER);
         lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER,
+        lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_START,
                               LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+        // Room for the focus halo (outline 3 + pad 2) at the scroll edges.
+        lv_obj_set_style_pad_all(grid, 5, 0);
+        lv_obj_remove_flag(grid, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        tile_w = (panel_w - 10 - (cols - 1) * gap) / cols;
     }
     // Cap tile size so a single-tile (or 2-up) layout doesn't blow into a
     // giant button. The original 3x3 sizing implicitly capped these — once
@@ -933,11 +940,14 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_label_set_text(label, item.label);
         lv_obj_set_style_text_color(label, UI_COLOR_FG, 0);
         lv_obj_set_style_text_font(label, label_font, 0);
-        lv_obj_set_width(label, tile_w - 10);
+        // One line, dotted (VB.12): a content-height label would wrap
+        // mid-word instead ("Record/er"). Narrow watch tiles drop to the
+        // small font so most names still fit whole.
+        const lv_font_t* lf = tile_w < 80 ? get_small_font() : label_font;
+        lv_obj_set_style_text_font(label, lf, 0);
+        lv_obj_set_size(label, tile_w - 10, lv_font_get_line_height(lf));
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-        // DOT only truncates with a fixed height; auto height wraps instead.
-        lv_obj_set_height(label, lv_font_get_line_height(label_font));
 
         lv_obj_add_event_cb(tile, tile_click_cb, LV_EVENT_CLICKED,
                             (void*)&item);

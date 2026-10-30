@@ -51,8 +51,8 @@ static void apply_token_labels(const std::string &display)
     settings_refresh_token_labels(
         g_tok_label, g_note_label,
         display, apps::tg_cfg_token_is_encrypted(),
-        "Enable Notes encryption (Settings » Notes Security) "
-        "before saving the bearer — the token is persisted "
+        "Enable Notes encryption (Settings > Notes Security) "
+        "before saving the bearer - the token is persisted "
         "only AES-256 wrapped, never plaintext.",
         "Token is AES-256 wrapped with your notes passphrase.");
 }
@@ -282,7 +282,7 @@ static void fav_fetch_done(FavFetchResult &res)
     } else {
         if (g_fav_status_lbl)
             lv_label_set_text_fmt(g_fav_status_lbl,
-                "%u chat(s) — tap to toggle favorite.", (unsigned)res.chats.size());
+                "%u chat(s) - tap to toggle favorite.", (unsigned)res.chats.size());
         if (g_fav_list_page) {
             fav_build_rows(g_fav_list_page, res.chats);
             // The page's focus group was built when it opened, before these

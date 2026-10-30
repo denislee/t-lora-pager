@@ -676,7 +676,7 @@ static void kick_off_send(const std::string &user_text,
     // 2. Hub fallback (hardware only) — unchanged until H4.2.
     std::string hub = hal::hub_get_url();
     if (hub.empty()) {
-        log_append("err: ", "Connect your phone (or set Settings " "\xC2\xBB" " Local Hub)");
+        log_append("err: ", "Connect your phone (or set Settings > Local Hub)");
         set_busy(false);
         return;
     }
@@ -925,6 +925,7 @@ static void enter(lv_obj_t *parent)
         lv_obj_t *b = lv_btn_create(row);
         lv_obj_set_height(b, 40);
         lv_obj_set_style_bg_color(b, UI_COLOR_ACCENT, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);  // classic's theme leaves it bare
         lv_obj_set_style_radius(b, UI_RADIUS, 0);
         lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
         lv_obj_t *l = lv_label_create(b);
@@ -944,6 +945,14 @@ static void enter(lv_obj_t *parent)
     lv_obj_set_style_radius(s_input_ta, UI_RADIUS, 0);
     lv_group_add_obj(lv_group_get_default(), s_input_ta);
 
+    // Square mic button matching the one-line input (VB.16): a fixed 40 px
+    // height with a content width rendered as a thin, too-tall sliver.
+    lv_obj_update_layout(row);
+    int32_t in_h = lv_obj_get_height(s_input_ta);
+    if (in_h < 24) in_h = 24;
+    lv_obj_set_size(s_mic_btn, in_h, in_h);
+    lv_obj_set_style_pad_all(s_mic_btn, 0, 0);
+
     // One-line textarea fires LV_EVENT_READY when Enter is pressed (or
     // when the on-screen keyboard's OK key is tapped). Treat that as send.
     lv_obj_add_event_cb(s_input_ta, send_btn_cb, LV_EVENT_READY, nullptr);
@@ -952,7 +961,7 @@ static void enter(lv_obj_t *parent)
 
     if (hal::hub_get_url().empty()) {
         log_append("info: ",
-                   "hub disabled. Settings " "\xC2\xBB" " Local Hub.");
+                   "hub disabled. Settings > Local Hub.");
     }
 
     if (!s_poll_timer) {

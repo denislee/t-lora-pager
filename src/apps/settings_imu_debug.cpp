@@ -156,7 +156,7 @@ void serial_dump_cb(lv_event_t *)
         return;
     }
 #endif
-    ui_msg_pop_up("IMU", "BHI260 not online — nothing to dump.");
+    ui_msg_pop_up("IMU", "BHI260 not online - nothing to dump.");
 }
 
 // P7.22: render_tick runs at 5 Hz; most rows (firmware ids, counters while

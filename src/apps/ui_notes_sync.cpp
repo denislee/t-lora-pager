@@ -204,7 +204,7 @@ static bool load_config(Config &c, std::string *err)
     c.token    = load_token_plain();
     if (c.branch.empty()) c.branch = NSYNC_DEFAULT_BRANCH;
     if (c.repo.empty()) {
-        if (err) *err = "Repo not set (Settings » Notes Sync).";
+        if (err) *err = "Repo not set (Settings > Notes Sync).";
         return false;
     }
     if (c.repo.find('/') == std::string::npos) {
@@ -213,7 +213,7 @@ static bool load_config(Config &c, std::string *err)
     }
     if (c.token.empty()) {
         if (err) *err = token_is_encrypted()
-                        ? "Token locked — open Notes to unlock."
+                        ? "Token locked - open Notes to unlock."
                         : "GitHub token not set.";
         return false;
     }
@@ -353,7 +353,7 @@ static void run_sync_bg()
 
     if (!hal::hub_is_enabled()) {
         bg_log_append("ERR: Local Hub is not enabled.");
-        bg_log_append("     Set the URL in Settings " "\xC2\xBB" " Local Hub.");
+        bg_log_append("     Set the URL in Settings > Local Hub.");
         hal::secret_scrub(cfg.token);
         return;
     }
@@ -449,7 +449,7 @@ static void notes_sync_worker()
         }
 #endif
     } else {
-        bg_log_append("ERR: Connect your phone (or set Settings " "\xC2\xBB" " Local Hub)");
+        bg_log_append("ERR: Connect your phone (or set Settings > Local Hub)");
     }
     bg_log_append("Done.");
 }
@@ -552,8 +552,8 @@ static void enter(lv_obj_t *parent)
     if (repo.empty()) {
         lv_label_set_text(status,
             "Not configured.\n"
-            "Set the repo and token in Settings " "\xC2\xBB" " Notes Sync.\n"
-            "Private repos work — create a fine-grained PAT with "
+            "Set the repo and token in Settings > Notes Sync.\n"
+            "Private repos work - create a fine-grained PAT with "
             "Contents: read/write on this repo only.");
     } else {
         // Plaintext is no longer a valid storage mode, but the label

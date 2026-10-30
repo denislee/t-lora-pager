@@ -68,22 +68,28 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
         lv_obj_remove_style_all(row);
         lv_obj_set_width(row, LV_PCT(100));
         lv_obj_set_height(row, LV_SIZE_CONTENT);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        // 240 px watch (VB.10): title on its own line, the two dropdowns
+        // share the full width under it.
+        const bool narrow = ui_is_narrow();
+        lv_obj_set_flex_flow(row, narrow ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_column(row, 6, 0);
-        lv_obj_set_style_pad_hor(row, 12, 0);
+        lv_obj_set_style_pad_row(row, 2, 0);
+        lv_obj_set_style_pad_hor(row, narrow ? 4 : 12, 0);
         lv_obj_set_style_pad_ver(row, 2, 0);
 
         lv_obj_t *name = lv_label_create(row);
         lv_label_set_text(name, title);
         lv_obj_set_style_text_color(name, UI_COLOR_MUTED, 0);
-        lv_obj_set_width(name, LV_PCT(26));
+        lv_obj_set_width(name, narrow ? LV_PCT(100) : LV_PCT(26));
 
         lv_obj_t *dd_face = lv_dropdown_create(row);
         lv_dropdown_set_options(dd_face, FONT_FACE_OPTIONS);
         lv_dropdown_set_selected(dd_face, face_idx);
-        lv_obj_set_width(dd_face, 0);
-        lv_obj_set_flex_grow(dd_face, 2);
+        // Narrow rows wrap: fixed shares there, since zero-width growers on a
+        // wrapped line were laid out off-screen.
+        lv_obj_set_width(dd_face, narrow ? LV_PCT(62) : 0);
+        if (!narrow) lv_obj_set_flex_grow(dd_face, 2);
         lv_obj_add_event_cb(dd_face, font_face_cb, LV_EVENT_VALUE_CHANGED,
                             (void *)kFaceIds[ctx]);
         register_subpage_group_obj(sub_page, dd_face);
@@ -91,8 +97,8 @@ void build_subpage(lv_obj_t *menu, lv_obj_t *sub_page)
         lv_obj_t *dd_size = lv_dropdown_create(row);
         lv_dropdown_set_options(dd_size, FONT_SIZE_OPTIONS);
         lv_dropdown_set_selected(dd_size, size_to_idx(size));
-        lv_obj_set_width(dd_size, 0);
-        lv_obj_set_flex_grow(dd_size, 1);
+        lv_obj_set_width(dd_size, narrow ? LV_PCT(34) : 0);
+        if (!narrow) lv_obj_set_flex_grow(dd_size, 1);
         lv_obj_add_event_cb(dd_size, font_size_cb, LV_EVENT_VALUE_CHANGED,
                             (void *)kSizeIds[ctx]);
         register_subpage_group_obj(sub_page, dd_size);

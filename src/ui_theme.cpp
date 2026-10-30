@@ -247,6 +247,12 @@ lv_color_t ui_color_title_icon()  { return ui_palette().title_icon; }
 lv_color_t ui_color_title_muted() { return ui_palette().title_muted; }
 int32_t ui_radius()               { return ui_palette().radius; }
 
+bool ui_is_narrow()
+{
+    int32_t w = lv_display_get_horizontal_resolution(NULL);
+    return w > 0 && w < 320;
+}
+
 // White in every style: the saturated fills it sits on (red badge, green
 // switch, blue accent) are dark enough that the light theme still needs white.
 lv_color_t ui_color_on_accent()
@@ -260,6 +266,9 @@ lv_color_t ui_color_on_accent()
 static lv_style_t s_list_bg;
 static lv_style_t s_default_border;
 static lv_style_t s_focus;
+static lv_style_t s_cl_track;
+static lv_style_t s_cl_indicator;
+static lv_style_t s_cl_knob;
 static lv_style_t s_px_square;
 static lv_style_t s_px_block;
 static lv_style_t s_px_pressed;
@@ -305,6 +314,9 @@ static void build_styles()
         lv_style_reset(&s_list_bg);
         lv_style_reset(&s_default_border);
         lv_style_reset(&s_focus);
+        lv_style_reset(&s_cl_track);
+        lv_style_reset(&s_cl_indicator);
+        lv_style_reset(&s_cl_knob);
         lv_style_reset(&s_px_square);
         lv_style_reset(&s_px_block);
         lv_style_reset(&s_px_pressed);
@@ -606,6 +618,21 @@ static void build_styles()
     lv_style_set_bg_opa(&s_be_select, LV_OPA_COVER);
     lv_style_set_bg_grad_dir(&s_be_select, LV_GRAD_DIR_NONE);
 
+    // Classic (VB.4): the base theme paints slider/bar/switch fills in the
+    // primary, which classic keeps black for its buttons, so on the black
+    // page the controls vanished. Accent fill, muted groove, white knob.
+    lv_style_init(&s_cl_track);
+    lv_style_set_bg_color(&s_cl_track, p.muted);
+    lv_style_set_bg_opa(&s_cl_track, LV_OPA_40);
+
+    lv_style_init(&s_cl_indicator);
+    lv_style_set_bg_color(&s_cl_indicator, p.accent);
+    lv_style_set_bg_opa(&s_cl_indicator, LV_OPA_COVER);
+
+    lv_style_init(&s_cl_knob);
+    lv_style_set_bg_color(&s_cl_knob, p.fg);
+    lv_style_set_bg_opa(&s_cl_knob, LV_OPA_COVER);
+
     s_styles_built = true;
 }
 
@@ -642,8 +669,9 @@ struct theme_styles_t {
 };
 
 static const theme_styles_t k_theme_styles[4] = {
-    /* UI_STYLE_CLASSIC: reserve borders, accent on focus, nothing else. */
-    {},
+    /* UI_STYLE_CLASSIC: reserve borders, accent on focus, accent sliders. */
+    {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+     &s_cl_track, &s_cl_indicator, &s_cl_indicator, &s_cl_knob, nullptr, nullptr},
     /* UI_STYLE_PIXEL_ISO: squared everything, extruded blocks. */
     {&s_px_square, &s_px_scrollbar, &s_px_block, &s_px_pressed, &s_px_row, nullptr,
      &s_px_track, &s_px_indicator, &s_px_indicator, &s_px_knob, nullptr, nullptr},

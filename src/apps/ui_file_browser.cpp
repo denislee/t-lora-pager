@@ -426,15 +426,23 @@ static lv_obj_t *make_side_btn(lv_obj_t *parent, const char *icon, const char *t
                                lv_event_cb_t cb, void *user_data)
 {
     lv_obj_t *btn = lv_btn_create(parent);
-    lv_obj_set_width(btn, LV_PCT(100));
+    if (ui_is_narrow()) {
+        // Narrow: the sidebar is a strip above the list; share its width.
+        lv_obj_set_width(btn, 0);
+        lv_obj_set_flex_grow(btn, 1);
+    } else {
+        lv_obj_set_width(btn, LV_PCT(100));
+    }
     lv_obj_set_height(btn, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(btn, UI_RADIUS, LV_PART_MAIN);
     lv_obj_set_style_pad_ver(btn, 4, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(btn, 6, LV_PART_MAIN);
+    lv_obj_set_style_pad_hor(btn, ui_is_narrow() ? 2 : 6, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(btn, 0, LV_PART_MAIN);
 
     lv_obj_t *lbl = lv_label_create(btn);
-    if (icon && icon[0]) {
+    if (icon && icon[0] && ui_is_narrow()) {
+        lv_label_set_text(lbl, icon);  // icon-only source buttons (VB.11)
+    } else if (icon && icon[0]) {
         lv_label_set_text_fmt(lbl, "%s %s", icon, txt);
     } else {
         lv_label_set_text(lbl, txt);
@@ -532,22 +540,28 @@ void ui_file_browser_enter(lv_obj_t *parent)
     ui_show_back_button(exit_btn_cb);
 
     // Body: two frames side-by-side — left sidebar (controls), right file list.
+    // 240 px watch (VB.11): a ~50 px sidebar wrapped every label by character,
+    // so there the controls become one strip above the list instead.
+    const bool narrow = ui_is_narrow();
     lv_obj_t *body = lv_obj_create(main_page);
     lv_obj_set_width(body, LV_PCT(100));
     lv_obj_set_flex_grow(body, 1);
-    lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_flow(body, narrow ? LV_FLEX_FLOW_COLUMN : LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_all(body, 0, 0);
     lv_obj_set_style_pad_column(body, 6, 0);
+    lv_obj_set_style_pad_row(body, 4, 0);
     lv_obj_set_style_border_width(body, 0, 0);
     lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, 0);
     lv_obj_remove_flag(body, LV_OBJ_FLAG_SCROLLABLE);
 
     // Left sidebar: storage + filter stacked vertically.
     lv_obj_t *sidebar = lv_obj_create(body);
-    lv_obj_set_width(sidebar, LV_PCT(22));
-    lv_obj_set_height(sidebar, LV_PCT(100));
-    lv_obj_set_flex_flow(sidebar, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_width(sidebar, narrow ? LV_PCT(100) : LV_PCT(22));
+    lv_obj_set_height(sidebar, narrow ? LV_SIZE_CONTENT : LV_PCT(100));
+    lv_obj_set_flex_flow(sidebar, narrow ? LV_FLEX_FLOW_ROW : LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_column(sidebar, 3, 0);
+    if (narrow) lv_obj_remove_flag(sidebar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_align(sidebar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(sidebar, 4, 0);
     lv_obj_set_style_pad_row(sidebar, 3, 0);
@@ -566,10 +580,10 @@ void ui_file_browser_enter(lv_obj_t *parent)
         src_btn_sd = NULL;
     }
 
-    make_divider(sidebar);
-    filter_btn_txt = make_side_btn(sidebar, NULL, ".txt only",
+    if (!narrow) make_divider(sidebar);
+    filter_btn_txt = make_side_btn(sidebar, NULL, narrow ? ".txt" : ".txt only",
                                    filter_click_cb, (void *)(uintptr_t)FILTER_TXT);
-    filter_btn_non_txt = make_side_btn(sidebar, NULL, "No .txt",
+    filter_btn_non_txt = make_side_btn(sidebar, NULL, narrow ? "Other" : "No .txt",
                                        filter_click_cb, (void *)(uintptr_t)FILTER_NON_TXT);
     filter_btn_all = make_side_btn(sidebar, NULL, "All",
                                    filter_click_cb, (void *)(uintptr_t)FILTER_ALL);
@@ -577,7 +591,8 @@ void ui_file_browser_enter(lv_obj_t *parent)
     // Right side: file list.
     file_list = lv_list_create(body);
     lv_obj_set_flex_grow(file_list, 1);
-    lv_obj_set_height(file_list, LV_PCT(100));
+    if (narrow) lv_obj_set_width(file_list, LV_PCT(100));
+    else        lv_obj_set_height(file_list, LV_PCT(100));
     lv_obj_set_style_radius(file_list, UI_RADIUS, 0);
     lv_obj_set_style_pad_all(file_list, 2, 0);
     lv_obj_add_event_cb(file_list, file_list_key_cb, LV_EVENT_KEY, NULL);
@@ -587,6 +602,7 @@ void ui_file_browser_enter(lv_obj_t *parent)
     lv_menu_set_page(menu, main_page);
 
 #ifdef USING_TOUCHPAD
+    ui_reserve_float_button_space(main_page);
     quit_btn = create_floating_button(exit_btn_cb, NULL);
 #endif
 }

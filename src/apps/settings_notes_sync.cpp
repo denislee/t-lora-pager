@@ -42,11 +42,11 @@ static void apply_token_labels(const std::string &display)
     settings_refresh_token_labels(
         g_tok_label, g_note_label,
         display, apps::nsync_cfg_token_is_encrypted(),
-        "Enable Notes encryption (Settings » Notes Security) "
-        "before saving a PAT — the token is persisted only "
+        "Enable Notes encryption (Settings > Notes Security) "
+        "before saving a PAT - the token is persisted only "
         "AES-256 wrapped, never plaintext.",
         "Token is AES-256 wrapped with your notes passphrase. "
-        "Private repos work — use a fine-grained PAT with "
+        "Private repos work - use a fine-grained PAT with "
         "Contents: read/write on just this repo.");
 }
 

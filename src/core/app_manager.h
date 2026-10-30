@@ -60,6 +60,7 @@ public:
     const std::vector<std::shared_ptr<App>>& apps() const { return _apps; }
 
 private:
+    static lv_obj_t* createAppRoot(lv_obj_t* parent);
     AppManager() = default;
     AppManager(const AppManager&) = delete;
     AppManager& operator=(const AppManager&) = delete;

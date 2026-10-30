@@ -51,7 +51,7 @@ static void ble_kb_keepalive_task(void *)
     bool was_connected = false;
     uint32_t last_ka_ms = 0;
     for (;;) {
-        // PB.12/Lever3: park during fake sleep — the keyboard rail is cut
+        // PB.12/Lever3: park during fake sleep - the keyboard rail is cut
         // while the display is off, so no keystrokes can be sent. Blocking
         // here removes the 1 Hz wakes. was_connected is cleared so conn-params
         // re-apply on the next real connect after wake. ui_resume_timers()
@@ -76,7 +76,7 @@ static void ble_kb_keepalive_task(void *)
         }
         was_connected = now_connected;
         // P4.14: 1 Hz while connected (keepalive timing + conn-param watch);
-        // 5 s cadence while disconnected — the 1 Hz was pointless overhead.
+        // 5 s cadence while disconnected - the 1 Hz was pointless overhead.
         vTaskDelay(pdMS_TO_TICKS(now_connected ? 1000 : 5000));
     }
 }
@@ -130,7 +130,7 @@ void hw_set_wifi_enable(bool en) {
 #ifdef ARDUINO
     if (en) {
         WiFi.mode(WIFI_STA);
-        // Make the Arduino default explicit — determinism, not a behaviour change.
+        // Make the Arduino default explicit - determinism, not a behaviour change.
         // Without this call the stack uses WIFI_PS_MIN_MODEM by default, but
         // keeping it implicit means hw_wifi_powersave_active() cannot reliably
         // restore MIN after a fake-sleep wake (the baseline would be unknown).
@@ -154,14 +154,14 @@ static void hw_wifi_reconnect_saved()
 }
 #endif
 
-// PB.2 — WiFi power-save wrappers called by hw_power_down_all / hw_power_up_all.
+// PB.2 - WiFi power-save wrappers called by hw_power_down_all / hw_power_up_all.
 //
 // While the device is in fake sleep the LVGL timer that drives the 60 s Telegram
 // poll is frozen, so there is no inbound-latency consumer to worry about.
 // MAX_MODEM lets the RF front-end sleep for the full listen interval instead of
 // waking every DTIM beacon, saving an estimated 1–5 mA while associated.
 // The guard on hw_get_wifi_connected() means we touch the stack only when there
-// is an active association — if WiFi is off or disconnected the calls are no-ops.
+// is an active association - if WiFi is off or disconnected the calls are no-ops.
 void hw_wifi_powersave_sleep()
 {
 #ifdef ARDUINO
@@ -267,7 +267,7 @@ void hw_get_wifi_scan_result(std::vector<wifi_scan_params_t> &list)
 
 void hw_set_wifi_connect(wifi_conn_params_t &params)
 {
-    // P4.28: never log the password — SSID only.
+    // P4.28: never log the password - SSID only.
     log_d("hw_set_wifi_connect ssid:<%s>", params.ssid.c_str());
 #ifdef ARDUINO
     String ssid = params.ssid.c_str();
@@ -278,7 +278,7 @@ void hw_set_wifi_connect(wifi_conn_params_t &params)
     WiFi.disconnect(false, false);
     WiFi.begin(ssid, password);
     // Saving is deferred to hw_wifi_add_saved(), called by the UI only after
-    // association succeeds — that way bad passwords don't pollute favorites.
+    // association succeeds - that way bad passwords don't pollute favorites.
 #endif
 }
 
@@ -375,7 +375,7 @@ void hw_wifi_add_saved(const std::string &ssid, const std::string &password)
         wifi_key_pass(i, pk);
         String s = p.getString(sk, "");
         if (s.length() == 0) continue;
-        if (ssid == s.c_str()) continue;  // dedup — we just prepended it
+        if (ssid == s.c_str()) continue;  // dedup - we just prepended it
         String pw = p.getString(pk, "");
         kept.emplace_back(s.c_str(), pw.c_str());
     }
@@ -480,7 +480,7 @@ namespace {
 // framework. Verified against framework-arduinoespressif32@3.20014.231204
 // (arduino-esp32 2.0.14): WiFiClientSecure exposes no setSession()/getSession(),
 // and start_ssl_client() calls mbedtls_ssl_setup() immediately before
-// mbedtls_ssl_handshake() with no hook in between — so a session seeded before
+// mbedtls_ssl_handshake() with no hook in between - so a session seeded before
 // connect() is discarded by the setup call. Saving sessions without being able
 // to restore them buys nothing and costs static RAM, so no cache is kept here.
 //
@@ -489,7 +489,7 @@ namespace {
 //       exposes setSession(), then seed from a small per-host LRU cache; or
 //   (b) vendor a patched ssl_client.cpp that accepts an mbedtls_ssl_session*
 //       and calls mbedtls_ssl_set_session() between setup and handshake.
-// Until then every HTTPS request pays a full handshake — which is exactly why
+// Until then every HTTPS request pays a full handshake - which is exactly why
 // P4.16's cadence backoff and the hub-first plain-HTTP LAN path matter.
 // HTTPClient::setReuse(true) below is kept: it is free and helps whenever a
 // single HTTPClient makes more than one request (the redirect chain).
@@ -499,7 +499,7 @@ namespace {
 // P4.27: enable TLS certificate validation.
 //
 // Every HTTPS connection this firmware makes used to run setInsecure(), so the
-// notes-sync token and — worse — the Telegram bot token in the Authorization
+// notes-sync token and - worse — the Telegram bot token in the Authorization
 // header travelled over connections any on-path attacker could impersonate with
 // a self-signed cert.
 //
@@ -510,7 +510,7 @@ namespace {
 // that guesses one of those wrong fails closed in the field with no recovery
 // short of a reflash; ~55 KB of flash removes that entire failure class.
 //
-// There is no setInsecure() fallback on failure — that would reintroduce the
+// There is no setInsecure() fallback on failure - that would reintroduce the
 // downgrade this fixes. A validation failure surfaces as a failed request.
 static void setup_secure(WiFiClientSecure &sec)
 {
@@ -747,15 +747,15 @@ bool hw_http_request(const char *url,
 // retry timestamps and does nothing if it is not yet time to act.
 //
 // State machine:
-//   IDLE       — connected or wifi_enable just turned false. No action.
-//   BACKOFF    — disconnected; retry hw_wifi_reconnect_saved() on exponential
+//   IDLE       - connected or wifi_enable just turned false. No action.
+//   BACKOFF    - disconnected; retry hw_wifi_reconnect_saved() on exponential
 //                backoff 30 s -> 60 s -> 300 s (capped). After 5 consecutive
 //                failures, kill WiFi entirely and enter LONG_BACKOFF.
-//   LONG_BACKOFF — WiFi modem off; retry after 15 min, then restart from
+//   LONG_BACKOFF - WiFi modem off; retry after 15 min, then restart from
 //                  the 30 s backoff schedule.
 //
 // hw_wifi_reconnect_saved() is the existing function that drives WiFi.begin()
-// from the saved credential. setAutoReconnect remains false — we drive it.
+// from the saved credential. setAutoReconnect remains false - we drive it.
 
 void hw_wifi_supervise(uint32_t now_ms)
 {
@@ -767,16 +767,16 @@ void hw_wifi_supervise(uint32_t now_ms)
     static bool     s_off_for_backoff = false;
 
     if (!user_setting.wifi_enable) {
-        // WiFi disabled by the user — reset everything.
+        // WiFi disabled by the user - reset everything.
         s_armed = false; s_fails = 0;
         s_backoff_ms = 30000u; s_off_for_backoff = false;
         return;
     }
 
     if (hw_get_wifi_connected()) {
-        // Successful association — reset backoff state.
+        // Successful association - reset backoff state.
         if (s_fails || s_off_for_backoff || s_armed) {
-            log_i("[wifi_sv] connected — backoff reset");
+            log_i("[wifi_sv] connected - backoff reset");
         }
         s_armed = false; s_fails = 0;
         s_backoff_ms = 30000u; s_off_for_backoff = false;
@@ -798,7 +798,7 @@ void hw_wifi_supervise(uint32_t now_ms)
 
     if (s_off_for_backoff) {
         // Restore the modem after the long backoff and try once.
-        log_i("[wifi_sv] long backoff expired — restoring modem");
+        log_i("[wifi_sv] long backoff expired - restoring modem");
         WiFi.mode(WIFI_STA);
         WiFi.setSleep(WIFI_PS_MIN_MODEM);
         s_off_for_backoff = false;
@@ -814,8 +814,8 @@ void hw_wifi_supervise(uint32_t now_ms)
     s_fails++;
 
     if (s_fails >= 5) {
-        // Five consecutive misses — kill the modem for 15 min.
-        log_w("[wifi_sv] 5 failures — WiFi OFF for 15 min");
+        // Five consecutive misses - kill the modem for 15 min.
+        log_w("[wifi_sv] 5 failures - WiFi OFF for 15 min");
         WiFi.mode(WIFI_OFF);
         s_off_for_backoff = true;
         s_next_ms = now_ms + 15u * 60u * 1000u;
@@ -941,7 +941,7 @@ void hw_set_ble_key(media_key_value_t key)
 
 // PB.12/Lever3: unblock the BLE keepalive task when leaving fake sleep.
 // Called from ui_resume_timers() alongside the LVGL/keyboard/rotary kicks.
-// Safe from any task context — a give while the task is running simply
+// Safe from any task context - a give while the task is running simply
 // leaves the notification pending for the next take. No-op on the emulator.
 void hw_ble_kb_task_notify_wake()
 {

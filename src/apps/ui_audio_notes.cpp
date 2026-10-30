@@ -725,6 +725,7 @@ static void ui_notes_enter(lv_obj_t *parent)
     }
 
 #ifdef USING_TOUCHPAD
+    ui_reserve_float_button_space(main_page);
     quit_btn = create_floating_button(exit_btn_cb, NULL);
 #endif
 }

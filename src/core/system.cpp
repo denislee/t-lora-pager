@@ -527,6 +527,13 @@ void System::applyChromeStyle() {
     if (_statBackBtn) {
         lv_obj_t *lbl = lv_obj_get_child(_statBackBtn, 0);
         if (lbl) lv_obj_set_style_text_color(lbl, ui_color_title_fg(), 0);
+        // The theme focus ring takes the palette focus colour, which in Hotel
+        // day is the title-bar blue itself, so the focused back button looked
+        // unfocused (VB.14). On the bar, fall back to the title text colour.
+        const ui_palette_t &pal = ui_palette();
+        lv_color_t ring = lv_color_eq(pal.focus, pal.titlebar) ? pal.title_fg : pal.focus;
+        lv_obj_set_style_border_color(_statBackBtn, ring, LV_STATE_FOCUSED);
+        lv_obj_set_style_border_color(_statBackBtn, ring, LV_STATE_FOCUS_KEY);
     }
     if (_statFileCountLabel) lv_obj_set_style_text_color(_statFileCountLabel, ui_color_title_muted(), 0);
     reset_icon_color_cache();
@@ -546,6 +553,12 @@ void System::showMenu() {
 
 void System::hideMenu() {
     lv_tileview_set_tile_by_index(_mainScreen, 0, 1, LV_ANIM_OFF);
+}
+
+void System::setClockVisible(bool visible) {
+    if (!_statTimeLabel) return;
+    if (visible) lv_obj_remove_flag(_statTimeLabel, LV_OBJ_FLAG_HIDDEN);
+    else         lv_obj_add_flag(_statTimeLabel, LV_OBJ_FLAG_HIDDEN);
 }
 
 void System::enterApp(const char* name) {

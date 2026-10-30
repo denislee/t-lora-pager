@@ -742,7 +742,7 @@ static void render_chats()
         lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
         lv_label_set_text(hint,
             "No favorites yet.\n"
-            "Add chats in Settings " "\xC2\xBB" " Telegram " "\xC2\xBB" " Favorites.");
+            "Add chats in Settings > Telegram > Favorites.");
         lv_obj_set_width(hint, lv_pct(100));
         lv_obj_set_style_text_color(hint, UI_COLOR_MUTED, 0);
         lv_obj_set_style_text_font(hint, get_telegram_font(), 0);
@@ -855,7 +855,7 @@ static bool load_bridge_auth(std::string &url, std::string &auth, std::string *e
     }
     if (tok.empty()) {
         if (err) *err = token_is_encrypted()
-                        ? "Token locked — open Notes to unlock."
+                        ? "Token locked - open Notes to unlock."
                         : "Bearer token not set.";
         return false;
     }
@@ -1461,7 +1461,7 @@ static void show_chat_list()
     lv_obj_add_flag(s_status_label, LV_OBJ_FLAG_HIDDEN);
 
     if (!configured()) {
-        set_status("Not configured — Settings → Telegram", UI_COLOR_MUTED);
+        set_status("Not configured - Settings > Telegram", UI_COLOR_MUTED);
         return;
     }
     if (tg_uplink() == TG_UP_NONE) {
@@ -1580,7 +1580,7 @@ static void show_not_configured()
     lv_label_set_text(msg,
         "Not configured.\n\n"
         "Connect the phone companion app (logged into Telegram), "
-        "or open Settings \xC2\xBB Telegram to set a bridge URL "
+        "or open Settings > Telegram to set a bridge URL "
         "and bearer token.");
     lv_obj_set_width(msg, lv_pct(100));
     lv_obj_set_style_text_color(msg, UI_COLOR_MUTED, 0);

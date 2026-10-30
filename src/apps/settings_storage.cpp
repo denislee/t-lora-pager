@@ -212,7 +212,7 @@ void storage_copy_notes_cb(lv_event_t *) {
     if (!phone && !hal::hub_is_enabled()) {
         ui_msg_pop_up("Phone",
                       "Connect your phone\n"
-                      "(or set Settings " "\xC2\xBB" " Local Hub).");
+                      "(or set Settings > Local Hub).");
         return;
     }
 

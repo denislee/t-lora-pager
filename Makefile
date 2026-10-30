@@ -10,7 +10,7 @@ UPLOAD_FLAGS += --upload-port $(PORT)
 MONITOR_FLAGS += --port $(PORT)
 endif
 
-.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim ios-device protocol-test
+.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim ios-device protocol-test lint-glyphs
 
 all: build
 
@@ -52,6 +52,9 @@ protocol-test:
 	cd tools/pagerlink && go test ./...
 	$(MAKE) -C ios test-linux
 
+lint-glyphs:
+	python3 tools/check_ui_glyphs.py src
+
 help:
 	@echo "Targets:"
 	@echo "  make build          - compile (ENV=$(ENV))"
@@ -66,6 +69,7 @@ help:
 	@echo "  make ios-sim        - build the iOS app for the Simulator"
 	@echo "  make ios-device     - build and install the iOS app on the connected iPhone"
 	@echo "  make protocol-test  - check vectors, Unity + Go + PagerKit tests"
+	@echo "  make lint-glyphs    - reject UI string literals the fonts cannot render"
 	@echo ""
 	@echo "Variables:"
 	@echo "  ENV=<env>           - PlatformIO env (default: tlora_pager)"

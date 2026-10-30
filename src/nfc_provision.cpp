@@ -105,8 +105,8 @@ static void show_confirm(const Slot *slot, const std::string &value)
     msg += mask_preview(value);
 
     if (!notes_crypto_is_enabled()) {
-        msg += "\n\nNotes encryption is off — enable it in\n"
-               "Settings " "\xC2\xBB" " Notes Security first.";
+        msg += "\n\nNotes encryption is off - enable it in\n"
+               "Settings > Notes Security first.";
     } else if (!notes_crypto_is_unlocked()) {
         msg += "\n\nNotes session is locked.\nUnlock before saving.";
     }

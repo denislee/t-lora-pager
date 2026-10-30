@@ -47,19 +47,45 @@ void AppManager::switchApp(const std::string& name, lv_obj_t* parent) {
         log_i("Switching to app: %s", _activeApp->getName().c_str());
         
         // Clean the parent for the new app unless it keeps its UI (home, IS.3).
+        // Non-persistent apps get a fresh full-size root (VB.1): the panel is
+        // shared, so styles/flags/event callbacks an app puts on its parent
+        // would otherwise leak into every app opened after it.
+        lv_obj_t* root = parent;
         if (!_activeApp->persistentUi()) {
             INPUT_PROF_SPAN("switchApp.clean");
             lv_obj_clean(parent);
+            root = createAppRoot(parent);
         }
-        _activeApp->setRoot(parent);
+        _activeApp->setRoot(root);
         {
             INPUT_PROF_SPAN("switchApp.onStart");
-            _activeApp->onStart(parent);
+            _activeApp->onStart(root);
         }
         INPUT_PROF(prof::dump_group(name.c_str()));
     } else {
         log_e("App not found: %s", name.c_str());
     }
+}
+
+lv_obj_t* AppManager::createAppRoot(lv_obj_t* parent) {
+    // Baseline every app starts from: a 4 px inset (what most apps used to
+    // inherit by accident from a previously opened Chat/Remote), borderless,
+    // transparent (the panel underneath paints the themed background),
+    // scrollable like the bare tile it replaces. Apps may restyle it freely.
+    lv_obj_t* root = lv_obj_create(parent);
+    lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(root, 0, 0);
+    lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(root, 0, 0);
+    lv_obj_set_style_outline_width(root, 0, 0);
+    lv_obj_set_style_shadow_width(root, 0, 0);
+    lv_obj_set_style_radius(root, 0, 0);
+    lv_obj_set_style_pad_all(root, 4, 0);
+    lv_obj_set_style_pad_row(root, 0, 0);
+    lv_obj_set_style_pad_column(root, 0, 0);
+    lv_obj_remove_flag(root, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_update_layout(root);  // apps read lv_obj_get_width(parent) in onStart
+    return root;
 }
 
 void AppManager::queueSwitchApp(const std::string& name, lv_obj_t* parent) {

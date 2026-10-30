@@ -708,6 +708,8 @@ void ble_volume_btn_attach(lv_obj_t *btn, void (*refresh)(void), bool require_co
 static lv_obj_t *create_row(lv_obj_t *parent, const char *icon, const char *txt)
 {
     lv_obj_t *obj = lv_menu_cont_create(parent);
+    // Air between the icon, the label and the control (VB.17).
+    lv_obj_set_style_pad_column(obj, 6, 0);
 
     if (icon) {
         lv_obj_t *img = lv_img_create(obj);
@@ -722,6 +724,20 @@ static lv_obj_t *create_row(lv_obj_t *parent, const char *icon, const char *txt)
     }
 
     return obj;
+}
+
+// 240 px watch (VB.10): put the row's label on its own line above the
+// control instead of squeezing both into one line and wrapping mid-word.
+static void stack_row_on_narrow(lv_obj_t *row)
+{
+    if (!ui_is_narrow()) return;
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_row(row, 2, 0);
+    lv_obj_t *label = lv_obj_get_child(row, 0);
+    if (label && lv_obj_check_type(label, &lv_label_class)) {
+        lv_obj_set_flex_grow(label, 0);  // a grower ignores its width
+        lv_obj_set_width(label, LV_PCT(100));
+    }
 }
 
 lv_obj_t *create_text(lv_obj_t *parent, const char *txt)
@@ -741,6 +757,18 @@ lv_obj_t *create_slider(lv_obj_t *parent, const char *txt, int32_t min, int32_t 
     lv_obj_set_style_border_width(slider, 0, LV_STATE_FOCUS_KEY);
     lv_obj_set_style_border_width(slider, 0, LV_STATE_FOCUSED);
     lv_obj_set_flex_grow(slider, 1);
+    // The knob overhangs the track ends; keep it off the label before and
+    // the value label after (VB.8). A row gap, not a slider margin: LVGL
+    // 9.2's flex grow ignores margins and the row then overflowed sideways.
+    lv_obj_set_style_pad_column(obj, 14, 0);
+    if (ui_is_narrow()) {
+        // Wrapped rows lay a grower out at zero width: give the track a fixed
+        // share and leave the rest for the caller's value label.
+        stack_row_on_narrow(obj);
+        lv_obj_set_flex_grow(slider, 0);
+        lv_obj_set_width(slider, LV_PCT(62));
+        lv_obj_set_style_margin_left(slider, 8, 0);  // knob overhang; fine without grow
+    }
     lv_slider_set_range(slider, min, max);
     lv_slider_set_value(slider, val, LV_ANIM_OFF);
 
@@ -787,6 +815,10 @@ lv_obj_t *create_dropdown(lv_obj_t *parent, const char *txt, const char *options
     lv_obj_t *dd = lv_dropdown_create(obj);
     lv_dropdown_set_options(dd, options);
     lv_dropdown_set_selected(dd, default_sel);
+    if (ui_is_narrow()) {
+        stack_row_on_narrow(obj);
+        lv_obj_set_width(dd, LV_PCT(100));
+    }
 
     // The dropdown already shows its own focus highlight via the theme,
     // so don't propagate focus to the parent row — avoids a redundant
@@ -806,9 +838,26 @@ lv_obj_t *create_floating_button(lv_event_cb_t event_cb, void* user_data)
     lv_obj_align(float_btn, LV_ALIGN_BOTTOM_MID, 0, -30);
     lv_obj_add_event_cb(float_btn, event_cb, LV_EVENT_CLICKED, user_data);
     lv_obj_set_style_radius(float_btn, LV_RADIUS_CIRCLE, 0);
+    // Always a filled accent disc: classic's black theme primary left a bare
+    // "<" drawn straight over the content underneath (VB.7).
+    lv_obj_set_style_bg_color(float_btn, UI_COLOR_ACCENT, 0);
+    lv_obj_set_style_bg_opa(float_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(float_btn, UI_COLOR_ON_ACCENT, 0);
+    lv_obj_set_style_bg_image_recolor(float_btn, UI_COLOR_ON_ACCENT, 0);
+    lv_obj_set_style_bg_image_recolor_opa(float_btn, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_image_src(float_btn, LV_SYMBOL_LEFT, 0);
     lv_obj_set_style_text_font(float_btn, lv_theme_get_font_large(float_btn), 0);
     return float_btn;
+}
+
+void ui_reserve_float_button_space(lv_obj_t *scrollable)
+{
+#ifdef USING_TOUCHPAD
+    // The button sits 30 px above the bottom edge; leave a little air too.
+    if (scrollable) lv_obj_set_style_pad_bottom(scrollable, FLOAT_BUTTON_HEIGHT + 30 + 6, 0);
+#else
+    (void)scrollable;
+#endif
 }
 
 

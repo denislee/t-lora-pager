@@ -85,6 +85,7 @@ lv_obj_t *add_slider(lv_obj_t *sub_page, const char *txt, int32_t min, int32_t m
 // stretched across the whole row; the title label absorbs the rest.
 void size_dropdown_row(lv_obj_t *dd)
 {
+    if (ui_is_narrow()) return;  // create_dropdown already stacked it
     lv_obj_t *row = lv_obj_get_parent(dd);
     lv_obj_t *title_label = lv_obj_get_child(row, 0);
     lv_obj_set_flex_grow(title_label, 1);

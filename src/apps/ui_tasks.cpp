@@ -145,21 +145,6 @@ static void task_event_cb(lv_event_t *e) {
                 break;
             }
         }
-    } else if (code == LV_EVENT_FOCUSED || code == LV_EVENT_DEFOCUSED) {
-        lv_obj_t * label = NULL;
-        if (lv_obj_has_class(obj, &lv_checkbox_class)) {
-            label = lv_obj_get_child(obj, 0);
-        } else if (lv_obj_has_class(obj, &lv_label_class)) {
-            label = obj;
-        }
-
-        if (label) {
-            if (code == LV_EVENT_FOCUSED) {
-                lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-            } else {
-                lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
-            }
-        }
     } else if (code == LV_EVENT_KEY) {
         uint32_t key = lv_event_get_key(e);
         if (key == LV_KEY_BACKSPACE || key == LV_KEY_DEL) {
@@ -359,8 +344,11 @@ static void rebuild_task_list() {
             
             // Create a separate label for the text to support scrolling
             lv_obj_t * label = lv_label_create(t.obj);
-            lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP); // Default to CLIP
+            // Dotted, never CLIP: a clipped label overflowed the row and gave
+            // the list a horizontal scrollbar across the text (VB.13).
+            lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
             lv_obj_set_width(label, LV_PCT(100));
+            lv_obj_remove_flag(t.obj, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_align(label, LV_ALIGN_LEFT_MID);
 
             // Hide the default checkbox indicator box to make it a clean list
@@ -393,7 +381,7 @@ static void rebuild_task_list() {
         } else {
             t.obj = lv_label_create(task_container);
             lv_obj_set_width(t.obj, LV_PCT(100));
-            lv_label_set_long_mode(t.obj, LV_LABEL_LONG_CLIP);
+            lv_label_set_long_mode(t.obj, LV_LABEL_LONG_WRAP);
             lv_obj_set_style_pad_left(t.obj, 0, LV_PART_MAIN);
             
             string display_text = string(LV_SYMBOL_BULLET) + " " + t.text;
@@ -438,6 +426,7 @@ static void ui_tasks_enter(lv_obj_t *parent) {
     lv_obj_set_width(task_container, LV_PCT(100));
     lv_obj_set_flex_grow(task_container, 1);
     lv_obj_set_flex_flow(task_container, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(task_container, LV_DIR_VER);
     lv_obj_set_style_bg_opa(task_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(task_container, 0, 0);
     lv_obj_set_style_pad_all(task_container, 0, 0);
@@ -451,6 +440,7 @@ static void ui_tasks_enter(lv_obj_t *parent) {
     lv_group_focus_obj(add_ta);
 
 #ifdef USING_TOUCHPAD
+    ui_reserve_float_button_space(main_page);
     quit_btn = create_floating_button(tasks_back_cb, NULL);
 #endif
 }

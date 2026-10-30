@@ -47,6 +47,9 @@ public:
     void hideBackButton();
     void applyChromeStyle();
     lv_obj_t* getBackButton() const { return _statBackBtn; }
+    // Hide the centred status-bar clock while an app puts its own text in
+    // the status bar (the editor's word counter on 240 px watches, VB.6).
+    void setClockVisible(bool visible);
     lv_event_cb_t getBackButtonCb() const { return _backBtnCb; }
 
 private:
