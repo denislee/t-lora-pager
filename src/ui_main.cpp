@@ -124,6 +124,14 @@ bool ui_transition_pending()
     return core::System::getInstance().transitionPending();
 }
 
+void ui_back_shortcut()
+{
+    core::System &sys = core::System::getInstance();
+    lv_obj_t *btn = sys.getBackButton();
+    if (!btn || !sys.getBackButtonCb() || lv_obj_has_flag(btn, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+}
+
 void set_default_group(lv_group_t *group)
 {
     lv_group_set_default(group);

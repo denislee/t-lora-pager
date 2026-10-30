@@ -75,6 +75,12 @@ void menu_show_deferred();
 // pressed during a transition land on the new screen instead of the old one.
 bool ui_transition_pending();
 
+// Mod+Space on the pager keyboard: 'go back' from any screen. Clicks the
+// status-bar back button when one is shown (every app and modal routes its
+// exit / pop-subpage path through that button's callback); no-op on the home
+// screen, where the button is hidden. Call on the LVGL task only.
+void ui_back_shortcut();
+
 // True while any SSH session (LibSshBackend or loopback stub) is in the
 // Connected state. Set/cleared by ui_ssh.cpp; read by factory.ino loop() as a
 // guard that prevents auto fake-sleep while a live terminal session is open.

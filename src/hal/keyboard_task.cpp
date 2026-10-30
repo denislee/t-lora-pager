@@ -74,13 +74,20 @@ char       s_held_char   = '\0';
 TickType_t s_press_tick  = 0;
 TickType_t s_repeat_tick = 0;
 
+// Mod+Space. The vendor driver maps Space to '\0' while the mod (alt) key is
+// held (handleSpaceAndNullChar), and it is the only matrix key that does, so a
+// '\0' press with alt down is rewritten to this sentinel. kb_read_cb turns it
+// into ui_back_shortcut() instead of a key event.
+constexpr char kBackChord = 0x1C;
+
 // Keys whose release the vendor driver swallows (handleSpecialKeys returns -1
 // on release for backspace, so no KB_RELEASED surfaces). We rely on having
 // disabled vendor repeat (setRepeat(false) in display.cpp) so each physical
 // press gives us exactly one KB_PRESSED — we treat each as an instantaneous
 // tap, never tracking s_held_char for them, so no auto-repeat while held.
 // 0x17 is Alt+Backspace (word delete); '\b' is plain backspace.
-inline bool is_pingkey(char c) { return c == '\b' || c == 0x17; }
+// kBackChord is pulsed the same way so holding Mod+Space never repeats.
+inline bool is_pingkey(char c) { return c == '\b' || c == 0x17 || c == kBackChord; }
 
 // Enter must not auto-repeat: holding it should fire exactly one activation,
 // not a stream. The vendor driver does emit KB_RELEASED for it, so unlike
@@ -155,6 +162,9 @@ void keyboard_task_fn(void *)
                 prev_none = false;
                 if (state == KB_PRESSED) {
                     TickType_t now = xTaskGetTickCount();
+                    if (c == '\0' && instance.kb.isAltKeyPressed()) {
+                        c = kBackChord;
+                    }
                     // Backspace and Alt+Backspace: the vendor's
                     // handleSpecialKeys swallows KB_RELEASED. With vendor
                     // repeat disabled (display.cpp), each physical press
@@ -262,6 +272,12 @@ void kb_read_cb(lv_indev_t *drv, lv_indev_data_t *data)
     if (ev.state == KB_PRESSED) {
         if (ev.c == 0x17) {  // Alt+Backspace
             handle_alt_backspace(drv);
+            data->state = LV_INDEV_STATE_REL;
+            data->continue_reading = more;
+            return;
+        }
+        if (ev.c == kBackChord) {
+            ui_back_shortcut();
             data->state = LV_INDEV_STATE_REL;
             data->continue_reading = more;
             return;
