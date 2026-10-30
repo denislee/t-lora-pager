@@ -10,7 +10,7 @@ UPLOAD_FLAGS += --upload-port $(PORT)
 MONITOR_FLAGS += --port $(PORT)
 endif
 
-.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim ios-device protocol-test lint-glyphs
+.PHONY: all build upload monitor flash clean emulator help envs ios-gen ios-test ios-sim ios-device protocol-test lint-glyphs rescue
 
 all: build
 
@@ -24,6 +24,11 @@ monitor:
 	$(PIO) device monitor -b 115200 $(MONITOR_FLAGS)
 
 flash: upload monitor
+
+# Screen shows noise after a flash: boot a pager stuck in download mode and read its log.
+SECS ?= 30
+rescue:
+	python3 tools/pager_rescue.py --seconds $(SECS) $(if $(PORT),--port $(PORT))
 
 clean:
 	$(PIO) run -e $(ENV) --target clean
@@ -61,6 +66,7 @@ help:
 	@echo "  make upload         - compile and upload"
 	@echo "  make monitor        - open serial monitor @ 115200"
 	@echo "  make flash          - upload then monitor"
+	@echo "  make rescue         - boot a pager stuck in download mode, show boot log (SECS=30)"
 	@echo "  make clean          - clean build artifacts"
 	@echo "  make emulator       - build SDL2 emulator"
 	@echo "  make envs           - list available PlatformIO envs"
