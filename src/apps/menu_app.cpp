@@ -832,12 +832,34 @@ void MenuApp::onStart(lv_obj_t* parent) {
     else if (visible_count == 2) cols = 2;
     else if (visible_count == 4) cols = 2;
     else                         cols = 3;
-    int rows = (visible_count + cols - 1) / cols;
     const int gap = 8;
+    // On short panels (the pager's grid is ~140 px) three rows can't reach
+    // the 50 px minimum tile height and the centered grid would clip the top
+    // and bottom rows. Trade height for width: add columns while the tiles
+    // stay wide enough for their labels.
+    const int32_t kMinTileH = 50;
+    const int32_t kMinTileW = 64;
+    while (cols < visible_count) {
+        int r = (visible_count + cols - 1) / cols;
+        if ((grid_h - (r - 1) * gap) / r >= kMinTileH) break;
+        int nc = cols + 1;
+        if ((panel_w - (nc - 1) * gap) / nc < kMinTileW) break;
+        cols = nc;
+    }
+    int rows = (visible_count + cols - 1) / cols;
     int32_t tile_w = (panel_w - (cols - 1) * gap) / cols;
     int32_t tile_h = (grid_h - (rows - 1) * gap) / rows;
     if (tile_w < 50) tile_w = 50;
-    if (tile_h < 50) tile_h = 50;
+    if (tile_h < kMinTileH) {
+        // Still too many rows for the panel (small watch screens): keep the
+        // minimum height and let the grid scroll from the top instead of
+        // clipping the first row behind the toggle strip.
+        tile_h = kMinTileH;
+        lv_obj_add_flag(grid, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_scrollbar_mode(grid, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    }
     // Cap tile size so a single-tile (or 2-up) layout doesn't blow into a
     // giant button. The original 3x3 sizing implicitly capped these — once
     // the grid scales down it's worth keeping the upper bound.
@@ -909,6 +931,8 @@ void MenuApp::onStart(lv_obj_t* parent) {
         lv_obj_set_width(label, tile_w - 10);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        // DOT only truncates with a fixed height; auto height wraps instead.
+        lv_obj_set_height(label, lv_font_get_line_height(label_font));
 
         lv_obj_add_event_cb(tile, tile_click_cb, LV_EVENT_CLICKED,
                             (void*)&item);

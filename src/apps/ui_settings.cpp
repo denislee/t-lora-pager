@@ -718,12 +718,18 @@ static void ui_sys_enter(lv_obj_t *parent)
                           LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_column(main_page, 6, 0);
     lv_obj_set_style_pad_row(main_page, 6, 0);
+    // Gutter for the style's scrollbar (up to 8 px on BeOS) so it doesn't
+    // overdraw the right-column shortcut badges.
+    lv_obj_set_style_pad_right(main_page, 10, 0);
 
     // Grid tile with a single-letter keyboard shortcut (badge + key wiring).
     // The keys live in kTiles above.
     auto add_grid_item_sc = [&](lv_obj_t *c, char key) {
         if (!c) return;
-        lv_obj_set_width(c, LV_PCT(48));
+        // One column on the 240 px watches, where half-width tiles wrap
+        // "Display & Backlight" over three lines.
+        lv_obj_set_width(c, lv_display_get_horizontal_resolution(NULL) < 320
+                                ? LV_PCT(100) : LV_PCT(48));
         add_main_page_group_item(c);
         settings_register_shortcut(c, key);
     };
