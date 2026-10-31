@@ -238,6 +238,8 @@ void loop()
     // Prevents loop() re-requesting the toggle on every 50 ms tick and bouncing
     // the device back out of sleep.
     static bool auto_sleep_pending = false;
+    // millis() when fake sleep was first seen; 0 while awake.
+    static uint32_t s_fake_sleep_since_ms = 0;
 
     if (ui_is_fake_sleep()) {
         // Clear the latch: the rotary task processed the request and the
@@ -250,7 +252,23 @@ void loop()
         // changes mid-sleep. P5.4: the rule itself lives in
         // hw_fake_sleep_target_freq() so this and hw_power_down_all() agree.
         hw_set_cpu_freq(hw_fake_sleep_target_freq());
+
+        // Auto power off: once the screen has been asleep for the user's
+        // auto_off_min, cut power (hw_shutdown flushes saves first; the PWR
+        // button restarts). Same carve-outs as auto-sleep: never on external
+        // power or while audio plays / records.
+        if (s_fake_sleep_since_ms == 0) s_fake_sleep_since_ms = millis();
+        const uint8_t auto_off_min = hw_get_auto_off_min();
+        if (auto_off_min > 0
+                && millis() - s_fake_sleep_since_ms >= (uint32_t)auto_off_min * 60000u
+                && !hw_player_running()
+                && !hw_rec_running()
+                && !is_on_external_power()) {
+            log_i("Auto power off after %u min asleep", (unsigned)auto_off_min);
+            hw_shutdown();
+        }
     } else {
+        s_fake_sleep_since_ms = 0;
         // Settings are an in-memory struct, but the loop runs at 20 Hz —
         // refreshing the user-configured CPU freq once per second is plenty
         // and keeps the cached active_freq path branch-only on most ticks.

@@ -72,6 +72,8 @@ bool hw_get_haptic_enable();
 void hw_set_haptic_enable(bool en);
 
 void hw_get_user_setting(user_setting_params_t &param);
+// Minutes of sleep (screen off) before auto power off; 0 = never.
+uint8_t hw_get_auto_off_min();
 void hw_load_setting();
 void hw_set_user_setting(user_setting_params_t &param);
 

@@ -383,6 +383,7 @@ void bind_display(Registry &r) {
                return true;
            });
     bind_blob_int(r, "display.timeout_s", &user_setting_params_t::disp_timeout_second);
+    bind_blob_int(r, "display.auto_off_min", &user_setting_params_t::auto_off_min);
     r.bind("display.sleep_mode",
            [] { return Value::of_str(user_setting.sleep_mode ? "deep" : "light"); },
            [](const Value &v, Error &) {

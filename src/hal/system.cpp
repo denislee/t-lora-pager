@@ -169,7 +169,8 @@ uint32_t hw_fake_sleep_target_freq()
 // *** Bump SETTINGS_VERSION whenever `user_setting_params_t` changes in a way
 //     that is not byte-compatible (field reorder, type change, field removed).
 //     Adding a new field to the *end* keeps the size check effective and is
-//     safe without a version bump — missing bytes keep their default values.
+//     safe without a version bump — missing bytes keep their default values
+//     (load_grown_settings() copies a shorter same-version payload).
 static constexpr uint32_t SETTINGS_MAGIC   = 0x50414752u; // "PAGR"
 // v11: dropped user_setting_params_t.led_indicator_level (removed LED slider).
 // A struct-layout change: the size guard in load already forces a clean
@@ -488,7 +489,26 @@ static void load_default_settings()
     user_setting.cpu_freq_mhz = 240;
     user_setting.msc_prefer_sd = 1;
     user_setting.prune_internal = 0;
+    user_setting.auto_off_min = 0;
 }
+
+#ifdef ARDUINO
+// A current-version blob shorter than today's struct: fields were appended
+// since it was saved. Copy its payload over the defaults and report success;
+// any other header (magic/version/size disagreeing) is left to the reset path.
+static bool load_grown_settings(size_t stored_size)
+{
+    uint8_t buf[sizeof(SettingsHeader) + sizeof(user_setting_params_t)];
+    prefs.getBytes(NVS_NAME, buf, stored_size);
+    const SettingsHeader *h = reinterpret_cast<const SettingsHeader *>(buf);
+    if (h->magic != SETTINGS_MAGIC || h->version != SETTINGS_VERSION ||
+        h->payload_size != stored_size - sizeof(SettingsHeader)) {
+        return false;
+    }
+    memcpy(&user_setting, buf + sizeof(SettingsHeader), h->payload_size);
+    return true;
+}
+#endif
 
 void hw_load_setting()
 {
@@ -515,6 +535,12 @@ void hw_load_setting()
             log_i("Settings header mismatch (magic=%08x ver=%u size=%u), resetting to defaults",
                   (unsigned)h->magic, (unsigned)h->version, (unsigned)h->payload_size);
         }
+    } else if (stored_size > sizeof(SettingsHeader) && stored_size < kVersionedSize &&
+               load_grown_settings(stored_size)) {
+        // Same version, fields appended since it was saved (see SETTINGS_VERSION):
+        // the stored prefix was kept, the new tail keeps its defaults; re-save.
+        log_i("Settings grew %u -> %u bytes, new fields defaulted",
+              (unsigned)(stored_size - sizeof(SettingsHeader)), (unsigned)sizeof(user_setting_params_t));
     } else if (stored_size > 0 && stored_size <= sizeof(user_setting_params_t)) {
         // Legacy unversioned blob: copy what fits onto defaults, then re-save with header.
         prefs.getBytes(NVS_NAME, &user_setting, stored_size);
@@ -534,13 +560,16 @@ void hw_load_setting()
     // Emulator: the blob is a file under $PAGERLINK_NVS_DIR/pager/pager, so a
     // restart keeps the last saved settings instead of reverting to defaults.
     std::string b;
+    // A shorter payload of the same version predates appended fields: keep
+    // its prefix, the new tail keeps its defaults.
     if (hal::nvs_get_blob("pager", "pager", b) &&
-        b.size() == sizeof(SettingsHeader) + sizeof(user_setting_params_t)) {
+        b.size() > sizeof(SettingsHeader) &&
+        b.size() <= sizeof(SettingsHeader) + sizeof(user_setting_params_t)) {
         const SettingsHeader *h = reinterpret_cast<const SettingsHeader *>(b.data());
         if (h->magic == SETTINGS_MAGIC &&
             h->version == SETTINGS_VERSION &&
-            h->payload_size == sizeof(user_setting_params_t)) {
-            memcpy(&user_setting, b.data() + sizeof(SettingsHeader), sizeof(user_setting_params_t));
+            h->payload_size == b.size() - sizeof(SettingsHeader)) {
+            memcpy(&user_setting, b.data() + sizeof(SettingsHeader), h->payload_size);
         }
     }
 #endif
@@ -549,6 +578,11 @@ void hw_load_setting()
 void hw_get_user_setting(user_setting_params_t &param)
 {
     param = user_setting;
+}
+
+uint8_t hw_get_auto_off_min()
+{
+    return user_setting.auto_off_min;
 }
 
 void hw_set_user_setting(user_setting_params_t &param)

@@ -196,6 +196,17 @@ void build_catalog(Registry &r, const BoardProfile &b) {
         r.add(d);
     }
     {
+        Def d = make("display.auto_off_min", "display", "Auto power off", Type::Enum, Apply::Tick);
+        d.options.push_back(opt_i(0, "Never"));
+        d.options.push_back(opt_i(15, "15 min"));
+        d.options.push_back(opt_i(30, "30 min"));
+        d.options.push_back(opt_i(60, "1 h"));
+        d.options.push_back(opt_i(120, "2 h"));
+        d.options.push_back(opt_i(240, "4 h"));
+        d.hint = "Minutes asleep (screen off) before the pager powers off. Not on external power.";
+        r.add(d);
+    }
+    {
         Def d = make("display.ui_style", "display", "UI style", Type::Enum, Apply::Theme);
         d.options.push_back(opt_s("classic", "Classic"));
         d.options.push_back(opt_s("pixel", "Pixel Iso"));

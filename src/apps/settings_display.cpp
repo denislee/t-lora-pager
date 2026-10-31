@@ -32,6 +32,10 @@ long map_r(long x, long in_min, long in_max, long out_min, long out_max)
 // CPU clock options, in dropdown order.
 const uint16_t kCpuFreqs[] = {240, 160, 80};
 
+// Auto power off options (minutes, 0 = never), in dropdown order; must match
+// the display.auto_off_min enum in hal/settings_catalog.cpp.
+const uint8_t kAutoOffMin[] = {0, 15, 30, 60, 120, 240};
+
 // --- Slider value labels: one formatter per row, used for the initial text
 // and by the slider's callback, so the label never changes shape on the
 // first notch. ---
@@ -140,6 +144,13 @@ void sleep_mode_cb(lv_event_t *e)
     uint8_t val = (uint8_t)v;
     settings_commit_later("display.sleep_mode", settings::Value::of_str(val ? "deep" : "light"));
     set_sleep_mode_label(slider_label, val);
+}
+
+void auto_off_cb(lv_event_t *e)
+{
+    lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+    uint16_t index = lv_dropdown_get_selected(obj);
+    settings_commit_int("display.auto_off_min", kAutoOffMin[index]);
 }
 
 // Show Memory / Show File Count: event user_data is the settings registry id
@@ -262,6 +273,16 @@ void build_backlight(lv_obj_t *menu, lv_obj_t *sub_page)
     set_sleep_mode_label(add_slider(sub_page, "Sleep Mode", 0, 1, local_param.sleep_mode,
                                     sleep_mode_cb, false),
                          local_param.sleep_mode);
+
+    uint16_t off_idx = 0;
+    for (uint16_t i = 0; i < sizeof(kAutoOffMin) / sizeof(kAutoOffMin[0]); i++) {
+        if (kAutoOffMin[i] == local_param.auto_off_min) off_idx = i;
+    }
+    lv_obj_t *off_dd = create_dropdown(sub_page, "Auto Off",
+                                       "Never\n15 min\n30 min\n1 h\n2 h\n4 h",
+                                       off_idx, auto_off_cb);
+    size_dropdown_row(off_dd);
+    register_subpage_group_obj(sub_page, off_dd);
 
     create_toggle_btn_row(sub_page, "Show Memory", local_param.show_mem_usage,
                           u8_toggle_cb, (void *)"statusbar.show_mem");

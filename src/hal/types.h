@@ -157,6 +157,7 @@ typedef struct {
     uint8_t ssh_font_index;
     uint8_t chat_font_size;
     uint8_t chat_font_index;
+    uint8_t auto_off_min;   // power off after this long asleep; 0 = never
 } user_setting_params_t;
 
 typedef struct {
