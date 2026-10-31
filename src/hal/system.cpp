@@ -73,7 +73,11 @@ static uint32_t s_fake_sleep_entry_ms = 0;
 static bool s_imu_was_registered = false;
 #endif
 
-void hw_set_cpu_freq(uint32_t mhz)
+uint32_t hw_ms_since_input();
+
+// idle_ms == 0: unconditional. Otherwise the set is skipped unless no input
+// arrived for idle_ms, re-checked under the mutex (see hw_set_cpu_freq_if_idle).
+static void set_cpu_freq_locked(uint32_t mhz, uint32_t idle_ms)
 {
     if (mhz == 0) return;
 #ifdef ARDUINO
@@ -87,7 +91,7 @@ void hw_set_cpu_freq(uint32_t mhz)
     }
     if (s_cpu_freq_mutex) xSemaphoreTake(s_cpu_freq_mutex, portMAX_DELAY);
 
-    if (mhz == s_cpu_freq_mhz) {
+    if (mhz == s_cpu_freq_mhz || (idle_ms && hw_ms_since_input() < idle_ms)) {
         if (s_cpu_freq_mutex) xSemaphoreGive(s_cpu_freq_mutex);
         return;
     }
@@ -95,9 +99,19 @@ void hw_set_cpu_freq(uint32_t mhz)
     s_cpu_freq_mhz = mhz;
     if (s_cpu_freq_mutex) xSemaphoreGive(s_cpu_freq_mutex);
 #else
-    if (mhz == s_cpu_freq_mhz) return;
+    if (mhz == s_cpu_freq_mhz || (idle_ms && hw_ms_since_input() < idle_ms)) return;
     s_cpu_freq_mhz = mhz;
 #endif
+}
+
+void hw_set_cpu_freq(uint32_t mhz)
+{
+    set_cpu_freq_locked(mhz, 0);
+}
+
+void hw_set_cpu_freq_if_idle(uint32_t mhz, uint32_t idle_ms)
+{
+    set_cpu_freq_locked(mhz, idle_ms);
 }
 
 static volatile uint32_t s_last_input_ms = 0;

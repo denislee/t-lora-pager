@@ -1377,6 +1377,18 @@ static void ARDUINO_ISR_ATTR s_rotary_c_isr()
     if (hpw) portYIELD_FROM_ISR();
 }
 
+// [LOCAL PATCH] Encoder edge while awake: cut the 15 ms idle poll short so
+// the first detents of a scroll after 2 s idle are sampled at 2 ms. At 15 ms
+// a quick flick skipped quadrature states and the full-step decoder dropped
+// the step, so the wheel felt laggy on the first notches.
+static void ARDUINO_ISR_ATTR s_rotary_ab_isr()
+{
+    if (s_display_off) return;
+    BaseType_t hpw = pdFALSE;
+    if (s_rotary_task_handle) vTaskNotifyGiveFromISR(s_rotary_task_handle, &hpw);
+    if (hpw) portYIELD_FROM_ISR();
+}
+
 static void perform_fake_sleep_toggle()
 {
     if (!s_display_off) {
@@ -1433,6 +1445,8 @@ static void rotaryTask(void *p)
     // block below can ever be reached.
     s_rotary_task_handle = xTaskGetCurrentTaskHandle();
     attachInterrupt(digitalPinToInterrupt(ROTARY_C), s_rotary_c_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ROTARY_A), s_rotary_ab_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ROTARY_B), s_rotary_ab_isr, CHANGE);
     while (1) {
         // We handle the button manually here to support long-press
         bool btn_curr_state = digitalRead(ROTARY_C);
@@ -1529,8 +1543,12 @@ static void rotaryTask(void *p)
         uint32_t idle_ms = millis() - last_activity_ms;
         if (s_display_off && !long_press_active) {
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(2000));
-        } else {
-            delay(s_display_off ? 2 : ((long_press_active || idle_ms < 2000) ? 2 : 15));
+        } else if (s_display_off || long_press_active || idle_ms < 2000) {
+            delay(2);
+        } else if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(15)) > 0) {
+            // [LOCAL PATCH] Woken by an encoder edge (s_rotary_ab_isr): go
+            // fast now, before the decoder has seen a whole detent.
+            last_activity_ms = millis();
         }
     }
     vTaskDelete(NULL);

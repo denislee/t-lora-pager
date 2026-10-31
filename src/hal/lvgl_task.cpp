@@ -104,6 +104,11 @@ void lvgl_task_fn(void *)
             core::ScopedInstanceLock lock;
             if (lv_indev_t *enc = lv_get_encoder_indev())  lv_indev_read(enc);
             if (lv_indev_t *kb  = lv_get_keyboard_indev()) lv_indev_read(kb);
+            // Draw the focus move on the next lv_timer_handler() pass instead
+            // of waiting up to a whole refresh period (33 ms) for it.
+            if (lv_display_t *disp = lv_display_get_default()) {
+                lv_timer_ready(lv_display_get_refr_timer(disp));
+            }
         }
     }
 }

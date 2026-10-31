@@ -97,6 +97,10 @@ void hw_get_heap_stats(heap_stats_t &s);
 // No-op when mhz == 0.  On the emulator the tracker advances without calling
 // the Arduino API (which doesn't exist there).
 void     hw_set_cpu_freq(uint32_t mhz);
+// Lower the clock only if no input arrived in the last idle_ms. The check runs
+// under the same mutex hw_cpu_boost_for_input() takes after stamping the input
+// time, so a wheel step racing loop()'s idle drop is never overridden.
+void     hw_set_cpu_freq_if_idle(uint32_t mhz, uint32_t idle_ms);
 
 // P6.11 — called from the keyboard reader task and the vendor rotary task's
 // event hook on every input event.
