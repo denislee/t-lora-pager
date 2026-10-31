@@ -64,6 +64,7 @@ struct HomeItem {
 //   [communicate]           Telegram, Chat, Inbox (phone messages)
 //   [consume/check]         Weather
 //   [system]                SSH
+//   [play]                  Kitchen (vegetable-prep game)
 // Settings lives in the top toggle strip as a small icon rather than the grid.
 //
 // All tiles share the global accent color so the grid reads as a single
@@ -77,6 +78,7 @@ static const HomeItem kItems[] = {
     {"Inbox",    LV_SYMBOL_DOWNLOAD,  "Inbox",    inbox_unread_count,   false, false},
     {"Weather",  LV_SYMBOL_TINT,      "Weather",  nullptr,              false, false},
     {"SSH",      LV_SYMBOL_KEYBOARD,  "SSH",      nullptr,              true,  false},
+    {"Kitchen",  LV_SYMBOL_PLAY,      "Kitchen",  nullptr,              false, false},
 };
 constexpr int kItemCount = sizeof(kItems) / sizeof(kItems[0]);
 

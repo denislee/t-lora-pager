@@ -37,6 +37,7 @@ std::shared_ptr<core::App> make_notes_sync_app();
 std::shared_ptr<core::App> make_ssh_app();
 std::shared_ptr<core::App> make_chat_app();
 std::shared_ptr<core::App> make_inbox_app();
+std::shared_ptr<core::App> make_kitchen_app();
 
 // Unread phone messages (hal/companion.h) for the Inbox home tile badge.
 int inbox_unread_count();
