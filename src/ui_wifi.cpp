@@ -8,6 +8,7 @@
  */
 #include "ui_define.h"
 #include "core/input_focus.h"
+#include "hal/settings.h"
 
 #include <cstring>
 #include <string>
@@ -83,6 +84,7 @@ static void start_scan()
 {
     if (!g_ctx || g_ctx->scan_in_flight) return;
     if (!hw_get_wifi_enable()) {
+        settings::set("conn.wifi", settings::Value::of_bool(true), nullptr, /*apply=*/false);
         hw_set_wifi_enable(true);
     }
     set_status("Scanning...");

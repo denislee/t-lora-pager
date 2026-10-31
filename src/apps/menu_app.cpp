@@ -26,6 +26,7 @@
 #include "../hal/link.h"
 #include "../hal/hub.h"
 #include "../hal/nvs.h"
+#include "../hal/settings.h"
 #include "app_registry.h"
 #include <vector>
 #include <string>
@@ -200,13 +201,25 @@ struct QuickToggle {
     const char* icon;
     bool (*getter)();
     void (*setter)(bool);
+    const char* id;   // settings registry id
 };
 
 static const QuickToggle kQuickToggles[] = {
-    { LV_SYMBOL_WIFI,      hw_get_wifi_enable, hw_set_wifi_enable },
-    { LV_SYMBOL_BLUETOOTH, hw_get_bt_enable,   hw_set_bt_enable   },
+    { LV_SYMBOL_WIFI,      hw_get_wifi_enable, hw_set_wifi_enable, "conn.wifi" },
+    { LV_SYMBOL_BLUETOOTH, hw_get_bt_enable,   hw_set_bt_enable,   "conn.bt"   },
 };
 constexpr int kQuickToggleCount = sizeof(kQuickToggles) / sizeof(kQuickToggles[0]);
+
+// Persist through the registry BEFORE the HAL setter (which mutates the live
+// settings struct, so the registry would see "unchanged" and skip the NVS
+// write); the HAL setter does the apply. Calling the setter alone only
+// changed RAM, so the toggle reverted on reboot.
+static bool quick_toggle_flip(const QuickToggle& qt) {
+    const bool on = !qt.getter();
+    settings::set(qt.id, settings::Value::of_bool(on), nullptr, /*apply=*/false);
+    qt.setter(on);
+    return on;
+}
 
 static void apply_toggle_style(lv_obj_t* btn, bool on) {
     if (on) {
@@ -246,8 +259,7 @@ static void quick_toggle_click_cb(lv_event_t* e) {
     const QuickToggle* spec = (const QuickToggle*)lv_event_get_user_data(e);
     lv_obj_t* btn = (lv_obj_t*)lv_event_get_target(e);
     if (!spec || !btn) return;
-    bool new_state = !spec->getter();
-    spec->setter(new_state);
+    bool new_state = quick_toggle_flip(*spec);
     apply_toggle_style(btn, new_state);
     hw_feedback();
 }
@@ -494,13 +506,11 @@ static void home_shortcut_key_cb(lv_event_t* e) {
         lv_delay_ms(200);
         hw_shutdown();
     } else if (key == 'w' || key == 'W') {
-        bool new_state = !hw_get_wifi_enable();
-        hw_set_wifi_enable(new_state);
+        bool new_state = quick_toggle_flip(kQuickToggles[0]);
         if (s_wifi_btn) apply_toggle_style(s_wifi_btn, new_state);
         hw_feedback();
     } else if (key == 'b' || key == 'B') {
-        bool new_state = !hw_get_bt_enable();
-        hw_set_bt_enable(new_state);
+        bool new_state = quick_toggle_flip(kQuickToggles[1]);
         if (s_bt_btn) apply_toggle_style(s_bt_btn, new_state);
         hw_feedback();
     } else if (key == 'p' || key == 'P') {

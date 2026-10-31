@@ -21,6 +21,7 @@
 #include "app_registry.h"
 #include "../core/app_manager.h"
 #include "../core/system.h"
+#include "../hal/settings.h"
 
 namespace {
 
@@ -112,6 +113,7 @@ static void ble_switch_cb(lv_event_t *e)
     lv_obj_t *sw = (lv_obj_t *)lv_event_get_target(e);
     bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     hw_feedback();
+    settings::set("conn.bt", settings::Value::of_bool(on), nullptr, /*apply=*/false);
     hw_set_bt_enable(on);
     if (!on && kb_switch && lv_obj_has_state(kb_switch, LV_STATE_CHECKED)) {
         set_toggle_checked(kb_switch, false);
@@ -126,6 +128,7 @@ static void kb_switch_cb(lv_event_t *e)
     bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
     hw_feedback();
     if (on && !hw_get_bt_enable()) {
+        settings::set("conn.bt", settings::Value::of_bool(true), nullptr, /*apply=*/false);
         hw_set_bt_enable(true);
         set_toggle_checked(ble_switch, true);
     }
