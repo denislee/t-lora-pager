@@ -165,19 +165,15 @@ void setup()
     Serial.println("Start done. run main loop");
 }
 
-#if defined(ARDUINO_T_LORA_PAGER)
-// P4.9: VBUS/charging probe for the auto-sleep guard. Kept out of the hot path
-// — only called on the tick where every other sleep precondition already holds.
-// Not `static`: PlatformIO's .ino converter hoists a prototype for every
-// function above this #if, and a static prototype with no definition on the
-// watch builds trips -Wunused-function.
+// P4.9: VBUS/charging probe for the auto-sleep (pager) and auto power off
+// (every board) guards. Kept out of the hot path — only called on the tick
+// where every other precondition already holds.
 bool is_on_external_power()
 {
     monitor_params_t p;
     hw_get_monitor_params(p);
     return p.is_charging;
 }
-#endif
 
 void loop()
 {
@@ -295,7 +291,7 @@ void loop()
         }
 
         if (inactive_time > 2000 && hw_ms_since_input() > 2000 && cached_active_freq > 80) {
-            hw_set_cpu_freq(80);
+            hw_set_cpu_freq_if_idle(80, 2000);  // an input since the check wins
         } else {
             hw_set_cpu_freq(cached_active_freq);
         }
