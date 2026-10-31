@@ -303,12 +303,12 @@ void System::setupGlobalUI() {
             lv_obj_set_style_text_color(obj, c, 0);
         };
 
-        bool sd_online = hw_sd_online();
-        if (sd_online) {
-            lv_obj_add_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
-        } else {
+        // SD icon: shown in white while a card is mounted, hidden otherwise.
+        if (hw_sd_online()) {
             lv_obj_clear_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
-            set_icon_color(self._statSDLabel, lv_palette_main(LV_PALETTE_RED), prev_sd_color);
+            set_icon_color(self._statSDLabel, lv_color_white(), prev_sd_color);
+        } else {
+            lv_obj_add_flag(self._statSDLabel, LV_OBJ_FLAG_HIDDEN);
         }
 
         // Radio icons have three states each:
