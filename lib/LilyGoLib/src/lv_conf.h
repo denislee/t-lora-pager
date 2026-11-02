@@ -467,7 +467,13 @@
 #define LV_ATTRIBUTE_LARGE_RAM_ARRAY
 
 /*Place performance critical functions into a faster memory (e.g RAM)*/
+/* [LOCAL PATCH] KF.32: -D LVH_LVGL_IRAM=1 moves LVGL's hot blend/fill loops to IRAM. */
+#if defined(LVH_LVGL_IRAM) && LVH_LVGL_IRAM && !defined(__ASSEMBLY__)
+#include "esp_attr.h"
+#define LV_ATTRIBUTE_FAST_MEM IRAM_ATTR
+#else
 #define LV_ATTRIBUTE_FAST_MEM
+#endif
 
 /*Export integer constant to binding. This macro is used with constants in the form of LV_<CONST> that
  *should also appear on LVGL binding API such as MicroPython.*/

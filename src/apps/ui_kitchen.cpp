@@ -38,6 +38,7 @@
  *            edit mode is switched back off so the next app starts in nav.
  *            s_pot / s_stage — rebuilt by start_potato() / new_game().
  *            s_dirty — invalidated (the next frame redraws the stage).
+ *            s_kp.cur (flush counters, probe builds)    — zeroed at each REFR_START.
  *   memory:  s_pimg: buf (the potato image, internal RAM or a draw buf),
  *            px / list (its per-pixel cache)            — pot_free()
  *            s_pile.buf (the baked pile)                — pile_free(): lv_draw_buf_destroy
@@ -53,6 +54,11 @@
 #include <cstdlib>
 #ifdef ARDUINO
 #include <esp_heap_caps.h>
+#endif
+
+// KF.31: the framework builds at -Os. The ray-cast, projection and sprite bakes are worth the flash.
+#if defined(ARDUINO) && defined(KITCHEN_O2)
+#pragma GCC optimize("O2")
 #endif
 
 // Frame probe (KITCHEN_FPS_PLAN.md KF.0) and bench (KF.1): compiled into the
