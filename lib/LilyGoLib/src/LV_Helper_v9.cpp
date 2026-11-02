@@ -8,6 +8,7 @@
  */
 #include <Arduino.h>
 #include "LV_Helper.h"
+#include "lvh_display_config.h"
 
 #if LVGL_VERSION_MAJOR == 9
 
@@ -273,9 +274,14 @@ static void lv_rounder_cb(lv_event_t *e)
     lv_area_t *area = (lv_area_t *)lv_event_get_param(e);
 
 #if defined(ARDUINO_T_WATCH_S3_ULTRA)
+#if LVH_ULTRA_X1_ALIGN > 1
+    // [LOCAL PATCH] KF.29: the dirty rect keeps its left edge, aligned down.
+    area->x1 &= ~(int32_t)(LVH_ULTRA_X1_ALIGN - 1);
+#else
     // Limit the starting coordinate of T-Watch-S3-Ultra to 0, otherwise the display will be abnormal
     if (area->x1 > 1)
         area->x1 = 0;
+#endif
 #else
     if (!(area->x2 & 1))
         area->x2++;
