@@ -12,6 +12,7 @@
 #include "core/app_manager.h"
 #include "core/system.h"
 #include "core/one_shot_job.h"
+#include "apps/kitchen.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -19,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <sys/stat.h>
+#include <SDL2/SDL.h>
 
 namespace {
 
@@ -178,12 +180,27 @@ int emu_shots_run(lv_display_t *disp, const char *dir)
             mkdir(dir, 0755);
             mkdir(sw.dir.c_str(), 0755);
 
+            // UI_SHOTS_APPS=<App>[,...] narrows the sweep to those apps.
+            const char *apps = getenv("UI_SHOTS_APPS");
             for (const auto &name : names) {
+                if (apps && std::string(",").append(apps).append(",").find("," + name + ",") == std::string::npos) {
+                    continue;
+                }
                 sys.enterApp(name.c_str());
                 pump(400);
                 sw.shot(name);
                 if (lv_obj_t *menu = find_menu(sys.getAppPanel())) {
                     sw.menu_pages(name, menu);
+                }
+                if (name == "Kitchen") {   // seeded game states (KITCHEN_FPS_PLAN.md KF.2)
+                    for (int i = 0; i < kitchen::shot_count(); i++) {
+                        const char *st = kitchen::shot_setup(i);
+                        if (!st) continue;
+                        pump(100);
+                        sw.shot(name + "-" + st);
+                        if (getenv("KITCHEN_CAST_CHECK")) kitchen::cast_check();
+                    }
+                    kitchen::shot_release();
                 }
             }
             sys.showMenu();
@@ -210,6 +227,74 @@ int emu_shots_run(lv_display_t *disp, const char *dir)
         }
     }
     return failures;
+}
+
+namespace {
+// Copy of the frame as it is on screen now.
+std::vector<uint8_t> grab(lv_display_t *disp)
+{
+    lv_refr_now(disp);
+    lv_draw_buf_t *buf = lv_display_get_buf_active(disp);
+    if (!buf || !buf->data) return {};
+    uint32_t h = lv_display_get_vertical_resolution(disp);
+    return std::vector<uint8_t>(buf->data, buf->data + (size_t)h * buf->header.stride);
+}
+} // namespace
+
+int emu_kitchen_bench(lv_display_t *disp)
+{
+    auto &sys = core::System::getInstance();
+    sys.enterApp("Kitchen");
+    pump(200);
+    kitchen::bench_start();
+    // Trail check (KF.6 / KF.8): every so often, the frame left by the
+    // game's own invalidation must match a full redraw of the same state.
+    // LVGL's tick follows SDL's clock here, so this runs in real time.
+    int frames = 0, checks = 0, bad = 0, faint = 0;
+    uint32_t t0 = SDL_GetTicks();
+    while (!kitchen::bench_done() && SDL_GetTicks() - t0 < 240000) {
+        pump(16);
+        usleep(8000);
+        if (++frames % 7) continue;
+        std::vector<uint8_t> live = grab(disp);
+        kitchen::probe_mute(true);
+        kitchen::debug_invalidate_all();
+        std::vector<uint8_t> full = grab(disp);
+        kitchen::probe_mute(false);
+        checks++;
+        if (live.size() != full.size()) {
+            bad++;
+            continue;
+        }
+        uint32_t stride = lv_display_get_buf_active(disp)->header.stride;
+        // A trail is a part's colour left behind. Up to 2 LSBs per 565 channel
+        // isn't one: a few antialiased pixels on a dirty rect's edge come out
+        // that far off (emulator's LVGL 9.2, cause not found, can't be seen).
+        const uint16_t *lp = (const uint16_t *)live.data(), *fp = (const uint16_t *)full.data();
+        size_t diff = 0, first = 0, px_n = live.size() / 2, slight = 0;
+        for (size_t i = 0; i < px_n; i++) {
+            if (lp[i] == fp[i]) continue;
+            int dr = abs((lp[i] >> 11) - (fp[i] >> 11)), dg = abs(((lp[i] >> 5) & 63) - ((fp[i] >> 5) & 63));
+            int db = abs((lp[i] & 31) - (fp[i] & 31));
+            if (dr <= 2 && dg <= 2 && db <= 2) {
+                slight++;
+            } else if (!diff++) {
+                first = i;
+            }
+        }
+        if (slight) faint++;
+        if (diff) {
+            bad++;
+            printf("[kitchen] trail: frame %d, %zu px differ, first at (%zu, %zu)\n", frames, diff,
+                   first % (stride / 2), first / (stride / 2));
+        }
+    }
+    printf("[kitchen] trail check: %d of %d frames differ from a full redraw (%d more within 2 LSBs)\n", bad, checks, faint);
+    if (!kitchen::bench_done()) {
+        printf("[kitchen] bench: did not finish\n");
+        return 1;
+    }
+    return bad ? 2 : 0;
 }
 
 #endif

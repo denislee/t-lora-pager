@@ -94,6 +94,7 @@ extern "C" int main(void)
     if (const char *shots = getenv("UI_SHOTS_DIR")) {
         return emu_shots_run(lvDisplay, shots);
     }
+    if (getenv("KITCHEN_BENCH")) return emu_kitchen_bench(lvDisplay);
 
     // PagerLink companion protocol over TCP (127.0.0.1:7600, PAGERLINK_PORT=0
     // disables) so the iOS app in the Simulator can talk to the emulator.

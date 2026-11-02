@@ -27,6 +27,10 @@
 #include <freertos/task.h>
 #include <LilyGoLib.h>      // KB_PRESSED / KB_RELEASED
 #include <lvgl_private.h>   // lv_timer_t fields for the slow-frame census
+#ifndef KB_PRESSED          // the watches have no keyboard driver
+#define KB_PRESSED  1
+#define KB_RELEASED 0
+#endif
 #include "../hal/keyboard_task.h"
 #include "../hal/rotary_task.h"
 #include "../hal/storage.h"
