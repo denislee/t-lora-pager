@@ -67,6 +67,9 @@
 #define KITCHEN_PROBE 1
 #ifdef ARDUINO
 #include <esp_timer.h>
+#include <Arduino.h>
+// printf goes to UART0, which isn't on the USB port: the probe has to use Serial, like PROF_LOG.
+#define printf Serial.printf
 #else
 #include <chrono>
 #endif
