@@ -342,7 +342,10 @@ void LilyGoDispQSPI::pushColorsDMA(uint16_t *data, uint32_t len)
 
         esp_err_t ret = spi_device_queue_trans(_spi_dev, &t.base, portMAX_DELAY);
         if (ret != ESP_OK) {
+            // [LOCAL PATCH] KF.26: e.g. no internal RAM for spi_master's copy of a PSRAM chunk. Nothing was
+            // queued, so waiting for its result below would block forever. Drop the rest of this area.
             log_e("DMA transfer failed!");
+            break;
         }
         spi_transaction_t *trans_result;
         ret = spi_device_get_trans_result(_spi_dev, &trans_result, portMAX_DELAY);

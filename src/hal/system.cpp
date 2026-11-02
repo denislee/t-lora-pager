@@ -212,6 +212,7 @@ struct SettingsHeader {
 #ifdef ARDUINO
 #include "Esp.h"
 #include <LilyGoLib.h>
+#include <LV_Helper.h>
 #include <esp_mac.h>
 #include <esp_sntp.h>
 #include <WiFi.h>
@@ -824,6 +825,7 @@ void hw_shutdown()
 void hw_power_down_all()
 {
 #ifdef ARDUINO
+    lvh_flush_wait();  // the CPU and APB clocks drop below; let a frame in transit finish first
     {
         core::ScopedI2cLock i2c;  // P7.45
         instance.powerControl(POWER_GPS, false);
@@ -996,6 +998,7 @@ void hw_feedback()
 void hw_low_power_loop()
 {
 #ifdef ARDUINO
+    lvh_flush_wait();  // the display and the chip go to sleep below; let a frame in transit finish first
     /* Drop the in-RAM passphrase before suspending, on both the deep-sleep and
      * the light-sleep path — a device found asleep should be
      * indistinguishable from one that's been off. */

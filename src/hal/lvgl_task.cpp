@@ -70,6 +70,7 @@ void apply_boot_backlight()
     if (lv_display_t *disp = lv_display_get_default()) {
         lv_display_remove_event_cb_with_user_data(disp, first_flush_cb, nullptr);
     }
+    lvh_flush_wait();  // the async flush may still be sending the frame this is meant to reveal
     hw_set_disp_backlight((uint8_t)s_boot_backlight);
     s_boot_backlight = -1;
     INPUT_PROF(core::prof::boot_mark("backlight on"));

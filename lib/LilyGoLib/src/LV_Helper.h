@@ -19,6 +19,10 @@
 
 void beginLvglHelper(LilyGo_Display &display, bool debug = false);
 void updateLvglHelper();
+// [LOCAL PATCH] KF.26: with LVH_ASYNC_FLUSH a transfer can outlive lv_timer_handler(). Blocks until it has
+// reached the panel (at most 200 ms). Call it before anything that assumes the last frame has been sent.
+// Returns at once in a synchronous build.
+void lvh_flush_wait();
 
 void lv_set_default_group(lv_group_t *group);
 lv_indev_t *lv_get_touch_indev();

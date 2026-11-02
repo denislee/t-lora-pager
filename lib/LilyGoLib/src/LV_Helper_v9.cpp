@@ -52,6 +52,7 @@ extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us, 
 #include <freertos/semphr.h>
 
 static SemaphoreHandle_t s_flush_done;
+static volatile bool s_flush_busy;   // a transfer has been started and hasn't ended
 static volatile uint32_t s_flush_swap_us, s_flush_push_us;
 static uint32_t s_flush_px, s_flush_held_us;
 
@@ -83,6 +84,7 @@ static void flush_task(void *)
         j.plane->pushColors(j.x, j.y, j.w, j.h, (uint16_t *)j.px);
         s_flush_swap_us = (uint32_t)(t1 - t0);
         s_flush_push_us = (uint32_t)(esp_timer_get_time() - t1);
+        s_flush_busy = false;
         xSemaphoreGive(s_flush_done);
     }
 }
@@ -94,6 +96,7 @@ static void disp_flush(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *c
                   (uint16_t)area->x1, (uint16_t)area->y1, (uint16_t)lv_area_get_width(area),
                   (uint16_t)lv_area_get_height(area)};
     s_flush_px = j.len;
+    s_flush_busy = true;
     xQueueSend(s_flush_q, &j, portMAX_DELAY);
     s_flush_held_us = (uint32_t)(esp_timer_get_time() - t0);
 }
@@ -118,6 +121,7 @@ static bool IRAM_ATTR on_color_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_
 {
     BaseType_t woken = pdFALSE;
     s_flush_done_at = esp_timer_get_time();
+    s_flush_busy = false;
     xSemaphoreGiveFromISR(s_flush_done, &woken);
     return woken == pdTRUE;
 }
@@ -132,6 +136,9 @@ static void disp_flush(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *c
 #endif
     s_flush_push_t0 = esp_timer_get_time();
     s_flush_swap_us = (uint32_t)(s_flush_push_t0 - t0);
+    // A flush that timed out in the wait callback may have finished since; don't let its signal end this one.
+    xSemaphoreTake(s_flush_done, 0);
+    s_flush_busy = true;
     plane->pushColors(area->x1, area->y1, area->x2 + 1, area->y2 + 1, (uint16_t *)color_p);
     s_flush_held_us = (uint32_t)(esp_timer_get_time() - t0);
 }
@@ -417,7 +424,10 @@ static void lv_display_flush_wait_callback(lv_display_t *disp)
 #if LVH_ASYNC_FLUSH
     int64_t t0 = esp_timer_get_time();
     bool done = xSemaphoreTake(s_flush_done, LVH_FLUSH_WAIT_TICKS) == pdTRUE;
-    if (!done) log_w("flush did not finish");
+    if (!done) {
+        s_flush_busy = false;
+        log_w("flush did not finish");
+    }
 #ifdef INPUT_PROFILE
     if (lvh_prof_flush) {
         uint32_t held = s_flush_held_us + (uint32_t)(esp_timer_get_time() - t0);
@@ -431,6 +441,15 @@ static void lv_display_flush_wait_callback(lv_display_t *disp)
 #endif
 #else
     log_d("flush disp finish");
+#endif
+}
+
+void lvh_flush_wait()
+{
+#if LVH_ASYNC_FLUSH
+    // Polls rather than sharing s_flush_done, which belongs to LVGL's wait. Bounded, so a caller holding a lock
+    // the flush needs loses 200 ms instead of deadlocking.
+    for (int i = 0; s_flush_busy && i < 200; i++) vTaskDelay(pdMS_TO_TICKS(1));
 #endif
 }
 
