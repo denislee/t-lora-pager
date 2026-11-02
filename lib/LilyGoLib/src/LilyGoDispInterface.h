@@ -97,6 +97,7 @@ public:
     virtual void feedback(void* args = NULL) {}
     bool needFullRefresh(){return _full_refresh;}
     virtual bool useDMA(){return false;}
+    virtual bool setColorDoneCallback(esp_lcd_panel_io_color_trans_done_cb_t cb, void *ctx) { return false; }  // [LOCAL PATCH] KF.26
     // *INDENT-ON*
 protected:
     uint16_t _offset_x ;
@@ -149,6 +150,7 @@ private:
     void pushColorsDMA(uint16_t *data, uint32_t len);
 
     spi_device_handle_t _spi_dev;
+    SemaphoreHandle_t _bus_lock = NULL;   // [LOCAL PATCH] KF.26: recursive; only with LVH_ASYNC_FLUSH
     int _cs ;
     const disp_cmd_t *_disp_init_cmd;
     uint16_t _disp_init_cmd_len;
@@ -179,6 +181,7 @@ public:
     void sleep();
     void wakeup();
     void setBrightness(uint8_t level);
+    bool setColorDoneCallback(esp_lcd_panel_io_color_trans_done_cb_t cb, void *ctx);  // [LOCAL PATCH] KF.26
 };
 
 typedef struct {

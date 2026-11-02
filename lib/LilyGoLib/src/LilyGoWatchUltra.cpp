@@ -19,6 +19,7 @@
 #include "LilyGoLib.h"
 #include "driver/rtc_io.h"
 #include <Preferences.h>
+#include "lvh_display_config.h"
 
 extern void setupMSC(lock_callback_t lock_cb, lock_callback_t ulock_cb, bool use_sd);
 
@@ -225,7 +226,13 @@ uint32_t LilyGoUltra::begin(uint32_t disable_hw_init)
         log_d("Initializing PMU succeeded");
     }
 
+#if LVH_ASYNC_FLUSH
+    // [LOCAL PATCH] KF.26: the flush task sleeps on queued DMA chunks instead of polling on core 0.
+    // useDMA() stays false: that also picks the vendor's 1/6-screen draw buffers.
+    LilyGoDispQSPI::enableDMA(true);
+#else
     LilyGoDispQSPI::enableDMA(_enableDMA);
+#endif
 
     LilyGoDispQSPI::enableTearingEffect(_enableTearingEffect);
 

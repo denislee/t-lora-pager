@@ -983,6 +983,11 @@ void LilyGoWatch2022::pushColors(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t
     LilyGoDispSPI::pushColors( x1,  y1,  x2,  y2, color);
 }
 
+bool LilyGoWatch2022::setColorDoneCallback(esp_lcd_panel_io_color_trans_done_cb_t cb, void *ctx)
+{
+    return LilyGoDispSPI::setColorDoneCallback(cb, ctx);
+}
+
 
 void LilyGoWatch2022::setHapticEffects(uint8_t effects)
 {

@@ -41,6 +41,112 @@ static lv_color16_t *buf_sw  = NULL;
 extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us, uint32_t blocked_us) __attribute__((weak));
 #endif
 
+#if LVH_ASYNC_FLUSH
+// [LOCAL PATCH] KF.26: asynchronous flush. disp_flush() only starts the transfer and never calls
+// lv_display_flush_ready(); LVGL keeps drawing into its other buffer and blocks in
+// lv_display_flush_wait_callback() before the next flush, which waits for s_flush_done. The timings of
+// a flush are reported from there, on the LVGL task, so the last flush of a refresh lands in the next
+// refresh's numbers.
+#include <esp_timer.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+
+static SemaphoreHandle_t s_flush_done;
+static volatile uint32_t s_flush_swap_us, s_flush_push_us;
+static uint32_t s_flush_px, s_flush_held_us;
+
+#if defined(ARDUINO_T_LORA_PAGER) || defined(ARDUINO_T_WATCH_S3_ULTRA)
+// Above the app's own core-0 tasks (note_save 2, link 1), well below Wi-Fi/BLE and the LVGL task's 8.
+#define LVH_FLUSH_TASK_PRIO 6
+#define LVH_FLUSH_WAIT_TICKS portMAX_DELAY   // a stuck bus blocks here as it did in pushColors()
+
+struct FlushJob {
+    LilyGo_Display *plane;
+    uint8_t *px;
+    uint32_t len;
+    uint16_t x, y, w, h;
+};
+static QueueHandle_t s_flush_q;
+
+// Owns the transfer from start to end, so it also takes and releases the shared SPI lock (pager),
+// which can't be done from an ISR. The byte swap runs here too, in parallel with drawing (KF.28).
+static void flush_task(void *)
+{
+    FlushJob j;
+    for (;;) {
+        xQueueReceive(s_flush_q, &j, portMAX_DELAY);
+        int64_t t0 = esp_timer_get_time();
+#ifdef _SWAP_COLORS
+        lv_draw_sw_rgb565_swap(j.px, j.len);
+#endif
+        int64_t t1 = esp_timer_get_time();
+        j.plane->pushColors(j.x, j.y, j.w, j.h, (uint16_t *)j.px);
+        s_flush_swap_us = (uint32_t)(t1 - t0);
+        s_flush_push_us = (uint32_t)(esp_timer_get_time() - t1);
+        xSemaphoreGive(s_flush_done);
+    }
+}
+
+static void disp_flush(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p)
+{
+    int64_t t0 = esp_timer_get_time();
+    FlushJob j = {(LilyGo_Display *)lv_display_get_user_data(disp_drv), color_p, (uint32_t)lv_area_get_size(area),
+                  (uint16_t)area->x1, (uint16_t)area->y1, (uint16_t)lv_area_get_width(area),
+                  (uint16_t)lv_area_get_height(area)};
+    s_flush_px = j.len;
+    xQueueSend(s_flush_q, &j, portMAX_DELAY);
+    s_flush_held_us = (uint32_t)(esp_timer_get_time() - t0);
+}
+
+static void flush_async_begin(LilyGo_Display &board)
+{
+    s_flush_done = xSemaphoreCreateBinary();
+    s_flush_q = xQueueCreate(1, sizeof(FlushJob));
+    assert(s_flush_done && s_flush_q);
+    BaseType_t ok = xTaskCreatePinnedToCore(flush_task, "lvh_flush", 4096, NULL, LVH_FLUSH_TASK_PRIO, NULL, 0);
+    assert(ok == pdPASS);
+}
+#else
+// Watch-S3. A failed esp_lcd allocation (it drops the area and returns an error we don't see) never
+// signals, so give up after far longer than a whole frame takes (11.5 ms) rather than freeze the UI.
+#define LVH_FLUSH_WAIT_TICKS pdMS_TO_TICKS(200)
+
+static volatile int64_t s_flush_done_at;
+static int64_t s_flush_push_t0;
+
+static bool IRAM_ATTR on_color_done(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_data_t *, void *)
+{
+    BaseType_t woken = pdFALSE;
+    s_flush_done_at = esp_timer_get_time();
+    xSemaphoreGiveFromISR(s_flush_done, &woken);
+    return woken == pdTRUE;
+}
+
+static void disp_flush(lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p)
+{
+    auto *plane = (LilyGo_Display *)lv_display_get_user_data(disp_drv);
+    int64_t t0 = esp_timer_get_time();
+    s_flush_px = lv_area_get_size(area);
+#ifdef _SWAP_COLORS
+    lv_draw_sw_rgb565_swap(color_p, s_flush_px);
+#endif
+    s_flush_push_t0 = esp_timer_get_time();
+    s_flush_swap_us = (uint32_t)(s_flush_push_t0 - t0);
+    plane->pushColors(area->x1, area->y1, area->x2 + 1, area->y2 + 1, (uint16_t *)color_p);
+    s_flush_held_us = (uint32_t)(esp_timer_get_time() - t0);
+}
+
+static void flush_async_begin(LilyGo_Display &board)
+{
+    s_flush_done = xSemaphoreCreateBinary();
+    assert(s_flush_done);
+    bool ok = board.setColorDoneCallback(on_color_done, NULL);
+    assert(ok);
+}
+#endif
+
+#else // !LVH_ASYNC_FLUSH
+
 static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p)
 {
     size_t len = lv_area_get_size(area);
@@ -75,6 +181,8 @@ static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *
 
     lv_display_flush_ready( disp_drv );
 }
+
+#endif // LVH_ASYNC_FLUSH
 
 #ifdef USING_INPUT_DEV_TOUCHPAD
 static void touchpad_read( lv_indev_t *drv, lv_indev_data_t *data )
@@ -306,7 +414,24 @@ static void lv_res_changed_cb(lv_event_t *e)
 
 static void lv_display_flush_wait_callback(lv_display_t *disp)
 {
+#if LVH_ASYNC_FLUSH
+    int64_t t0 = esp_timer_get_time();
+    bool done = xSemaphoreTake(s_flush_done, LVH_FLUSH_WAIT_TICKS) == pdTRUE;
+    if (!done) log_w("flush did not finish");
+#ifdef INPUT_PROFILE
+    if (lvh_prof_flush) {
+        uint32_t held = s_flush_held_us + (uint32_t)(esp_timer_get_time() - t0);
+#if defined(ARDUINO_T_LORA_PAGER) || defined(ARDUINO_T_WATCH_S3_ULTRA)
+        uint32_t push = s_flush_push_us;
+#else
+        uint32_t push = done ? (uint32_t)(s_flush_done_at - s_flush_push_t0) : 0;
+#endif
+        lvh_prof_flush(s_flush_px, s_flush_swap_us, push, held);
+    }
+#endif
+#else
     log_d("flush disp finish");
+#endif
 }
 
 
@@ -384,6 +509,9 @@ void beginLvglHelper(LilyGo_Display &board, bool debug)
     *                  If NULL `lv_display_flush_ready()` can be used to signal that flushing is ready.
     */
     lv_display_set_flush_wait_cb(disp_drv, lv_display_flush_wait_callback);
+#if LVH_ASYNC_FLUSH
+    flush_async_begin(board);
+#endif
 
 
 #ifdef USING_INPUT_DEV_TOUCHPAD

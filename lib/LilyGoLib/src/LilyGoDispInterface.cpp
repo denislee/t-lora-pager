@@ -11,6 +11,7 @@
 #include <esp_system.h>
 #include <vector>
 #include <bsp_lcd/esp_lcd_st7796.h>
+#include "lvh_display_config.h"
 
 #define DISP_CMD_MADCTL       (0x36) // Memory data access control
 #define DISP_CMD_CASET        (0x2A) // Set column address
@@ -37,6 +38,20 @@
 #define SPI_DEV_HOST_ID     SPI3_HOST
 #endif
 
+// [LOCAL PATCH] KF.26: with the async flush, pushColors runs on the flush task while other tasks may
+// send commands (brightness, rotation). Null until init(), and always null in the sync build.
+struct QspiBusGuard {
+    SemaphoreHandle_t lock;
+    explicit QspiBusGuard(SemaphoreHandle_t l) : lock(l)
+    {
+        if (lock) xSemaphoreTakeRecursive(lock, portMAX_DELAY);
+    }
+    ~QspiBusGuard()
+    {
+        if (lock) xSemaphoreGiveRecursive(lock);
+    }
+};
+
 void LilyGoDispQSPI::end()
 {
     spi_bus_remove_device(_spi_dev);
@@ -61,6 +76,11 @@ static  void ICACHE_RAM_ATTR disp_te_isr()
 bool LilyGoDispQSPI:: init(int rst, int cs, int te, int sck, int d0, int d1, int d2, int d3,  uint32_t freq_Mhz)
 {
     assert(_disp_init_cmd);
+
+#if LVH_ASYNC_FLUSH
+    _bus_lock = xSemaphoreCreateRecursiveMutex();
+    assert(_bus_lock);
+#endif
 
     _cs  = cs;
 
@@ -337,6 +357,7 @@ void LilyGoDispQSPI::pushColorsDMA(uint16_t *data, uint32_t len)
 
 void LilyGoDispQSPI::pushColors(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t *color)
 {
+    QspiBusGuard guard(_bus_lock);
     //acquire the bus to send polling transactions faster
     esp_err_t  err ;
     do {
@@ -353,6 +374,7 @@ void LilyGoDispQSPI::pushColors(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t 
 
 void LilyGoDispQSPI::writeCommand(uint32_t cmd, uint8_t *pdat, uint32_t length)
 {
+    QspiBusGuard guard(_bus_lock);
     digitalWrite(_cs, LOW);
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
@@ -596,6 +618,15 @@ void LilyGoDispSPI::pushColors(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y
 {
     assert(panel_handle);
     esp_lcd_panel_draw_bitmap(panel_handle, x1, y1, x2, y2, color);
+}
+
+// [LOCAL PATCH] KF.26: called from the SPI ISR when the last chunk of a pushColors() has been sent.
+bool LilyGoDispSPI::setColorDoneCallback(esp_lcd_panel_io_color_trans_done_cb_t cb, void *ctx)
+{
+    assert(io_handle);
+    esp_lcd_panel_io_callbacks_t cbs = {};
+    cbs.on_color_trans_done = cb;
+    return esp_lcd_panel_io_register_event_callbacks(io_handle, &cbs, ctx) == ESP_OK;
 }
 
 void LilyGoDispSPI::sleep()

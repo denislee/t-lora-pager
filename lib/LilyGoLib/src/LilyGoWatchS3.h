@@ -238,6 +238,7 @@ public:
      * @param color Pointer to the color data.
      */
     void pushColors(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t *color);
+    bool setColorDoneCallback(esp_lcd_panel_io_color_trans_done_cb_t cb, void *ctx) override;
 
     /**
      * @brief Check if the touch screen is available.
