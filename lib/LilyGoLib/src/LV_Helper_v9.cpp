@@ -456,6 +456,26 @@ void beginLvglHelper(LilyGo_Display &board, bool debug)
 
     size_t lv_buffer_size = board.width() * board.height() * sizeof(lv_color16_t);
 
+#if LVH_DRAW_BUF_ROWS > 0
+    // [LOCAL PATCH] KF.27: draw into internal RAM, and spare spi_master's copy of every PSRAM chunk.
+    // Sized on the long side, so the band has at least this many rows in any rotation.
+    if (!useDMA && !board.needFullRefresh()) {
+        size_t band = LV_MAX(board.width(), board.height()) * LVH_DRAW_BUF_ROWS * sizeof(lv_color16_t);
+        buf = (lv_color16_t *)heap_caps_malloc(band, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        buf1 = (lv_color16_t *)heap_caps_malloc(band, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        if (buf && buf1) {
+            lv_buffer_size = band;
+        } else {
+            log_w("no internal RAM for %u byte draw bands, using PSRAM", (unsigned)band);
+            heap_caps_free(buf);
+            heap_caps_free(buf1);
+            buf = buf1 = NULL;
+        }
+    }
+    if (buf) {
+        log_d("Using internal draw bands");
+    } else
+#endif
     if (useDMA) {
 
         log_d("Using DMA pushColors..");
