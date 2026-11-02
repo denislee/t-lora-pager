@@ -30,6 +30,24 @@
 
 static lv_display_t *lvDisplay;
 
+// KF.25b: the device's invalidate-area rounder (vendor lv_rounder_cb in lib/LilyGoLib/src/LV_Helper_v9.cpp, same rules), so the probe's px column matches what the device flushes. -D EMU_NO_DEVICE_ROUNDER turns it off.
+#ifndef EMU_NO_DEVICE_ROUNDER
+static void emu_rounder_cb(lv_event_t *e)
+{
+    lv_area_t *area = (lv_area_t *)lv_event_get_param(e);
+#if defined(ARDUINO_T_WATCH_S3_ULTRA)
+#if defined(LVH_ULTRA_X1_ALIGN) && LVH_ULTRA_X1_ALIGN > 1
+    area->x1 &= ~(int32_t)(LVH_ULTRA_X1_ALIGN - 1);
+#else
+    if (area->x1 > 1) area->x1 = 0;
+#endif
+#endif
+    if (!(area->x2 & 1)) area->x2++;
+    if (area->y1 & 1) area->y1--;
+    if (!(area->y2 & 1)) area->y2++;
+}
+#endif
+
 
 void hal_setup(void)
 {
@@ -52,6 +70,9 @@ void hal_setup(void)
 
 
     lvDisplay = lv_sdl_window_create(SDL_HOR_RES, SDL_VER_RES);
+#ifndef EMU_NO_DEVICE_ROUNDER
+    lv_display_add_event_cb(lvDisplay, emu_rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#endif
     lv_sdl_mouse_create();
     lv_sdl_mousewheel_create();
     lv_sdl_keyboard_create();
@@ -60,14 +81,17 @@ void hal_setup(void)
 void hal_loop(void)
 {
     Uint32 lastTick = SDL_GetTicks();
+    uint32_t wait = 16;
     while (1) {
         fflush(stdout);
-        SDL_Delay(16);
+        SDL_Delay(wait);
         Uint32 current = SDL_GetTicks();
         lv_tick_inc(current - lastTick);
         lastTick = current;
-        lv_timer_handler();
+        // KF.25a: sleep until LVGL's next timer, at most 16 ms (a static screen still sleeps the full 16 ms), at least 1 ms.
+        uint32_t next = lv_timer_handler();
         core::System::getInstance().loop();
+        wait = next > 16 ? 16 : (next < 1 ? 1 : next);
     }
 }
 

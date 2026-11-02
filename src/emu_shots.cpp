@@ -252,10 +252,17 @@ int emu_kitchen_bench(lv_display_t *disp)
     // LVGL's tick follows SDL's clock here, so this runs in real time.
     int frames = 0, checks = 0, bad = 0, faint = 0;
     uint32_t t0 = SDL_GetTicks();
+    uint32_t last_check = SDL_GetTicks();
     while (!kitchen::bench_done() && SDL_GetTicks() - t0 < 240000) {
-        pump(16);
-        usleep(8000);
-        if (++frames % 7) continue;
+        // KF.25a: run LVGL when its next timer is due rather than on a fixed sleep, so the bench holds the refresh period instead of landing at 36-48 ms.
+        lv_tick_inc(16);
+        uint32_t next = lv_timer_handler();
+        wait_for_jobs();
+        core::System::getInstance().loop();
+        usleep((next > 16 ? 16 : (next < 1 ? 1 : next)) * 1000);
+        frames++;
+        if (SDL_GetTicks() - last_check < 130) continue;
+        last_check = SDL_GetTicks();
         std::vector<uint8_t> live = grab(disp);
         kitchen::probe_mute(true);
         kitchen::debug_invalidate_all();
