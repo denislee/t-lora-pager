@@ -26,3 +26,11 @@ void probe_mute(bool on);
 bool bench_done();
 } // namespace kitchen
 #endif
+
+#if defined(INPUT_PROFILE) || defined(KITCHEN_BENCH) || !defined(ARDUINO)
+#include <stdint.h>
+namespace kitchen {
+// One display flush for the frame probe (KF.24). blocked_us = how long the LVGL task was held up by this flush.
+void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us, uint32_t blocked_us);
+}
+#endif

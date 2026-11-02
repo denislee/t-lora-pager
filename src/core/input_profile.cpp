@@ -13,6 +13,7 @@
 #ifdef INPUT_PROFILE
 
 #include "system.h"
+#include "../apps/kitchen.h"
 #include <lvgl.h>
 #include <algorithm>
 #include <stdio.h>
@@ -605,8 +606,9 @@ void dump_group(const char *why) {
 }} // namespace core::prof
 
 // P7.9: display flush hook, called from the vendor disp_flush() (LV_Helper_v9.cpp).
-extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) {
+extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us, uint32_t blocked_us) {
     core::prof::note_flush(px, swap_us, push_us);
+    kitchen::note_flush(px, swap_us, push_us, blocked_us);
 }
 
 // G.1: boot marker hook, called from the vendor LilyGoLoRaPager::begin().

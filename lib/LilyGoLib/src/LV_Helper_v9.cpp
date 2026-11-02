@@ -37,7 +37,7 @@ static lv_color16_t *buf_sw  = NULL;
 // [LOCAL PATCH] P7.9: per-stage flush timing for the profile build. Defined
 // weak so the library links without src/core/input_profile.cpp.
 #include <esp_timer.h>
-extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us) __attribute__((weak));
+extern "C" void lvh_prof_flush(uint32_t px, uint32_t swap_us, uint32_t push_us, uint32_t blocked_us) __attribute__((weak));
 #endif
 
 static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *color_p)
@@ -69,7 +69,7 @@ static void disp_flush( lv_display_t *disp_drv, const lv_area_t *area, uint8_t *
 
 #ifdef INPUT_PROFILE
     int64_t t2 = esp_timer_get_time();
-    if (lvh_prof_flush) lvh_prof_flush((uint32_t)len, (uint32_t)(t1 - t0), (uint32_t)(t2 - t1));
+    if (lvh_prof_flush) lvh_prof_flush((uint32_t)len, (uint32_t)(t1 - t0), (uint32_t)(t2 - t1), (uint32_t)(t2 - t0));
 #endif
 
     lv_display_flush_ready( disp_drv );

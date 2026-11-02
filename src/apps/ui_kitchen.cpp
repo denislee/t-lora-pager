@@ -31,7 +31,8 @@
  *   timers:  frame_timer                               — lv_timer_del + null
  *            the display's refresh period, when KITCHEN_REFR_MS changes
  *            it                                        — set back to LV_DEF_REFR_PERIOD
- *            the probe's display REFR_START / REFR_READY callbacks
+ *            the probe's display REFR_START / REFR_READY (and emulator
+ *            FLUSH_START) callbacks
  *            (KITCHEN_PROBE builds)                    — removed
  *   state:   s_game — rebuilt by new_game() on the next enter; the group's
  *            edit mode is switched back off so the next app starts in nav.
@@ -81,7 +82,10 @@ namespace {
 // render + flush), stage_draw_cb time and runs per refresh (one per
 // invalidated area), primitives issued to LVGL / skipped on the CPU, and the
 // potato's ray-casts and strip recolours. The bench (KF.1) keeps the same
-// totals per game phase.
+// totals per game phase. Each line also splits the refresh into flush (count,
+// pixels, swap, push, MB/s) and render = refresh minus the time the flush held
+// up the LVGL task (KF.24). Hardware numbers come from the vendor
+// lvh_prof_flush hook, so they need INPUT_PROFILE.
 
 #ifdef KITCHEN_PROBE
 uint64_t kp_now()
@@ -100,6 +104,8 @@ constexpr int KP_BINS = 400;   // refresh-time histogram, 0.25 ms bins
 struct KpStats {
     uint32_t frames, draw_calls, tasks, culled, casts, recolours;
     uint64_t refr_us, refr_min_us, refr_max_us, draw_us, cast_us, recolour_us;
+    uint32_t flushes;
+    uint64_t flush_px, swap_us, push_us, blocked_us;
     uint16_t hist[KP_BINS];
 
     void frame(uint64_t us)
@@ -121,12 +127,21 @@ struct KpStats {
     void print(const char *what) const
     {
         float f = frames ? (float)frames : 1.0f;
+        uint32_t screen_px = (uint32_t)lv_display_get_horizontal_resolution(nullptr) *
+                             (uint32_t)lv_display_get_vertical_resolution(nullptr);
+        if (!screen_px) screen_px = 1;
+        float flush_px_f = flush_px / f;
+        float render_ms = ((float)refr_us - (float)blocked_us) / 1000.0f / f;
+        if (render_ms < 0) render_ms = 0;
+        float mbs = push_us ? flush_px * 2.0f / push_us : 0;
         printf("[kitchen] %s: %u frames | refr ms min %.1f avg %.1f p95 %.1f max %.1f | draw %.2f ms x%.2f/frame"
-               " | tasks %.0f culled %.0f /frame | cast %u x %.1f ms | recolour %u x %.2f ms\n",
+               " | tasks %.0f culled %.0f /frame | cast %u x %.1f ms | recolour %u x %.2f ms"
+               " | flush x%.2f %.0f px (%.0f%% of screen) swap %.2f push %.2f ms | render %.2f ms | %.1f MB/s\n",
                what, (unsigned)frames, refr_min_us / 1000.0f, refr_us / 1000.0f / f, frames ? p95_ms() : 0.0f,
                refr_max_us / 1000.0f, draw_us / 1000.0f / f, draw_calls / f, tasks / f, culled / f, (unsigned)casts,
                casts ? cast_us / 1000.0f / casts : 0.0f, (unsigned)recolours,
-               recolours ? recolour_us / 1000.0f / recolours : 0.0f);
+               recolours ? recolour_us / 1000.0f / recolours : 0.0f, flushes / f, flush_px_f,
+               100.0f * flush_px_f / (float)screen_px, swap_us / 1000.0f / f, push_us / 1000.0f / f, render_ms, mbs);
     }
 };
 
@@ -138,6 +153,8 @@ const char *const kBenchNames[KB_N] = {"early chop", "late chop", "peel stroke",
 struct KpFrame {
     uint32_t draw_calls, tasks, culled;
     uint64_t draw_us;
+    uint32_t flushes;
+    uint64_t flush_px, swap_us, push_us, blocked_us;
 };
 
 struct KitchenProbe {
@@ -181,9 +198,23 @@ void kp_refr_cb(lv_event_t *e)
             st.tasks += f.tasks;
             st.culled += f.culled;
             st.draw_us += f.draw_us;
+            st.flushes += f.flushes;
+            st.flush_px += f.flush_px;
+            st.swap_us += f.swap_us;
+            st.push_us += f.push_us;
+            st.blocked_us += f.blocked_us;
         });
     }
 }
+
+#ifndef ARDUINO
+// The SDL flush has no hook of its own: count the area here (swap/push read 0). Emulator times are -O0 host times with no flush cost; only ratios between phases mean anything (KF.25c).
+void kp_flush_cb(lv_event_t *e)
+{
+    auto *a = (const lv_area_t *)lv_event_get_param(e);
+    kitchen::note_flush((uint32_t)lv_area_get_size(a), 0, 0, 0);
+}
+#endif
 
 // KF.14: what the game's internal-RAM image leaves for Wi-Fi / BLE.
 void kp_print_heap()
@@ -2809,6 +2840,9 @@ void ui_kitchen_enter(lv_obj_t *parent)
     if (lv_display_t *disp = lv_display_get_default()) {
         lv_display_add_event_cb(disp, kp_refr_cb, LV_EVENT_REFR_START, nullptr);
         lv_display_add_event_cb(disp, kp_refr_cb, LV_EVENT_REFR_READY, nullptr);
+#ifndef ARDUINO
+        lv_display_add_event_cb(disp, kp_flush_cb, LV_EVENT_FLUSH_START, nullptr);
+#endif
     }
 #ifdef KITCHEN_BENCH
     bench_begin();
@@ -2832,6 +2866,10 @@ void ui_kitchen_exit()
     if (lv_display_t *disp = lv_display_get_default()) {
         while (lv_display_remove_event_cb_with_user_data(disp, kp_refr_cb, nullptr)) {
         }
+#ifndef ARDUINO
+        while (lv_display_remove_event_cb_with_user_data(disp, kp_flush_cb, nullptr)) {
+        }
+#endif
     }
     s_kp.bench_on = false;
 #endif
@@ -3045,5 +3083,19 @@ void cast_check()
 void bench_start() { bench_begin(); }
 void probe_mute(bool on) { s_kp.muted = on; }
 bool bench_done() { return s_kp.bench_finished; }
+} // namespace kitchen
+#endif
+
+#ifdef KITCHEN_PROBE
+namespace kitchen {
+void note_flush(uint32_t px, uint32_t swap_us, uint32_t push_us, uint32_t blocked_us)
+{
+    if (s_kp.muted) return;
+    s_kp.cur.flushes++;
+    s_kp.cur.flush_px += px;
+    s_kp.cur.swap_us += swap_us;
+    s_kp.cur.push_us += push_us;
+    s_kp.cur.blocked_us += blocked_us;
+}
 } // namespace kitchen
 #endif
