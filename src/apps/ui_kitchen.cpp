@@ -19,8 +19,11 @@
  * needed). The frame timer steps once per display refresh and invalidates
  * only the areas of the parts that moved (KITCHEN_FPS_PLAN.md).
  *
- * Input: wheel / arrow keys crank the knife (either direction chops),
- * touch drag does the same, click pauses (wheel then reaches Back) or,
+ * Input: the tool follows the wheel and moves only when it turns: roll down
+ * (or arrow down, drag down) lowers it, roll up lifts it, and it stops at the
+ * end of its travel. The knife cuts on reaching the board, the peeler drops
+ * its peel at the bottom; lifting brings the next slice / strip round.
+ * Click pauses (wheel then reaches Back) or,
  * once a stage is done, moves on to the next (the potato loops back to the
  * cucumber), ESC leaves.
  *
@@ -47,6 +50,7 @@
  */
 #include "../ui_define.h"
 #include "kitchen.h"
+#include "kitchen_crank.h"
 
 #include <algorithm>
 #include <cmath>
@@ -804,13 +808,13 @@ void update_labels()
         lv_label_set_text_fmt(lbl_count, "%d / %d", s_game.cuts, MAX_SLICES);
         if (s_game.done) hint = "All chopped! Click for the potato";
         else if (s_game.paused) hint = "Paused - click to resume";
-        else if (s_game.cuts == 0) hint = "Turn the wheel to chop";
+        else if (s_game.cuts == 0) hint = "Roll the wheel down to chop";
         else hint = "";
     } else {
         lv_label_set_text_fmt(lbl_count, "%d / %d", s_pot.strips, P_STRIPS);
         if (s_pot.done) hint = "All peeled! Click to start over";
         else if (s_game.paused) hint = "Paused - click to resume";
-        else if (s_pot.phase_target <= 0) hint = "Turn the wheel to peel";
+        else if (s_pot.phase_target <= 0) hint = "Roll the wheel down to peel";
         else hint = "";
     }
     lv_label_set_text(lbl_hint, hint);
@@ -1339,7 +1343,7 @@ PotPose pot_pose()
     q.k = (int)floorf(ph);
     float p = ph - q.k;
     if (q.k >= P_STRIPS) q.k = P_STRIPS, p = 0;
-    q.pp = std::min(1.0f, p / P_PEEL_END);
+    q.pp = p >= P_PEEL_END - 0.002f ? 1.0f : p / P_PEEL_END;   // the stroke's end is a resting place: float noise must not leave a sliver
     q.ret = p > P_PEEL_END ? (p - P_PEEL_END) / (1.0f - P_PEEL_END) : 0.0f;
     q.spin = P_DELTA * (q.k + smooth01(q.ret));
     return q;
@@ -1863,7 +1867,7 @@ void draw_potato(const Ctx &c, const PotPose &q, const float *pc)
 // strip is off); the part furthest from the blade has curled off the most.
 bool peel_ribbon(const PotPose &q, Ribbon &r, bool whole)
 {
-    if (q.k >= P_STRIPS || (!whole && (q.ret > 0 || q.pp < 0.05f))) return false;
+    if (q.k >= P_STRIPS || (!whole && (q.ret > 0 || q.pp < 0.05f || q.pp >= 1.0f))) return false;
     PotXf xf(q.spin);
     float phc = P_PEEL_W - q.k * P_DELTA;   // strip centre, model longitude
     float th0 = 0.02f, th1 = whole ? P_PI - 0.02f : pot_stroke_th(q);
@@ -2149,9 +2153,7 @@ PeelerPose peeler_pose(const Ctx &c, const PotPose &q)
     PotXf xf(q.spin);
     float ph = P_PEEL_W - q.spin;
     float th = pot_stroke_th(q), lift = 0;
-    if (q.k >= P_STRIPS) {
-        th = 0.45f * P_PI, lift = 0.8f;   // done: set down beside it
-    } else if (q.ret > 0) {
+    if (q.ret > 0) {
         th = P_TH1 + (P_TH0 - P_TH1) * smooth01(q.ret);
         lift = 0.9f * sinf(P_PI * q.ret);
     }
@@ -2490,20 +2492,16 @@ unsigned cucumber_step(float dt)
         s_game.phase += step;
         mv |= MV_KNIFE;
 
-        // A crossing of a stroke's bottom (phase = P/2 mod P) is the cut.
-        float b0 = floorf((before - PERIOD * 0.5f) / PERIOD);
-        float b1 = floorf((s_game.phase - PERIOD * 0.5f) / PERIOD);
-        if (b0 != b1 && s_game.armed && !s_game.done && s_game.zf > T * 0.6f) {
-            cut();
-            mv |= MV_CUKE | MV_FLY;
-        }
+        // The cut: the blade arriving on the board, moving down.
+        constexpr float BOTTOM = PERIOD * 0.5f - 0.01f;
+        if (step > 0 && before < BOTTOM && s_game.phase >= BOTTOM && s_game.armed && !s_game.done && s_game.zf > T * 0.6f) { cut(); mv |= MV_CUKE | MV_FLY; }
+    }
 
-        if (!s_game.armed && tri_wave(s_game.phase) > 0.8f) {
-            s_game.armed = true;
-            if (s_game.pending_advance) {
-                s_game.pending_advance = false;
-                s_game.zf_target = T;
-            }
+    if (!s_game.armed && tri_wave(s_game.phase) > 0.8f) {
+        s_game.armed = true;
+        if (s_game.pending_advance) {
+            s_game.pending_advance = false;
+            s_game.zf_target = T;
         }
     }
 
@@ -2526,25 +2524,23 @@ unsigned cucumber_step(float dt)
 unsigned potato_step(float dt)
 {
     unsigned mv = 0;
-    // Same easing as the knife; the crank only ever runs forward here.
+    // Same easing as the knife, either way: the wheel can back the peeler up.
     float diff = s_pot.phase_target - s_pot.phase;
-    if (diff > 0.001f) {
+    if (fabsf(diff) > 0.001f) {
         float step = diff * std::min(1.0f, dt * 16.0f);
-        if (diff < 0.02f) step = diff;
-        step = std::min(P_PERIOD * 0.45f, step);
-        float before = s_pot.phase;
+        if (fabsf(diff) < 0.02f) step = diff;
+        step = std::max(-P_PERIOD * 0.45f, std::min(P_PERIOD * 0.45f, step));
         s_pot.phase += step;
         mv |= MV_POTATO;
-
-        // The blade leaving the bottom of strip k releases its peel.
-        float off = P_PERIOD * P_PEEL_END;
-        float b0 = floorf((before - off) / P_PERIOD), b1 = floorf((s_pot.phase - off) / P_PERIOD);
-        if (b1 > b0 && b1 >= 0 && b1 < P_STRIPS) finish_strip((int)b1);
-
-        if (!s_pot.done && s_pot.phase >= P_STRIPS * P_PERIOD - 0.01f) {
-            s_pot.phase = s_pot.phase_target = P_STRIPS * P_PERIOD;
-            s_pot.done = true;
-            update_labels();
+        // The blade reaching the bottom of the strip releases its peel, once.
+        int k = s_pot.strips;
+        if (k < P_STRIPS && s_pot.phase >= (k + P_PEEL_END) * P_PERIOD - 0.01f) {
+            finish_strip(k);
+            if (s_pot.strips >= P_STRIPS) {
+                s_pot.phase_target = s_pot.phase;
+                s_pot.done = true;
+                update_labels();
+            }
         }
     }
 
@@ -2669,21 +2665,18 @@ void frame_cb(lv_timer_t *)
     if (mv || !s_dirty.valid) invalidate_moved(mv);
 }
 
+// notches > 0: the wheel rolled down (LV_KEY_RIGHT from the encoder, arrow down, drag down).
 void crank(float notches)
 {
     if (s_game.paused) return;
     if (s_stage == 1) {
         if (s_pot.done) return;
         bool first = s_pot.phase_target <= 0;
-        float t = s_pot.phase_target + fabsf(notches);
-        s_pot.phase_target = std::min({t, s_pot.phase + P_PERIOD * 2.0f, P_STRIPS * P_PERIOD});
+        s_pot.phase_target = kitchen_crank::peeler_target(s_pot.phase_target, notches, P_PERIOD, P_PEEL_END);
         if (first) update_labels();
         return;
     }
-    float t = s_game.phase_target + notches;
-    // Don't queue more than two strokes of spin.
-    float lim = PERIOD * 2.0f;
-    s_game.phase_target = std::max(s_game.phase - lim, std::min(s_game.phase + lim, t));
+    s_game.phase_target = kitchen_crank::knife_target(s_game.phase_target, notches, PERIOD * 0.5f);
 }
 
 // ---- Bench (KF.1) and emulator hooks (KF.2) --------------------------------
@@ -2691,6 +2684,16 @@ void crank(float notches)
 #ifdef KITCHEN_PROBE
 constexpr uint32_t BENCH_SEED = 0x2545f491u;
 constexpr float BENCH_NOTCHES_PER_S = 12.0f;
+
+// The bench and the shots drive the crank as a player would: down, then back up.
+float auto_notches(float n)
+{
+    if (s_stage == 1) {
+        float p = s_pot.phase_target - floorf(s_pot.phase_target / P_PERIOD) * P_PERIOD;
+        return p >= P_PERIOD * P_PEEL_END - 0.001f ? -n : n;
+    }
+    return s_game.armed && s_game.phase < PERIOD * 0.5f - 0.01f ? n : -n;   // until the eased knife has landed
+}
 
 int kp_bucket()
 {
@@ -2741,7 +2744,7 @@ void bench_tick(float dt)
         return;
     }
     s_game.paused = false;
-    crank(BENCH_NOTCHES_PER_S * dt);
+    crank(auto_notches(BENCH_NOTCHES_PER_S * dt));
 }
 #endif
 
@@ -2928,7 +2931,7 @@ void sim(float notches, bool (*until)())
 {
     s_game.paused = false;
     for (int guard = 0; guard < 20000 && !until(); guard++) {
-        crank(notches);
+        crank(auto_notches(notches));
         if (s_stage == 0) cucumber_step(SIM_DT);
         else potato_step(SIM_DT);
     }
@@ -2973,7 +2976,7 @@ const char *shot_state(int i)
     case 0:   // the whole pile, knife mid-stroke
         seed_cucumber();
         sim(0.5f, [] { return s_game.done && all_landed(); });
-        crank(1.5f);
+        crank(-1.5f);
         sim_settle(40);
         return "pile";
     case 1:   // a slice in flight over a part pile
