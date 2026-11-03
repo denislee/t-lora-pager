@@ -6,6 +6,7 @@ import SwiftUI
 /// §3.4). State lives in `NotesModel`; this view only sequences it.
 struct NotesView: View {
     @EnvironmentObject private var notes: NotesModel
+    @EnvironmentObject private var settings: SettingsModel
 
     @State private var query = ""
     @State private var showSettings = false
@@ -85,6 +86,7 @@ struct NotesView: View {
             .sheet(isPresented: $showSettings) {
                 GitHubSettingsView()
                     .environmentObject(notes)
+                    .environmentObject(settings)
             }
             .sheet(isPresented: $showUnlock) {
                 UnlockNotesView()
@@ -421,6 +423,8 @@ private struct SyncResultView: View {
 }
 
 #Preview {
-    NotesView()
-        .environmentObject(PagerSession().notes)
+    let session = PagerSession()
+    return NotesView()
+        .environmentObject(session.notes)
+        .environmentObject(session.settings)
 }

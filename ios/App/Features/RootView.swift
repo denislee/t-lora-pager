@@ -116,11 +116,13 @@ struct RootView: View {
                 }
                 .tag(AppTab.diagnostics)
         }
-        // Auto-connect (if enabled) on launch and on every return to the foreground; a live link re-sends the clock.
+        // Auto-connect (if enabled) on launch and on every return to the foreground; a live link
+        // re-sends the clock and, once the last push is an hour old, the weather.
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 session.autoConnectIfNeeded()
                 session.resyncClockIfConnected(reason: "foreground")
+                session.refreshWeatherIfStale(reason: "foreground")
                 // Messages the share extension queued while the app was away.
                 session.inbox.outboxChanged()
                 Task { await session.flushOutbox() }

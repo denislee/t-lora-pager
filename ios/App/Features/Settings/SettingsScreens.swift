@@ -520,6 +520,7 @@ struct TimeZonePickerView: View {
 /// resolves the city; the pager fetches and stores the forecast.
 struct WeatherLocationView: View {
     @EnvironmentObject private var settings: SettingsModel
+    @EnvironmentObject private var session: PagerSession
     @Environment(\.dismiss) private var dismiss
 
     @State private var query = ""
@@ -628,7 +629,9 @@ struct WeatherLocationView: View {
         Task {
             let saved = await settings.commit(
                 "weather.location", .json(.object(["auto": .bool(true)])))
-            if !saved {
+            if saved {
+                session.refreshWeatherIfStale(reason: "location changed", force: true)
+            } else {
                 error = settings.store.lastError ?? "Could not use the automatic location"
             }
             saving = false
@@ -646,6 +649,7 @@ struct WeatherLocationView: View {
         ]))
         Task {
             if await settings.commit("weather.location", value) {
+                session.refreshWeatherIfStale(reason: "location changed", force: true)
                 saving = false
                 dismiss()
             } else {

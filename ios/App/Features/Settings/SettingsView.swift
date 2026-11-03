@@ -78,13 +78,20 @@ struct SettingsView: View {
     }
 
     private var thisPhoneSection: some View {
-        Section("This phone") {
-            NavigationLink("GitHub account") {
+        Section {
+            Toggle("Sync pager clock automatically", isOn: $session.autoSyncTime)
+            Toggle("Refresh pager weather automatically", isOn: $session.autoWeather)
+            NavigationLink {
                 GitHubSettingsView()
+            } label: {
+                LabeledContent("GitHub notes repo", value: notes.account.repo ?? "Not set up")
             }
-            Text("The Telegram login lives in the Telegram tab.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+        } header: {
+            Text("This phone")
+        } footer: {
+            Text("While connected, the phone sets the pager's clock and time zone on connect, every 30 minutes "
+                + "and whenever the phone's clock changes, and pushes the forecast for the pager's weather "
+                + "location every hour. The Telegram login lives in the Telegram tab.")
         }
     }
 

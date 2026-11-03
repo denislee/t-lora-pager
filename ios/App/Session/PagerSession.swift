@@ -41,6 +41,38 @@ final class PagerSession: ObservableObject {
         }
     }
 
+    /// Keep the pager clock on the phone's time and zone without a tap: on
+    /// connect, every clockResyncInterval, on foreground and when the phone's
+    /// clock or zone moves. Persisted; on by default.
+    @Published var autoSyncTime: Bool = UserDefaults.standard.object(forKey: PagerSession.autoSyncTimeDefault) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(autoSyncTime, forKey: Self.autoSyncTimeDefault)
+            if autoSyncTime {
+                resyncClockIfConnected(reason: "auto sync enabled")
+                if case .connected = state { startClockResync() }
+            } else {
+                clockTask?.cancel()
+                clockTask = nil
+            }
+        }
+    }
+
+    /// Push a fresh forecast for the pager's location without a tap: on
+    /// connect, every weatherRefreshInterval, and on foreground once the last
+    /// push is that old. Persisted; on by default.
+    @Published var autoWeather: Bool = UserDefaults.standard.object(forKey: PagerSession.autoWeatherDefault) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(autoWeather, forKey: Self.autoWeatherDefault)
+            if autoWeather {
+                if case .connected = state { startWeatherRefresh() }
+                refreshWeatherIfStale(reason: "auto refresh enabled")
+            } else {
+                weatherTask?.cancel()
+                weatherTask = nil
+            }
+        }
+    }
+
     /// Rolling session log, newest last, capped at 200 lines. Its own
     /// observable, so an appended line re-renders only the log view rather
     /// than every view watching the session (P7.63).
@@ -50,6 +82,10 @@ final class PagerSession: ObservableObject {
     private var eventsTask: Task<Void, Never>?
     /// Periodic sys.time.set while a link is up; cancelled in disconnect().
     private var clockTask: Task<Void, Never>?
+    /// Periodic weather.push while a link is up; cancelled in disconnect().
+    private var weatherTask: Task<Void, Never>?
+    /// When this link last pushed a forecast successfully (foreground staleness check).
+    private var lastWeatherPush: Date?
     /// Observers for the phone's clock / time-zone changes (registered in init).
     private var clockObservers: [NSObjectProtocol] = []
     /// Tears the active transport down (TCP or BLE).
@@ -146,6 +182,10 @@ final class PagerSession: ObservableObject {
     /// again on every connect so the pager's cache is fresh before it asks.
     nonisolated private static let weatherKeyDefault = "PagerLink.weatherKey"
     nonisolated private static let autoConnectDefault = "PagerLink.autoConnect"
+    nonisolated private static let autoSyncTimeDefault = "PagerLink.autoSyncTime"
+    nonisolated private static let autoWeatherDefault = "PagerLink.autoWeather"
+    /// How often a live link pushes a fresh forecast (open-meteo updates hourly).
+    nonisolated static let weatherRefreshInterval: Duration = .seconds(60 * 60)
     /// How often a live link re-sends the clock, so pager drift never builds up.
     nonisolated private static let clockResyncInterval: Duration = .seconds(30 * 60)
 
@@ -275,17 +315,22 @@ final class PagerSession: ObservableObject {
             appendLog("sys.hello ok (fw=\(hello["fw"]?.stringValue ?? "?"))")
 
             // Auto time sync on connect (plan §4.5: sys.time.set).
-            try await setClock(sys)
-            startClockResync()
+            if autoSyncTime {
+                try await setClock(sys)
+                startClockResync()
+            }
 
             await refresh()
             location.requestAuthorizationIfNeeded()
-            if let key = UserDefaults.standard.string(forKey: Self.weatherKeyDefault) {
-                await pushWeather(key: key)
-            }
             await startNotes(on: session, pagerCaps: Self.caps(of: hello))
             await tasks.attach(session, pagerCaps: Self.caps(of: hello))
+            // Settings before the weather push: the pager's weather.location
+            // names the key even if Weather was never opened on the pager.
             await settings.attach(session, pagerCaps: Self.caps(of: hello))
+            if autoWeather {
+                if weatherKey != nil { await pushWeather() }
+                startWeatherRefresh()
+            }
             await files.attach(session, pagerCaps: Self.caps(of: hello))
             await voiceMemos.attach(session, pagerCaps: Self.caps(of: hello))
             if pagerCaps.contains("ota") {
@@ -360,9 +405,42 @@ final class PagerSession: ObservableObject {
         await service.register()
     }
 
-    /// The weather key the pager last asked for (`"auto"`, a city), if any.
+    /// The pager's weather key (`"auto"` or a city): what its
+    /// `weather.location` setting names, else the key it last asked for.
     var weatherKey: String? {
-        UserDefaults.standard.string(forKey: Self.weatherKeyDefault)
+        if case .json(let location)? = settings.store.value("weather.location") {
+            // Mirrors weather_cache_key(): an empty/auto city is "auto".
+            if location["auto"]?.boolValue == true { return "auto" }
+            if let name = location["name"]?.stringValue {
+                return name.isEmpty ? "auto" : name
+            }
+        }
+        return UserDefaults.standard.string(forKey: Self.weatherKeyDefault)
+    }
+
+    /// Push weather every weatherRefreshInterval for as long as this link lives.
+    private func startWeatherRefresh() {
+        weatherTask?.cancel()
+        weatherTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: PagerSession.weatherRefreshInterval)
+                guard !Task.isCancelled, let self else { return }
+                guard case .connected = self.state, self.weatherKey != nil else { continue }
+                await self.pushWeather()
+            }
+        }
+    }
+
+    /// Automatic refresh (foreground, location change): push unless auto
+    /// weather is off, no link is up, or the last push is still fresh.
+    func refreshWeatherIfStale(reason: String, force: Bool = false) {
+        guard autoWeather, case .connected = state, weatherKey != nil else { return }
+        if !force, let last = lastWeatherPush,
+           Date().timeIntervalSince(last) < Double(Self.weatherRefreshInterval.components.seconds) {
+            return
+        }
+        appendLog("auto weather refresh (\(reason))")
+        Task { await pushWeather() }
     }
 
     /// Fetch the forecast for the pager's key without pushing it (the
@@ -394,13 +472,14 @@ final class PagerSession: ObservableObject {
         }
         // The pager's key ("auto", a city, or the "Sao Paulo" first-boot
         // default) is only known once it has asked.
-        guard let key = key ?? UserDefaults.standard.string(forKey: Self.weatherKeyDefault) else {
+        guard let key = key ?? weatherKey else {
             appendLog("weather push: open Weather on the pager once so the phone learns its location")
             return "Open Weather on the pager once so the phone learns its location."
         }
         defer { weatherActivity = weather.activity() }
         do {
             try await weather.push(key: key)
+            lastWeatherPush = Date()
             appendLog("weather pushed for \"\(key)\"")
             return nil
         } catch {
@@ -459,7 +538,7 @@ final class PagerSession: ObservableObject {
     /// Automatic resync: re-send the clock if a link is up (foreground,
     /// phone clock/zone change, periodic timer). A no-op when disconnected.
     func resyncClockIfConnected(reason: String) {
-        guard case .connected = state, let sys else { return }
+        guard autoSyncTime, case .connected = state, let sys else { return }
         Task {
             do {
                 try await setClock(sys)
@@ -505,6 +584,9 @@ final class PagerSession: ObservableObject {
         eventsTask = nil
         clockTask?.cancel()
         clockTask = nil
+        weatherTask?.cancel()
+        weatherTask = nil
+        lastWeatherPush = nil
         if let session {
             await session.stop()
         }
