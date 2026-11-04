@@ -7,8 +7,8 @@ import Foundation
 ///   them. `attach` binds a backend (the link) and loads everything; `detach`
 ///   drops it but keeps the last schema and values, so the tab still renders
 ///   read-only while offline.
-/// - An edit starts as a draft: `beginEdit`/`draft` stage it without touching
-///   the pager, `cancelEdit` drops it, and `commit` first validates it against
+/// - An edit starts as a draft: `draft` stages it without touching the
+///   pager, `cancelEdit` drops it, and `commit` first validates it against
 ///   the schema, then sends it with the last known `rev`. `value(_:)` is what
 ///   the UI shows: the draft when there is one, else the base value.
 /// - A stale `rev` is not thrown away: the store reloads, and if the pager
@@ -16,8 +16,8 @@ import Foundation
 ///   changed the same setting, the user's edit is refused and `lastError` says
 ///   so (their value is never silently overwritten).
 /// - Pager-initiated changes (`pagerChanged`) update the base values and `rev`.
-///   An id the user is editing keeps its draft: only the base value moves, so
-///   the user's in-progress text is not dropped.
+///   An id with a draft keeps it: only the base value moves, so the user's
+///   in-progress text is not dropped.
 /// - `onChange` runs after every state change; the app's ObservableObject
 ///   republishes from it.
 @MainActor
@@ -47,8 +47,6 @@ public final class SettingsStore {
     // MARK: - Private state
 
     private var backend: (any SettingsBackend)?
-    /// Ids the user has started editing (even before a draft value exists).
-    private var editing: Set<String> = []
 
     public init() {}
 
@@ -67,7 +65,6 @@ public final class SettingsStore {
     public func detach() {
         backend = nil
         connected = false
-        editing.removeAll()
         drafts.removeAll()
         committing.removeAll()
         changed()
@@ -105,22 +102,14 @@ public final class SettingsStore {
     /// The value the UI shows for `id`: the draft when there is one.
     public func value(_ id: String) -> SettingValue? { drafts[id] ?? values[id] }
 
-    /// Mark `id` as being edited (the row becomes an editor).
-    public func beginEdit(_ id: String) {
-        editing.insert(id)
-        changed()
-    }
-
     /// Stage a local value for `id`; nothing is sent until `commit`.
     public func draft(_ id: String, _ value: SettingValue) {
-        editing.insert(id)
         drafts[id] = value
         changed()
     }
 
-    /// Drop the draft for `id` and leave the editor.
+    /// Drop the draft for `id`.
     public func cancelEdit(_ id: String) {
-        editing.remove(id)
         drafts.removeValue(forKey: id)
         changed()
     }
@@ -142,7 +131,6 @@ public final class SettingsStore {
         changed()
         defer {
             committing.remove(id)
-            editing.remove(id)
             drafts.removeValue(forKey: id)
             changed()
         }
@@ -189,8 +177,8 @@ public final class SettingsStore {
         }
         for id in change.ids {
             if let value = snapshot.values[id] {
-                // Only the base value moves: an id in `editing` keeps its draft,
-                // so the user's in-progress edit is not dropped.
+                // Only the base value moves: `drafts` is untouched, so the
+                // user's in-progress edit is not dropped.
                 values[id] = value
             } else {
                 values.removeValue(forKey: id)

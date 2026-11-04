@@ -3,8 +3,9 @@ import Foundation
 /// The `rgb565-rle` screen format (PROTOCOL.md §6.6): 4-byte runs
 /// `u16 count, u16 pixel`, little-endian, row-major from the top-left;
 /// counts 1…65535, a run may cross rows, and they add up to exactly w × h.
-/// Mirrors the Go `EncodeRLE565` / `DecodeRLE565`; `vectors/screen.json`
-/// pins both.
+/// Mirrors the Go `DecodeRLE565` (`tools/pagerlink/internal/pagerlink/messaging.go`)
+/// and the test-only `EncodeRLE565` (`messaging_test.go` beside it);
+/// `vectors/screen.json` pins both.
 public enum RLE565 {
     public static let format = "rgb565-rle"
 

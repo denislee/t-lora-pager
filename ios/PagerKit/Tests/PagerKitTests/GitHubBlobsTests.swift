@@ -76,7 +76,7 @@ final class GitHubBlobsTests: XCTestCase {
         ])
         let (backend, _) = FakeGitHubRepo.backend(repo)
 
-        let names = try await backend.existingNames()
+        let names = Set(try await backend.existingBlobs().keys)
         XCTAssertEqual(names, Set(["a.txt", "b.txt"]))
     }
 

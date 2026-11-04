@@ -117,7 +117,9 @@ bool parse_hosts(const std::string &text, std::vector<Host> *out, std::string *e
 
         if (!have_name) h.name = h.host;
 
-        if (hosts.size() >= kMaxHosts) return fail(out, err, entry_no, "more than 16 hosts");
+        if (hosts.size() >= kMaxHosts) {
+            return fail(out, err, entry_no, ("more than " + std::to_string(kMaxHosts) + " hosts").c_str());
+        }
         for (const Host &o : hosts) {
             if (o.name == h.name) return fail(out, err, entry_no, "duplicate name");
         }

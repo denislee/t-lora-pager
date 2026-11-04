@@ -38,3 +38,18 @@ public struct JSONFile<Value: Codable>: Sendable {
         try? FileManager.default.removeItem(at: url)
     }
 }
+
+/// `Application Support/<name>` in the app container (the temporary folder
+/// where there is none).
+func applicationSupportURL(_ name: String) -> URL {
+    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? FileManager.default.temporaryDirectory
+    return base.appendingPathComponent(name)
+}
+
+/// `date` as ISO 8601 in UTC (exports compare across zones).
+func isoUTC(_ date: Date) -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = TimeZone(identifier: "UTC")
+    return formatter.string(from: date)
+}

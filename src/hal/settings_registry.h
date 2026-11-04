@@ -155,9 +155,6 @@ public:
     /** Type/range/enum/length/charset + the def's check. No side effects. */
     bool validate(const Def &d, const Value &v, Error &err) const;
 
-    /** Read one value (a secret reads Bool: whether it is set). */
-    bool get(const std::string &id, Value &out, Error &err) const;
-
     /** Validate and write one value (the pager UI path). */
     bool set(const std::string &id, const Value &v, Error &err);
 

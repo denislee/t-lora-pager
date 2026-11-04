@@ -20,7 +20,7 @@ struct FirmwareView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Button("List releases") { Task { await firmware.loadReleases() } }
-                    .disabled(FirmwareReleases.parseRepo(firmware.repo) == nil || firmware.loading)
+                    .disabled(GitHubSetup.parseRepo(firmware.repo) == nil || firmware.loading)
             } header: {
                 Text("GitHub releases")
             } footer: {

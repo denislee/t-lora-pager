@@ -1050,7 +1050,7 @@ std::string weather_get_user_city()
 #endif
 }
 
-void weather_set_user_city(const char *city)
+static void weather_set_user_city(const char *city)
 {
 #ifdef ARDUINO
     Preferences p;

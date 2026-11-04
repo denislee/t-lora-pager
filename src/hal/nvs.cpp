@@ -9,6 +9,7 @@
 #include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "link/fs_volume.h"
 #endif
 
 namespace hal {
@@ -50,8 +51,7 @@ const std::string &nvs_dir()
         if (explicit_dir && explicit_dir[0]) {
             d = explicit_dir;
         } else {
-            const char *root = getenv("PAGERLINK_FS_ROOT");
-            d = (root && root[0]) ? root : "/tmp/pagerlink-fs";
+            d = pagerlink::emu_fs_root();
             d += "/nvs";
         }
         mkdir_p(d);
@@ -214,39 +214,21 @@ void nvs_set_u16(const char *ns, const char *key, uint16_t value)
 #endif
 }
 
+#ifndef ARDUINO
 bool nvs_get_blob(const char *ns, const char *key, std::string &out)
 {
-#ifdef ARDUINO
-    Preferences p;
-    if (!p.begin(ns, true)) return false;
-    size_t len = p.getBytesLength(key);
-    if (len == 0) { p.end(); return false; }
-    out.resize(len);
-    size_t got = p.getBytes(key, &out[0], len);
-    p.end();
-    if (got != len) { out.clear(); return false; }
-    return true;
-#else
     std::lock_guard<std::mutex> lk(fs_mutex());
     return read_file(entry_path(ns, key), out);
-#endif
 }
 
 void nvs_set_blob(const char *ns, const char *key, const void *data, size_t len)
 {
-#ifdef ARDUINO
-    Preferences p;
-    if (!p.begin(ns, false)) return;
-    if (len && data) p.putBytes(key, data, len);
-    else             p.remove(key);
-    p.end();
-#else
     std::lock_guard<std::mutex> lk(fs_mutex());
     const std::string path = entry_path(ns, key);
     if (len) write_file(path, data, len);
     else     remove_file(path);
-#endif
 }
+#endif
 
 bool nvs_has(const char *ns, const char *key)
 {

@@ -10,11 +10,10 @@ package main
 // placeholder, an applied write with if_rev, all-or-nothing validation, stale
 // revisions, read-only and unknown ids, the unauthorized secret write, a change
 // made on the pager side (via the emulator-only test.settings.local hook), the
-// refused unknown time zone, and a settings.action job.
+// refused unknown time zone, a settings.action job, and the order of tg.favorites.
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -155,51 +154,31 @@ func cmdSettingsAction(c *pagerlink.Client, timeout time.Duration, args []string
 // within elapses, returning the notification, the decoded job and whether one
 // arrived.
 func waitSettingsJob(c *pagerlink.Client, job string, within time.Duration) (pagerlink.Notification, pagerlink.SettingsJob, bool) {
-	deadline := time.After(within)
-	for {
-		select {
-		case n := <-c.Events():
-			if n.Name != "evt.settings.job" {
-				continue
-			}
-			var j pagerlink.SettingsJob
-			if err := json.Unmarshal(n.Params, &j); err != nil {
-				continue
-			}
-			if j.Job == job {
-				return n, j, true
-			}
-		case <-deadline:
-			return pagerlink.Notification{}, pagerlink.SettingsJob{}, false
-		case <-c.Done():
-			return pagerlink.Notification{}, pagerlink.SettingsJob{}, false
+	var found pagerlink.SettingsJob
+	n, ok := waitFor(c, "evt.settings.job", within, func(p json.RawMessage) bool {
+		var j pagerlink.SettingsJob
+		if json.Unmarshal(p, &j) != nil || j.Job != job {
+			return false
 		}
-	}
+		found = j
+		return true
+	})
+	return n, found, ok
 }
 
 // waitSettingsChanged drains c.Events() until an evt.settings.changed that lists
 // id arrives or within elapses.
 func waitSettingsChanged(c *pagerlink.Client, id string, within time.Duration) (pagerlink.SettingsChanged, bool) {
-	deadline := time.After(within)
-	for {
-		select {
-		case n := <-c.Events():
-			if n.Name != "evt.settings.changed" {
-				continue
-			}
-			var ch pagerlink.SettingsChanged
-			if err := json.Unmarshal(n.Params, &ch); err != nil {
-				continue
-			}
-			if slices.Contains(ch.IDs, id) {
-				return ch, true
-			}
-		case <-deadline:
-			return pagerlink.SettingsChanged{}, false
-		case <-c.Done():
-			return pagerlink.SettingsChanged{}, false
+	var found pagerlink.SettingsChanged
+	_, ok := waitFor(c, "evt.settings.changed", within, func(p json.RawMessage) bool {
+		var ch pagerlink.SettingsChanged
+		if json.Unmarshal(p, &ch) != nil || !slices.Contains(ch.IDs, id) {
+			return false
 		}
-	}
+		found = ch
+		return true
+	})
+	return found, ok
 }
 
 // drainEvents discards every notification already queued on c.Events(), so a
@@ -218,14 +197,11 @@ func drainEvents(c *pagerlink.Client) {
 // it returned a result or failed some other way (which it prints).
 func rpcErr(c *pagerlink.Client, timeout time.Duration, method string, params any) *pagerlink.RPCError {
 	_, err := c.Call(method, params, timeout)
-	var re *pagerlink.RPCError
-	if errors.As(err, &re) {
-		return re
-	}
-	if err != nil {
+	re := asRPC(err)
+	if re == nil && err != nil {
 		fmt.Printf("       %s: %v\n", method, err)
 	}
-	return nil
+	return re
 }
 
 // readSettings calls settings.get for every item (or the given ids) and decodes
@@ -235,13 +211,7 @@ func readSettings(c *pagerlink.Client, timeout time.Duration, ids ...string) (pa
 	if len(ids) > 0 {
 		params = map[string]any{"ids": ids}
 	}
-	res, err := c.Call("settings.get", params, timeout)
-	if err != nil {
-		return pagerlink.SettingsValues{}, err
-	}
-	var v pagerlink.SettingsValues
-	err = json.Unmarshal(res, &v)
-	return v, err
+	return callInto[pagerlink.SettingsValues](c, timeout, "settings.get", params)
 }
 
 // readSetting reads one value with settings.get and decodes it into dst.
@@ -274,8 +244,8 @@ func secretPlaceholderOK(id string, raw json.RawMessage) bool {
 	return true
 }
 
-// smokeSettings drives the twelve settings steps (a-l) and reports each. It
-// leaves display.brightness as it found it.
+// smokeSettings drives the thirteen settings steps (a-m) and reports each. It
+// leaves display.brightness and tg.favorites as it found them.
 func smokeSettings(c *pagerlink.Client, timeout time.Duration) bool {
 	pass := true
 
@@ -344,16 +314,12 @@ func smokeSettings(c *pagerlink.Client, timeout time.Duration) bool {
 		if v2 > *item.Max {
 			v2 = *item.Max
 		}
-		var applied pagerlink.SettingsSetResult
-		res, err := c.Call("settings.set", map[string]any{
+		applied, err := callInto[pagerlink.SettingsSetResult](c, timeout, "settings.set", map[string]any{
 			"values": map[string]any{"display.brightness": v2},
 			"if_rev": all.Rev,
-		}, timeout)
+		})
 		if err != nil {
 			fmt.Printf("       settings.set display.brightness: %v\n", err)
-			setOK = false
-		} else if err := json.Unmarshal(res, &applied); err != nil {
-			fmt.Printf("       settings.set result %s: %v\n", res, err)
 			setOK = false
 		} else if !slices.Contains(applied.Applied, "display.brightness") {
 			fmt.Printf("       settings.set applied %v, want display.brightness\n", applied.Applied)
@@ -498,22 +464,19 @@ func smokeSettings(c *pagerlink.Client, timeout time.Duration) bool {
 	// j. An action that answers {"job"} finishes with evt.settings.job.
 	jobOK := false
 	var jobID string
-	res, err := c.Call("settings.action", map[string]any{"id": "wifi.test"}, timeout)
+	body, err := callInto[struct {
+		Job string `json:"job"`
+	}](c, timeout, "settings.action", map[string]any{"id": "wifi.test"})
 	if err != nil {
 		fmt.Printf("       settings.action wifi.test: %v\n", err)
+	} else if body.Job == "" {
+		fmt.Printf("       settings.action wifi.test: no job, want {\"job\"}\n")
 	} else {
-		var body struct {
-			Job string `json:"job"`
-		}
-		if err := json.Unmarshal(res, &body); err != nil || body.Job == "" {
-			fmt.Printf("       settings.action wifi.test result %s, want {\"job\"}\n", res)
-		} else {
-			jobID = body.Job
-			_, j, ok := waitSettingsJob(c, jobID, 10*time.Second)
-			jobOK = ok && j.Done
-			if !ok {
-				fmt.Printf("       no evt.settings.job for %q within 10s\n", jobID)
-			}
+		jobID = body.Job
+		_, j, ok := waitSettingsJob(c, jobID, 10*time.Second)
+		jobOK = ok && j.Done
+		if !ok {
+			fmt.Printf("       no evt.settings.job for %q within 10s\n", jobID)
 		}
 	}
 	pass = report(jobOK, "settings.action wifi.test -> job %q, evt.settings.job done", jobID) && pass
@@ -540,5 +503,85 @@ func smokeSettings(c *pagerlink.Client, timeout time.Duration) bool {
 	}
 	pass = report(restoreOK, "settings.set display.brightness restored to %d", cur) && pass
 
+	// m. tg.favorites keeps the order it was set in, and the same list again is
+	//    not a change, so rev stays put.
+	pass = report(smokeFavorites(c, timeout),
+		"settings.set tg.favorites: order kept, same list leaves rev alone, restored") && pass
+
 	return pass
+}
+
+// smokeFavorites sets tg.favorites to a list that is not sorted by id, checks it
+// reads back in that order, checks that setting it again changes nothing, and
+// puts the pager's own list back whatever happened. The setter's second half is
+// deferred to the UI thread, so each read waits favoritesSettle for it.
+func smokeFavorites(c *pagerlink.Client, timeout time.Duration) bool {
+	const id = "tg.favorites"
+	const favoritesSettle = 500 * time.Millisecond
+	type favorite struct {
+		ID    int64  `json:"id"`
+		Title string `json:"title"`
+	}
+	set := func(value any) (pagerlink.SettingsSetResult, bool) {
+		r, err := callInto[pagerlink.SettingsSetResult](c, timeout, "settings.set",
+			map[string]any{"values": map[string]any{id: value}})
+		if err != nil {
+			fmt.Printf("       settings.set %s: %v\n", id, err)
+			return r, false
+		}
+		return r, true
+	}
+	read := func() ([]favorite, bool) {
+		time.Sleep(favoritesSettle)
+		var got []favorite
+		if err := readSetting(c, timeout, id, &got); err != nil {
+			fmt.Printf("       settings.get %s: %v\n", id, err)
+			return nil, false
+		}
+		return got, true
+	}
+
+	var original json.RawMessage
+	if err := readSetting(c, timeout, id, &original); err != nil {
+		fmt.Printf("       settings.get %s: %v\n", id, err)
+		return false
+	}
+	var wantOriginal []favorite
+	if err := json.Unmarshal(original, &wantOriginal); err != nil {
+		fmt.Printf("       %s: current value %s: %v\n", id, original, err)
+		return false
+	}
+
+	want := []favorite{{300, "smoke c"}, {100, "smoke a"}, {200, "smoke b"}}
+	first, ok := set(want)
+	if ok {
+		if got, rok := read(); !rok {
+			ok = false
+		} else if !slices.Equal(got, want) {
+			fmt.Printf("       %s reads %+v, want %+v\n", id, got, want)
+			ok = false
+		}
+	}
+	if ok {
+		if second, sok := set(want); !sok {
+			ok = false
+		} else if second.Rev != first.Rev || len(second.Applied) != 0 {
+			fmt.Printf("       same %s again: rev %d -> %d, applied %v, want no change\n",
+				id, first.Rev, second.Rev, second.Applied)
+			ok = false
+		}
+	}
+
+	if _, rok := set(original); !rok {
+		return false
+	}
+	back, rok := read()
+	if !rok {
+		return false
+	}
+	if !slices.Equal(back, wantOriginal) {
+		fmt.Printf("       %s reads %+v after the restore, want %+v\n", id, back, wantOriginal)
+		return false
+	}
+	return ok
 }

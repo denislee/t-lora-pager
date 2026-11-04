@@ -9,7 +9,6 @@
 // --- NFC ---
 bool hw_get_nfc_enable();
 void hw_set_nfc_enable(bool en);
-bool hw_start_nfc_discovery();
 
 /* True iff the last hw_start_nfc_discovery() call succeeded and we haven't
  * since stopped. Distinguishes "chip powered" from "RFAL polling live". */

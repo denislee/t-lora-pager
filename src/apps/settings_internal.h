@@ -124,8 +124,6 @@ struct weather_city_match {
     double lon;
 };
 std::string weather_get_user_city();
-void        weather_set_user_city(const char *city);
-void        weather_set_user_location(const char *city, double lat, double lon);
 bool        weather_search_cities(const char *query,
                                   std::vector<weather_city_match> &out,
                                   std::string &err);

@@ -52,7 +52,6 @@ final class FilesModel: ObservableObject {
         let name: String
         let url: URL
         let kind: FilePreviewKind
-        let crc32: UInt32
     }
 
     @Published var volume: Volume = .int {
@@ -200,12 +199,11 @@ final class FilesModel: ObservableObject {
         transfer = Transfer(direction: .download, name: name, done: 0, total: row.entry.size)
         defer { transfer = nil }
         do {
-            let (bytes, info) = try await browser.download(
+            let (bytes, _) = try await browser.download(
                 vol: volume.rawValue, path: FilePath.join(path, name), progress: progressSink())
             let url = try Self.saveDownload(bytes, name: name)
             log("files: downloaded \(name) (\(bytes.count) B)")
-            downloaded = Downloaded(name: name, url: url, kind: FilePreviewKind.of(name: name, bytes: bytes),
-                                    crc32: info.crc32)
+            downloaded = Downloaded(name: name, url: url, kind: FilePreviewKind.of(name: name, bytes: bytes))
             errorText = nil
         } catch {
             errorText = "Download failed: \(NotesModel.describe(error))"
@@ -249,7 +247,6 @@ final class FilesModel: ObservableObject {
         if let first = result.failed.first {
             let (upload, error) = first
             errorText = "Upload of \(FilePath.name(upload.path)) failed: \(NotesModel.describe(error))"
-            if !FileBrowser.isLinkFailure(error) { await browser.discardInterrupted(upload.id) }
             interruptedCount = await browser.interrupted.count
         }
         await reload(quiet: true)

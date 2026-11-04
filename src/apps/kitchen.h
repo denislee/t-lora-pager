@@ -13,8 +13,7 @@ int shot_count();
 // still for the shot); returns the state's name, or null.
 const char *shot_setup(int i);
 void shot_release();
-// Turn the wheel by n notches / invalidate the whole stage (trail check).
-void debug_crank(float notches);
+// Invalidate the whole stage (trail check).
 void debug_invalidate_all();
 // The KF.1 bench: a fixed seed, a steady crank through both stages, per-phase
 // totals printed as `[kitchen] bench ...` lines at the end.

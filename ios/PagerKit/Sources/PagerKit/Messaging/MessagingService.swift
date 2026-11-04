@@ -2,7 +2,8 @@ import Foundation
 
 /// The phone-side statement of the PROTOCOL.md §6.5 messaging rules, the same
 /// checks and messages as the pager (`src/hal/companion_msg.cpp`) and the Go
-/// client (`tools/pagerlink/internal/pagerlink/messaging.go` `CheckMessaging`).
+/// conformance test (`CheckMessaging` in
+/// `tools/pagerlink/internal/pagerlink/messaging_test.go`).
 /// `vectors/messaging.json` pins every verdict, so a phone that checks here
 /// first never sends what the pager would refuse, and refuses a bad
 /// pager → phone `clip.push` with the pager's own words.

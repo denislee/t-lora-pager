@@ -25,9 +25,7 @@ bool handle_weather_push(const JsonObject &params, JsonWriter &result, RpcError 
     WeatherPayload p;
     std::string why;
     if (!weather_payload_parse(params.text(), p, why)) {
-        err.code = hal_error_code(HalError::InvalidArgument);
-        err.msg = why;
-        return false;
+        return rpc_invalid(err, why);
     }
     weather_cache_save_forecast(p.key, p.fc);
     if (p.has_geo) weather_cache_save_geo(p.key, p.geo);

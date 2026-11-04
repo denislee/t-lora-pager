@@ -138,6 +138,44 @@ final class WeatherPreviewTests: XCTestCase {
         XCTAssertEqual(weather.activity().lastRequest?.key, "Recife")
     }
 
+    /// The Weather screen learns of a fetch when it lands, however long it
+    /// takes: the pager's request fires first with no fetch yet, and the fetch
+    /// fires only after the slow forecast reply.
+    func testOnActivityFiresForRequestSlowFetchAndPush() async throws {
+        let forecastDelay = 0.3
+        let server = StubServer { request in
+            if request.path.hasSuffix("/v1/forecast") { Thread.sleep(forTimeInterval: forecastDelay) }
+            return Self.answer(request)
+        }
+        let (a, b) = LoopbackTransport.pair(packetSize: PagerLink.tcpPacket)
+        let phone = LinkSession(transport: a)
+        let pager = LinkSession(transport: b, role: .pager)
+        await pager.handle("weather.push") { _ in .object([:]) }
+        await phone.start()
+        await pager.start()
+        let weather = WeatherService(session: phone, urlSession: StubURLProtocol.session(server),
+                                     locator: nil)
+        let trail = ActivityTrail()
+        let start = Date()
+        weather.onActivity { trail.append(weather.activity(), after: Date().timeIntervalSince(start)) }
+        await weather.register()
+
+        _ = try await pager.call("weather.get", params: ["key": "Recife"], timeout: .seconds(5))
+
+        let seen = trail.values
+        XCTAssertEqual(seen.count, 2, "one for the request, one for the fetch")
+        XCTAssertEqual(seen[0].activity.lastRequest?.key, "Recife")
+        XCTAssertNil(seen[0].activity.lastFetch, "the request fires before the fetch")
+        XCTAssertEqual(seen[1].activity.lastFetch?.key, "Recife")
+        XCTAssertGreaterThanOrEqual(seen[1].after, forecastDelay, "the fetch fires after the slow reply")
+
+        try await weather.push(key: "Recife")
+        XCTAssertEqual(trail.values.last?.activity.lastPush?.key, "Recife")
+
+        await phone.stop()
+        await pager.stop()
+    }
+
     func testAutoWithoutPhoneFixIsIPGeolocation() async throws {
         let server = StubServer { Self.answer($0) }
         let (a, _) = LoopbackTransport.pair(packetSize: PagerLink.tcpPacket)
@@ -146,6 +184,16 @@ final class WeatherPreviewTests: XCTestCase {
         _ = try await weather.payload(key: "auto")
         XCTAssertEqual(weather.activity().lastFetch?.source, .ipGeolocation)
         XCTAssertEqual(weather.activity().lastFetch?.city, "Olinda")
+    }
+}
+
+/// What `onActivity` saw and when, under a lock.
+private final class ActivityTrail: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [(activity: WeatherActivity, after: TimeInterval)] = []
+    var values: [(activity: WeatherActivity, after: TimeInterval)] { lock.withLock { seen } }
+    func append(_ activity: WeatherActivity, after: TimeInterval) {
+        lock.withLock { seen.append((activity, after)) }
     }
 }
 

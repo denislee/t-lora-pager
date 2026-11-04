@@ -43,13 +43,16 @@ void nvs_set_bool(const char *ns, const char *key, bool value);
 uint16_t nvs_get_u16(const char *ns, const char *key, uint16_t dflt);
 void nvs_set_u16(const char *ns, const char *key, uint16_t value);
 
+#ifndef ARDUINO
 // Read a binary entry into `out`. Returns true when the entry is present (the
 // data is then copied verbatim, and `out` may legitimately be empty); false —
 // leaving `out` untouched — when it is absent.
+// Emulator only: hardware stores its blob with Preferences directly.
 bool nvs_get_blob(const char *ns, const char *key, std::string &out);
 
 // Write a binary entry. `len == 0` removes the key.
 void nvs_set_blob(const char *ns, const char *key, const void *data, size_t len);
+#endif
 
 // True when the entry exists at all, regardless of its contents.
 bool nvs_has(const char *ns, const char *key);

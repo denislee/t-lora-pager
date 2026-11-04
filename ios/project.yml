@@ -44,6 +44,10 @@ targets:
         CFBundleShortVersionString: "0.1"
         CFBundleVersion: "1"
         LSRequiresIPhoneOS: true
+        # The pager's "Copy Notes to Phone" writes Documents/Notes; these show
+        # it in the Files app.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         NSBluetoothAlwaysUsageDescription: Pager Companion talks to your LilyGo pager over Bluetooth.
         NSLocationWhenInUseUsageDescription: Pager Companion uses your location for the pager's "auto" weather forecast.
         NSLocalNetworkUsageDescription: Pager Companion reaches your Telegram bridge (and, in debug builds, the pager emulator) on this network.

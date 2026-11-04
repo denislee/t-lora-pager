@@ -175,10 +175,10 @@ bool fail_code(RpcError &err, const char *code, const char *msg) {
 bool get_vol(const JsonObject &p, Vol &v, RpcError &err) {
     std::string s;
     if (!p.get_string("vol", s) || !vol_from_string(s, v)) {
-        return fail(err, HalError::InvalidArgument, "bad vol");
+        return rpc_invalid(err, "bad vol");
     }
     if (!vol_available(v)) {
-        return fail(err, HalError::InvalidArgument, "sd not mounted");
+        return rpc_invalid(err, "sd not mounted");
     }
     return true;
 }
@@ -186,11 +186,11 @@ bool get_vol(const JsonObject &p, Vol &v, RpcError &err) {
 bool get_path(const JsonObject &p, const char *key, std::string &out, RpcError &err) {
     std::string s;
     if (!p.get_string(key, s)) {
-        return fail(err, HalError::InvalidArgument, "bad path");
+        return rpc_invalid(err, "bad path");
     }
     char buf[PATH_CAP];
     if (!sandbox_path(s.c_str(), buf, sizeof(buf))) {
-        return fail(err, HalError::InvalidArgument, "bad path");
+        return rpc_invalid(err, "bad path");
     }
     out = buf;
     return true;
@@ -255,7 +255,7 @@ bool handle_list(const JsonObject &params, JsonWriter &result, RpcError &err) {
     uint32_t limit = 64;
     if (params.has("limit")) {
         if (!get_uint32(params, "limit", limit)) {
-            return fail(err, HalError::InvalidArgument, "bad limit");
+            return rpc_invalid(err, "bad limit");
         }
         if (limit < 1) limit = 1;
         if (limit > 64) limit = 64;
@@ -263,13 +263,13 @@ bool handle_list(const JsonObject &params, JsonWriter &result, RpcError &err) {
     uint32_t cursor = 0;
     if (params.has("cursor")) {
         if (!get_uint32(params, "cursor", cursor)) {
-            return fail(err, HalError::InvalidArgument, "bad cursor");
+            return rpc_invalid(err, "bad cursor");
         }
     }
 
     std::vector<VolEntry> entries;
-    if (!vol_list(v, path, entries)) return fail(err, HalError::InvalidArgument, "not a directory");
-    if (cursor > entries.size()) return fail(err, HalError::InvalidArgument, "bad cursor");
+    if (!vol_list(v, path, entries)) return rpc_invalid(err, "not a directory");
+    if (cursor > entries.size()) return rpc_invalid(err, "bad cursor");
 
     result.begin_object().key("entries").begin_array();
     size_t used = result.str().size();
@@ -302,7 +302,7 @@ bool handle_stat(const JsonObject &params, JsonWriter &result, RpcError &err) {
     if (!get_vol(params, v, err) || !get_path(params, "path", path, err)) return false;
 
     VolEntry st;
-    if (!vol_stat(v, path, st)) return fail(err, HalError::InvalidArgument, "not found");
+    if (!vol_stat(v, path, st)) return rpc_invalid(err, "not found");
 
     result.begin_object()
         .key("dir").bool_val(st.dir)
@@ -321,21 +321,21 @@ bool handle_read(const JsonObject &params, JsonWriter &result, RpcError &err) {
     /* The phone receives the DATA, so it allocates the (even) transfer id. */
     uint16_t xfer = 0;
     if (!get_xfer_id(params, "xfer", xfer) || (xfer % 2) != 0 || find(xfer)) {
-        return fail(err, HalError::InvalidArgument, "bad xfer");
+        return rpc_invalid(err, "bad xfer");
     }
     if (g_xfers.size() >= MAX_XFERS) return fail_code(err, "busy", "too many transfers");
 
     VolEntry st;
-    if (!vol_stat(v, path, st)) return fail(err, HalError::InvalidArgument, "not found");
-    if (st.dir) return fail(err, HalError::InvalidArgument, "not a file");
+    if (!vol_stat(v, path, st)) return rpc_invalid(err, "not found");
+    if (st.dir) return rpc_invalid(err, "not a file");
 
     uint32_t offset = 0;
     if (params.has("offset")) {
         if (!get_uint32(params, "offset", offset)) {
-            return fail(err, HalError::InvalidArgument, "bad offset");
+            return rpc_invalid(err, "bad offset");
         }
     }
-    if (offset > st.size) return fail(err, HalError::InvalidArgument, "bad offset");
+    if (offset > st.size) return rpc_invalid(err, "bad offset");
 
     /* PROTOCOL.md §6.1: the RES carries the whole-file crc32, so it must be
      * known before the first DATA; the cache makes a repeat read free. */
@@ -395,31 +395,31 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
 
     uint32_t size = 0;
     uint32_t crc = 0;
-    if (!get_uint32(params, "size", size)) return fail(err, HalError::InvalidArgument, "bad size");
-    if (!get_uint32(params, "crc32", crc)) return fail(err, HalError::InvalidArgument, "bad crc32");
+    if (!get_uint32(params, "size", size)) return rpc_invalid(err, "bad size");
+    if (!get_uint32(params, "crc32", crc)) return rpc_invalid(err, "bad crc32");
 
     bool overwrite = false;
     if (params.has("overwrite") && !params.get_bool("overwrite", overwrite)) {
-        return fail(err, HalError::InvalidArgument, "bad overwrite");
+        return rpc_invalid(err, "bad overwrite");
     }
     bool resume = false;
     if (params.has("resume") && !params.get_bool("resume", resume)) {
-        return fail(err, HalError::InvalidArgument, "bad resume");
+        return rpc_invalid(err, "bad resume");
     }
     if (resume) return fail(err, HalError::NotSupported, "resume not supported");
     if (g_xfers.size() >= MAX_XFERS) return fail_code(err, "busy", "too many transfers");
-    if (path == "/") return fail(err, HalError::InvalidArgument, "bad path");
+    if (path == "/") return rpc_invalid(err, "bad path");
 
     VolEntry st;
     if (vol_stat(v, path, st)) {
-        if (st.dir) return fail(err, HalError::InvalidArgument, "not a file");
-        if (!overwrite) return fail(err, HalError::InvalidArgument, "exists");
+        if (st.dir) return rpc_invalid(err, "not a file");
+        if (!overwrite) return rpc_invalid(err, "exists");
     }
 
     const std::string parent = parent_of(path);
     VolEntry pst;
     if (!vol_stat(v, parent, pst) || !pst.dir) {
-        return fail(err, HalError::InvalidArgument, "not a directory");
+        return rpc_invalid(err, "not a directory");
     }
 
     uint64_t free_b = 0;
@@ -473,11 +473,11 @@ bool handle_write_begin(const JsonObject &params, JsonWriter &result, RpcError &
 bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError &err) {
     uint16_t id = 0;
     if (!get_xfer_id(params, "xfer", id)) {
-        return fail(err, HalError::InvalidArgument, "no such transfer");
+        return rpc_invalid(err, "no such transfer");
     }
     Transfer *t = find(id);
     if (!t || !t->upload || !t->rx) {
-        return fail(err, HalError::InvalidArgument, "no such transfer");
+        return rpc_invalid(err, "no such transfer");
     }
 
     /* Copy what drop() will invalidate before any early exit. */
@@ -490,7 +490,7 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
 
     if (t->rx->state() != XferState::Done) {
         drop(id);
-        return fail(err, HalError::InvalidArgument, "incomplete");
+        return rpc_invalid(err, "incomplete");
     }
 
     /* Close (sync size + FAT) before checking and renaming. The CRC is the
@@ -508,7 +508,7 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
         LINK_LOG("fs.write commit id=%u path=%s crc mismatch", static_cast<unsigned>(id),
                  path.c_str());
         drop(id); /* removes the .part */
-        return fail(err, HalError::InvalidArgument, "crc mismatch");
+        return rpc_invalid(err, "crc mismatch");
     }
 
     close_files_under(v, path); /* a read of the file we replace */
@@ -516,7 +516,7 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
     if (vol_stat(v, path, st)) {
         if (!overwrite) {
             drop(id);
-            return fail(err, HalError::InvalidArgument, "exists");
+            return rpc_invalid(err, "exists");
         }
         if (!vol_remove(v, path)) {
             drop(id);
@@ -540,7 +540,7 @@ bool handle_write_commit(const JsonObject &params, JsonWriter &result, RpcError 
 bool handle_write_abort(const JsonObject &params, JsonWriter &result, RpcError &err) {
     uint16_t id = 0;
     if (!get_xfer_id(params, "xfer", id) || !find(id)) {
-        return fail(err, HalError::InvalidArgument, "no such transfer");
+        return rpc_invalid(err, "no such transfer");
     }
     drop(id);
     result.begin_object().end_object();
@@ -551,7 +551,7 @@ bool handle_delete(const JsonObject &params, JsonWriter &result, RpcError &err) 
     Vol v;
     std::string path;
     if (!get_vol(params, v, err) || !get_path(params, "path", path, err)) return false;
-    if (path == "/") return fail(err, HalError::InvalidArgument, "bad path");
+    if (path == "/") return rpc_invalid(err, "bad path");
 
     /* Optional precondition (cap "fs.delete.if", PROTOCOL.md §6.1): delete only
      * if the file still has this size and whole-file CRC-32. The phone moves a
@@ -563,14 +563,14 @@ bool handle_delete(const JsonObject &params, JsonWriter &result, RpcError &err) 
     uint32_t if_crc = 0;
     if ((want_size && !get_uint32(params, "size", if_size)) ||
         (want_crc && !get_uint32(params, "crc32", if_crc))) {
-        return fail(err, HalError::InvalidArgument, "bad precondition");
+        return rpc_invalid(err, "bad precondition");
     }
 
     VolEntry st;
-    if (!vol_stat(v, path, st)) return fail(err, HalError::InvalidArgument, "not found");
+    if (!vol_stat(v, path, st)) return rpc_invalid(err, "not found");
     if (want_size || want_crc) {
-        if (st.dir) return fail(err, HalError::InvalidArgument, "not a file");
-        if (want_size && st.size != if_size) return fail(err, HalError::InvalidArgument, "changed");
+        if (st.dir) return rpc_invalid(err, "not a file");
+        if (want_size && st.size != if_size) return rpc_invalid(err, "changed");
         if (want_crc) {
             /* Fresh, not cached: a stale cache hit here would delete an edit.
              * A save in flight, or one that lands during the pass, may leave
@@ -582,7 +582,7 @@ bool handle_delete(const JsonObject &params, JsonWriter &result, RpcError &err) 
                 return fail(err, HalError::InternalError, "io error");
             }
             if (crc != if_crc || hw_save_pending() || hw_get_filesystem_generation() != gen) {
-                return fail(err, HalError::InvalidArgument, "changed");
+                return rpc_invalid(err, "changed");
             }
         }
     }
@@ -598,15 +598,15 @@ bool handle_mkdir(const JsonObject &params, JsonWriter &result, RpcError &err) {
     Vol v;
     std::string path;
     if (!get_vol(params, v, err) || !get_path(params, "path", path, err)) return false;
-    if (path == "/") return fail(err, HalError::InvalidArgument, "bad path");
+    if (path == "/") return rpc_invalid(err, "bad path");
 
     VolEntry pst;
     if (!vol_stat(v, parent_of(path), pst) || !pst.dir) {
-        return fail(err, HalError::InvalidArgument, "not a directory");
+        return rpc_invalid(err, "not a directory");
     }
     VolEntry st;
     if (vol_stat(v, path, st) && !st.dir) {
-        return fail(err, HalError::InvalidArgument, "exists");
+        return rpc_invalid(err, "exists");
     }
     if (!vol_mkdir(v, path)) return fail(err, HalError::InternalError, "io error");
     hw_set_filesystem_dirty(true);
@@ -623,18 +623,18 @@ bool handle_rename(const JsonObject &params, JsonWriter &result, RpcError &err) 
         return false;
     }
     if (from == "/" || to == "/" || from == to) {
-        return fail(err, HalError::InvalidArgument, "bad path");
+        return rpc_invalid(err, "bad path");
     }
     if (to.compare(0, from.size() + 1, from + "/") == 0) {
-        return fail(err, HalError::InvalidArgument, "bad path"); /* into its own subtree */
+        return rpc_invalid(err, "bad path"); /* into its own subtree */
     }
 
     VolEntry fst;
-    if (!vol_stat(v, from, fst)) return fail(err, HalError::InvalidArgument, "not found");
+    if (!vol_stat(v, from, fst)) return rpc_invalid(err, "not found");
     VolEntry tst;
-    if (vol_stat(v, to, tst)) return fail(err, HalError::InvalidArgument, "exists");
+    if (vol_stat(v, to, tst)) return rpc_invalid(err, "exists");
     if (!vol_stat(v, parent_of(to), tst) || !tst.dir) {
-        return fail(err, HalError::InvalidArgument, "not a directory");
+        return rpc_invalid(err, "not a directory");
     }
     close_files_under(v, from);
     close_files_under(v, to);

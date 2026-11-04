@@ -6,103 +6,31 @@ import XCTest
 
 @testable import PagerKit
 
-// MARK: - Pager-side filesystem
+// MARK: - Pager-side faults
 
-/// A lock-protected pager notes store: `fs.read` serves from it and
-/// `fs.delete` removes with the size/CRC precondition, recording every call.
-/// Two knobs simulate a pager whose note changes before the delete lands and
-/// a link that drops in the middle of the delete pass.
-private final class MovePagerFs: @unchecked Sendable {
-    struct DeleteCall: Equatable, Sendable {
-        let vol: String
-        let path: String
-        let size: UInt32?
-        let crc32: UInt32?
-    }
-
-    private let lock = NSLock()
-    private var files: [String: [UInt8]] = [:]
-    private var reads: [(vol: String, path: String)] = []
-    private var deletes: [DeleteCall] = []
-
-    /// Paths (`/notes/<name>`) whose bytes gain one `edit\n` when an
-    /// `fs.delete` arrives, so the delete's precondition fails.
-    var editBeforeDelete: Set<String> = []
-    /// The k-th `fs.delete` (0-based) and every later one drop the link.
-    var dropLinkAtDelete: Int?
-
-    private func key(_ vol: String, _ path: String) -> String { "\(vol):\(path)" }
-
-    func set(_ vol: String, _ path: String, _ bytes: [UInt8]) {
-        lock.lock()
-        defer { lock.unlock() }
-        files[key(vol, path)] = bytes
-    }
-
-    func bytes(_ vol: String, _ path: String) -> [UInt8]? {
-        lock.lock()
-        defer { lock.unlock() }
-        return files[key(vol, path)]
-    }
-
-    func remove(_ vol: String, _ path: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        files[key(vol, path)] = nil
-    }
-
-    func exists(_ vol: String, _ path: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return files[key(vol, path)] != nil
-    }
-
-    var readLog: [(vol: String, path: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return reads
-    }
-
-    var deleteLog: [DeleteCall] {
-        lock.lock()
-        defer { lock.unlock() }
-        return deletes
-    }
-
-    func recordRead(_ vol: String, _ path: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        reads.append((vol, path))
-    }
-
-    /// `fs.delete`: log the call, honour the link-drop knob, then remove only
-    /// if the file exists and still matches `size` and `crc32`.
-    func delete(vol: String, path: String, size: UInt32?, crc32: UInt32?) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        let index = deletes.count
-        deletes.append(DeleteCall(vol: vol, path: path, size: size, crc32: crc32))
-        if let drop = dropLinkAtDelete, index >= drop {
-            throw RPCError(code: "disconnected", msg: "link dropped")
+private extension CompanionFakeFs {
+    /// The k-th `fs.delete` (0-based) and every later one drop the link; nil
+    /// restores it.
+    func dropLinkAtDelete(_ index: Int?) {
+        guard let index else {
+            before("fs.delete", nil)
+            return
         }
-        let k = key(vol, path)
-        guard let current = files[k] else {
-            throw RPCError(code: "invalid_argument", msg: "not found")
+        before("fs.delete") { [self] _ in
+            if requests("fs.delete").count > index {
+                throw RPCError(code: "disconnected", msg: "link dropped")
+            }
         }
-        if editBeforeDelete.contains(path) {
-            files[k] = current + Array("edit\n".utf8)
-            editBeforeDelete.remove(path)
+    }
+
+    /// `path` gains one `edit\n` when an `fs.delete` for it arrives, so the
+    /// delete's precondition fails.
+    func editBeforeDelete(_ vol: String, _ path: String) {
+        before("fs.delete") { [self] params in
+            if params["path"]?.stringValue == path, let current = bytes(vol, path) {
+                set(vol, path, current + Array("edit\n".utf8))
+            }
         }
-        guard let bytes = files[k] else {
-            throw RPCError(code: "invalid_argument", msg: "not found")
-        }
-        if let size, UInt32(exactly: bytes.count) != size {
-            throw RPCError(code: "invalid_argument", msg: "changed")
-        }
-        if let crc32, CRC32.checksum(bytes) != crc32 {
-            throw RPCError(code: "invalid_argument", msg: "changed")
-        }
-        files[k] = nil
     }
 }
 
@@ -176,37 +104,6 @@ final class NotesMoveTests: XCTestCase {
         return (phone, pager)
     }
 
-    /// Install the pager-side `fs.read` and `fs.delete` handlers serving `fs`.
-    private static func register(_ pager: LinkSession, fs: MovePagerFs) async {
-        let salted = Array("Salted__".utf8)
-        await pager.handle("fs.read") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            let path = params["path"]?.stringValue ?? ""
-            let xfer = UInt16(exactly: params["xfer"]!.intValue!)!
-            fs.recordRead(vol, path)
-            guard let bytes = fs.bytes(vol, path) else {
-                throw RPCError(code: "invalid_argument", msg: "not found")
-            }
-            Task { () -> Void in
-                try? await pager.sendBytes(xfer: xfer, data: bytes, timeout: .seconds(5))
-            }
-            return [
-                "xfer": .number(Double(xfer)),
-                "size": .number(Double(bytes.count)),
-                "crc32": .number(Double(CRC32.checksum(bytes))),
-                "protected": .bool(bytes.starts(with: salted)),
-            ]
-        }
-        await pager.handle("fs.delete") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            let path = params["path"]?.stringValue ?? ""
-            try fs.delete(vol: vol, path: path,
-                          size: Params.uint32(params["size"]),
-                          crc32: Params.uint32(params["crc32"]))
-            return .object([:])
-        }
-    }
-
     private static func makeService(_ phone: LinkSession, _ repo: FakeGitHubRepo,
                                     caps: [String] = ["fs.delete.if"]) -> NotesSyncService {
         let (backend, _) = FakeGitHubRepo.backend(repo)
@@ -251,10 +148,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testNewNoteUploadedVerifiedDeleted() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("hello".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -276,10 +173,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testSameNameSameSHAIsAlreadyAndDeletedWithoutUpload() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("same".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.seed(["a.txt": bytes])
@@ -300,11 +197,11 @@ final class NotesMoveTests: XCTestCase {
 
     func testSameNameOtherSHAGoesUpUnderContentName() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let old = Array("old".utf8)
         let new = Array("new".utf8)
         fs.set("int", "/notes/a.txt", new)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.seed(["a.txt": old])
@@ -326,17 +223,17 @@ final class NotesMoveTests: XCTestCase {
 
     func testRetryAfterCrashBetweenCommitAndDelete() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("retry".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
 
         // The commit lands, then the link drops on the first delete: the note
         // stays on the pager.
-        fs.dropLinkAtDelete = 0
+        fs.dropLinkAtDelete(0)
         let first = await service.move([NotesMoveTests.note("int", "a.txt")])
         XCTAssertEqual(first.uploaded, 1)
         XCTAssertEqual(first.deleted, 0)
@@ -346,7 +243,7 @@ final class NotesMoveTests: XCTestCase {
 
         // The retry finds the note already in the repo and deletes it without
         // a second commit.
-        fs.dropLinkAtDelete = nil
+        fs.dropLinkAtDelete(nil)
         let second = await service.move([NotesMoveTests.note("int", "a.txt")])
         XCTAssertEqual(second.already, 1)
         XCTAssertEqual(second.uploaded, 0)
@@ -360,12 +257,12 @@ final class NotesMoveTests: XCTestCase {
 
     func testCommitFailsNothingDeleted() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let aBytes = Array("alpha".utf8)
         let bBytes = Array("bravo".utf8)
         fs.set("int", "/notes/a.txt", aBytes)
         fs.set("int", "/notes/b.txt", bBytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.seed(["b.txt": bBytes])
@@ -384,7 +281,7 @@ final class NotesMoveTests: XCTestCase {
             XCTAssertTrue(issue.reason.hasPrefix(NotesSyncService.keepCommitFailed),
                           "reason = \(issue.reason)")
         }
-        XCTAssertTrue(fs.deleteLog.isEmpty)
+        XCTAssertTrue(fs.requests("fs.delete").isEmpty)
 
         await phone.stop()
         await pager.stop()
@@ -392,10 +289,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testVerifyShowsDifferentSHAKept() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("tampered".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.tamper = ["a.txt": "0000000000000000000000000000000000000000"]
@@ -414,10 +311,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testVerifyRequestFailsAllKept() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         fs.set("int", "/notes/a.txt", Array("alpha".utf8))
         fs.set("int", "/notes/b.txt", Array("bravo".utf8))
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.failCommitTreeReads = true
@@ -433,7 +330,7 @@ final class NotesMoveTests: XCTestCase {
                           "reason = \(issue.reason)")
         }
         XCTAssertEqual(result.deleted, 0)
-        XCTAssertTrue(fs.deleteLog.isEmpty)
+        XCTAssertTrue(fs.requests("fs.delete").isEmpty)
 
         await phone.stop()
         await pager.stop()
@@ -441,11 +338,11 @@ final class NotesMoveTests: XCTestCase {
 
     func testPagerAnswersChangedKept() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("editme".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        fs.editBeforeDelete = ["/notes/a.txt"]
-        await NotesMoveTests.register(pager, fs: fs)
+        fs.editBeforeDelete("int", "/notes/a.txt")
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -463,10 +360,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testNoConditionalDeleteCapUploadsButDeletesNothing() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("alpha".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo, caps: [])
@@ -477,7 +374,7 @@ final class NotesMoveTests: XCTestCase {
         XCTAssertEqual(result.kept.count, 1)
         XCTAssertEqual(result.kept.first?.reason, NotesSyncService.keepNoConditionalDelete)
         XCTAssertFalse(result.canDelete)
-        XCTAssertTrue(fs.deleteLog.isEmpty)
+        XCTAssertTrue(fs.requests("fs.delete").isEmpty)
         XCTAssertEqual(repo.notes()["a.txt"] ?? [], bytes)
         XCTAssertTrue(fs.exists("int", "/notes/a.txt"))
 
@@ -487,12 +384,12 @@ final class NotesMoveTests: XCTestCase {
 
     func testLinkDropsMidDeleteRestKept() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         fs.set("int", "/notes/a.txt", Array("a".utf8))
         fs.set("int", "/notes/b.txt", Array("b".utf8))
         fs.set("int", "/notes/c.txt", Array("c".utf8))
-        fs.dropLinkAtDelete = 1
-        await NotesMoveTests.register(pager, fs: fs)
+        fs.dropLinkAtDelete(1)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -508,7 +405,7 @@ final class NotesMoveTests: XCTestCase {
             XCTAssertEqual(issue.reason, NotesSyncService.keepLinkDropped,
                            "reason = \(issue.reason)")
         }
-        XCTAssertEqual(fs.deleteLog.count, 2, "the engine stops after the first drop")
+        XCTAssertEqual(fs.requests("fs.delete").count, 2, "the engine stops after the first drop")
         XCTAssertFalse(fs.exists("int", "/notes/a.txt"))
         XCTAssertTrue(fs.exists("int", "/notes/b.txt"))
         XCTAssertTrue(fs.exists("int", "/notes/c.txt"))
@@ -519,10 +416,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testTruncatedListingPullsNothing() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         fs.set("int", "/notes/a.txt", Array("alpha".utf8))
         fs.set("int", "/notes/b.txt", Array("bravo".utf8))
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.seed(["remote.txt": Array("remote".utf8)])
@@ -535,10 +432,10 @@ final class NotesMoveTests: XCTestCase {
 
         XCTAssertEqual(result.errors.count, 2, "every input reports the failed listing")
         XCTAssertEqual(result.uploaded, 0)
-        XCTAssertTrue(fs.readLog.isEmpty, "a failed listing aborts before any pull")
+        XCTAssertTrue(fs.requests("fs.read").isEmpty, "a failed listing aborts before any pull")
         XCTAssertEqual(repo.commitPosts, 0)
         XCTAssertEqual(result.deleted, 0)
-        XCTAssertTrue(fs.deleteLog.isEmpty)
+        XCTAssertTrue(fs.requests("fs.delete").isEmpty)
         XCTAssertTrue(fs.exists("int", "/notes/a.txt"))
         XCTAssertTrue(fs.exists("int", "/notes/b.txt"))
 
@@ -548,12 +445,12 @@ final class NotesMoveTests: XCTestCase {
 
     func testSDAndInternalSameNameBothMoved() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let one = Array("one".utf8)
         let two = Array("two".utf8)
         fs.set("int", "/notes/a.txt", one)
         fs.set("sd", "/notes/a.txt", two)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -575,11 +472,11 @@ final class NotesMoveTests: XCTestCase {
 
     func testIdenticalSDAndInternalCopiesUploadedOnce() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("identical".utf8)
         fs.set("int", "/notes/a.txt", bytes)
         fs.set("sd", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -600,10 +497,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testSecondRunFindsNothingToDo() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("alpha".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -625,17 +522,17 @@ final class NotesMoveTests: XCTestCase {
 
     func testUnsafeNameIsErrorAndKeptOnPager() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
-        await NotesMoveTests.register(pager, fs: fs)
+        let fs = CompanionFakeFs()
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
         let result = await service.move([NotesMoveTests.note("int", ".hidden.txt")])
 
         XCTAssertEqual(result.errors.count, 1)
-        XCTAssertTrue(fs.readLog.isEmpty, "an unsafe name is rejected before any pull")
+        XCTAssertTrue(fs.requests("fs.read").isEmpty, "an unsafe name is rejected before any pull")
         XCTAssertEqual(result.deleted, 0)
-        XCTAssertTrue(fs.deleteLog.isEmpty)
+        XCTAssertTrue(fs.requests("fs.delete").isEmpty)
         XCTAssertEqual(repo.commitPosts, 0)
 
         await phone.stop()
@@ -644,10 +541,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testEncryptedNoteMovesAsCiphertext() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let cipher = Array("Salted__".utf8) + (0..<40).map { UInt8(($0 * 17 + 3) & 0xFF) }
         fs.set("int", "/notes/a.txt", cipher)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -665,12 +562,12 @@ final class NotesMoveTests: XCTestCase {
 
     func testPagerTriggerMovesAndReportsDeletedKept() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let aBytes = Array("alpha".utf8)
         let bBytes = Array("bravo".utf8)
         fs.set("int", "/notes/a.txt", aBytes)
         fs.set("int", "/notes/b.txt", bBytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -706,10 +603,10 @@ final class NotesMoveTests: XCTestCase {
 
     func testPagerTriggerManifestMismatchIsErrorNotDeleted() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("alpha".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let service = NotesMoveTests.makeService(phone, repo)
@@ -736,12 +633,12 @@ final class NotesMoveTests: XCTestCase {
 
     func testTwoTriggersRunOneAfterTheOther() async throws {
         let (phone, pager) = await NotesMoveTests.makeSessions()
-        let fs = MovePagerFs()
+        let fs = CompanionFakeFs()
         let aBytes = Array("alpha".utf8)
         let bBytes = Array("bravo".utf8)
         fs.set("int", "/notes/a.txt", aBytes)
         fs.set("int", "/notes/b.txt", bBytes)
-        await NotesMoveTests.register(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         let log = MoveRequestLog()

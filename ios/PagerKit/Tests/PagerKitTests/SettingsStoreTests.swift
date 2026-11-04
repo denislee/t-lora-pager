@@ -204,7 +204,6 @@ final class SettingsStoreTests: XCTestCase {
     @MainActor
     func testPagerChangedKeepsDraftForEditedID() async throws {
         let (store, backend) = await makeStore()
-        store.beginEdit("display.brightness")
         store.draft("display.brightness", .int(3))
 
         backend.pagerWrote("display.brightness", .int(12), rev: 101)

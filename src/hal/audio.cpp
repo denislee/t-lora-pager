@@ -82,11 +82,7 @@ static void playWAV_sd(const char *filename)
         core::ScopedI2cLock i2c;  // P7.45
         instance.powerControl(POWER_SPEAK, true);
     }
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5,0,0)
     instance.player.configureTX(HW_REC_SAMPLE_RATE, 16, (i2s_channel_t)1);
-#else
-    instance.player.configureTX(HW_REC_SAMPLE_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
-#endif
 #endif
 
     auto close_output = [] {

@@ -4,17 +4,28 @@ import Foundation
 
 /// An in-memory pager filesystem behind every `fs.*` method (PROTOCOL.md
 /// §6.1) with the firmware's error strings (`src/hal/link/handlers_fs.cpp`),
-/// for the Files screen, voice memo and journal tests. Directories are
-/// explicit (`mkdir`), and a write needs its parent to exist, as on the pager.
+/// shared by every test that talks to a pager filesystem. Directories are
+/// explicit (`mkdirs`, or the parents of a `set`), and a write needs its parent
+/// to exist, as on the pager. Faults are per test: `before(_:_:)` fails or races
+/// any method, `failNextCommits` drops commits, `holdReads` widens `fs.read`.
 final class CompanionFakeFs: @unchecked Sendable {
     private let lock = NSLock()
     private var files: [String: [UInt8]] = [:]
     private var dirs: Set<String> = []
     private var uploads: [UInt16: (key: String, size: UInt32, crc: UInt32, overwrite: Bool, task: Task<[UInt8], Error>)] = [:]
     private var mountedSD = true
-    private var log: [String] = []
+    private var mtimes: [String: Int64] = [:]
+    private var log: [(method: String, params: JSONValue)] = []
+    private var writeLog: [String] = []
+    private var hooks: [String: @Sendable (JSONValue) throws -> Void] = [:]
+    private var activeReads = 0
+    private var peakReads = 0
+    private var readHold: Duration?
     /// The next `fs.write.commit` fails with `disconnected` this many times.
     private var dropCommits = 0
+
+    /// What a listing or `fs.stat` reports unless `set` says otherwise.
+    static let defaultMtime: Int64 = 1_700_000_000
 
     init() {
         dirs = ["int:/", "sd:/"]
@@ -28,13 +39,46 @@ final class CompanionFakeFs: @unchecked Sendable {
     }
 
     /// Every handled method, oldest first.
-    var methods: [String] { lock.withLock { log } }
+    var methods: [String] { lock.withLock { log.map(\.method) } }
+
+    /// The params of every `method` call, oldest first.
+    func requests(_ method: String) -> [JSONValue] {
+        lock.withLock { log.filter { $0.method == method }.map(\.params) }
+    }
+
+    /// How many times `(vol, path)` was asked for with `fs.read`.
+    func reads(_ vol: String, _ path: String) -> Int {
+        requests("fs.read").filter {
+            $0["vol"]?.stringValue == vol && $0["path"]?.stringValue == path
+        }.count
+    }
+
+    /// "<vol>:<path>" of every committed write, in order.
+    var writes: [String] { lock.withLock { writeLog } }
+
+    /// Run `hook` on every `method` call, once it is logged and before it does
+    /// anything: throw to fail the call, or change the filesystem to race it.
+    /// nil removes the hook.
+    func before(_ method: String, _ hook: (@Sendable (JSONValue) throws -> Void)?) {
+        lock.withLock { hooks[method] = hook }
+    }
+
+    /// Keep each `fs.read` handler open this long, so overlapping reads would
+    /// show in `peakConcurrentReads`.
+    var holdReads: Duration? {
+        get { lock.withLock { readHold } }
+        set { lock.withLock { readHold = newValue } }
+    }
+
+    /// The most `fs.read` handlers that were running at the same moment.
+    var peakConcurrentReads: Int { lock.withLock { peakReads } }
 
     func failNextCommits(_ count: Int) { lock.withLock { dropCommits = count } }
 
-    func set(_ vol: String, _ path: String, _ bytes: [UInt8]) {
+    func set(_ vol: String, _ path: String, _ bytes: [UInt8], mtime: Int64 = CompanionFakeFs.defaultMtime) {
         lock.withLock {
             files[Self.key(vol, path)] = bytes
+            mtimes[Self.key(vol, path)] = mtime
             var dir = FilePath.parent(path)
             while true {
                 dirs.insert(Self.key(vol, dir))
@@ -63,6 +107,14 @@ final class CompanionFakeFs: @unchecked Sendable {
         lock.withLock { dirs.contains(Self.key(vol, path)) }
     }
 
+    func exists(_ vol: String, _ path: String) -> Bool {
+        bytes(vol, path) != nil || isDir(vol, path)
+    }
+
+    private func mtime(_ key: String) -> Int64 {
+        lock.withLock { mtimes[key] ?? Self.defaultMtime }
+    }
+
     private func check(_ params: JSONValue) throws -> String {
         let vol = params["vol"]?.stringValue ?? ""
         guard vol == "int" || vol == "sd" else { throw RPCError(code: "invalid_argument", msg: "bad vol") }
@@ -70,58 +122,78 @@ final class CompanionFakeFs: @unchecked Sendable {
         return vol
     }
 
-    private func note(_ method: String) { lock.withLock { log.append(method) } }
+    private func note(_ method: String, _ params: JSONValue) throws {
+        let hook = lock.withLock {
+            log.append((method, params))
+            return hooks[method]
+        }
+        try hook?(params)
+    }
 
     // swiftlint:disable:next function_body_length
     func register(_ pager: LinkSession) async {
         await pager.handle("fs.list") { params in
-            self.note("fs.list")
+            try self.note("fs.list", params)
             let vol = try self.check(params)
             let path = FilePath.normalize(params["path"]?.stringValue ?? "/")
             return try self.lock.withLock {
                 guard self.dirs.contains(Self.key(vol, path)) else {
                     throw RPCError(code: "invalid_argument", msg: "not a directory")
                 }
-                var entries: [(String, Bool, Int)] = []
+                var entries: [(String, Bool, Int, Int64)] = []
                 let prefix = "\(vol):"
                 for dir in self.dirs where dir.hasPrefix(prefix) {
                     let p = String(dir.dropFirst(prefix.count))
-                    if p != "/" && FilePath.parent(p) == path { entries.append((FilePath.name(p), true, 0)) }
+                    if p != "/" && FilePath.parent(p) == path { entries.append((FilePath.name(p), true, 0, self.mtimes[dir] ?? Self.defaultMtime)) }
                 }
                 for (key, bytes) in self.files where key.hasPrefix(prefix) {
                     let p = String(key.dropFirst(prefix.count))
-                    if FilePath.parent(p) == path { entries.append((FilePath.name(p), false, bytes.count)) }
+                    if FilePath.parent(p) == path { entries.append((FilePath.name(p), false, bytes.count, self.mtimes[key] ?? Self.defaultMtime)) }
                 }
                 entries.sort { $0.1 != $1.1 ? $0.1 : $0.0 < $1.0 }
-                return ["entries": .array(entries.map {
-                    ["name": .string($0.0), "dir": .bool($0.1), "size": .number(Double($0.2)), "mtime": 0]
+                let limit = params["limit"].flatMap { Params.int64($0) }.map { Int($0) } ?? 64
+                let cursor = params["cursor"].flatMap { Params.int64($0) }.map { Int($0) } ?? 0
+                let start = min(max(0, cursor), entries.count)
+                let end = min(start + max(1, min(64, limit)), entries.count)
+                var reply: [String: JSONValue] = ["entries": .array(entries[start..<end].map {
+                    ["name": .string($0.0), "dir": .bool($0.1), "size": .number(Double($0.2)),
+                     "mtime": .number(Double($0.3))]
                 })]
+                if end < entries.count { reply["cursor"] = .number(Double(end)) }
+                return .object(reply)
             }
         }
         await pager.handle("fs.stat") { params in
-            self.note("fs.stat")
+            try self.note("fs.stat", params)
             let vol = try self.check(params)
             let path = params["path"]?.stringValue ?? ""
+            let mtime = JSONValue.number(Double(self.mtime(Self.key(vol, path))))
             if self.isDir(vol, path) {
-                return ["dir": true, "size": 0, "mtime": 0, "protected": false]
+                return ["dir": true, "size": 0, "mtime": mtime, "protected": false]
             }
             guard let bytes = self.bytes(vol, path) else { throw RPCError(code: "invalid_argument", msg: "not found") }
-            return ["dir": false, "size": .number(Double(bytes.count)), "mtime": 1_700_000_000,
+            return ["dir": false, "size": .number(Double(bytes.count)), "mtime": mtime,
                     "protected": .bool(NoteCrypto.isEncrypted(bytes))]
         }
         await pager.handle("fs.read") { params in
-            self.note("fs.read")
+            try self.note("fs.read", params)
             let vol = try self.check(params)
             guard let xfer = Params.uint16(params["xfer"]) else { throw RPCError(code: "invalid_argument", msg: "bad xfer") }
             guard let bytes = self.bytes(vol, params["path"]?.stringValue ?? "") else {
                 throw RPCError(code: "invalid_argument", msg: "not found")
             }
+            self.lock.withLock {
+                self.activeReads += 1
+                self.peakReads = max(self.peakReads, self.activeReads)
+            }
+            defer { self.lock.withLock { self.activeReads -= 1 } }
+            if let hold = self.holdReads { try? await Task.sleep(for: hold) }
             Task { try? await pager.sendBytes(xfer: xfer, data: bytes, timeout: .seconds(5)) }
             return ["xfer": .number(Double(xfer)), "size": .number(Double(bytes.count)),
                     "crc32": .number(Double(CRC32.checksum(bytes))), "protected": .bool(NoteCrypto.isEncrypted(bytes))]
         }
         await pager.handle("fs.write.begin") { params in
-            self.note("fs.write.begin")
+            try self.note("fs.write.begin", params)
             let vol = try self.check(params)
             let path = FilePath.normalize(params["path"]?.stringValue ?? "")
             guard let size = Params.uint32(params["size"]), let crc = Params.uint32(params["crc32"]) else {
@@ -138,7 +210,7 @@ final class CompanionFakeFs: @unchecked Sendable {
             return ["xfer": .number(Double(id)), "offset": 0]
         }
         await pager.handle("fs.write.commit") { params in
-            self.note("fs.write.commit")
+            try self.note("fs.write.commit", params)
             guard let id = Params.uint16(params["xfer"]),
                   let upload = self.lock.withLock({ self.uploads.removeValue(forKey: id) }) else {
                 throw RPCError(code: "invalid_argument", msg: "no such transfer")
@@ -149,19 +221,23 @@ final class CompanionFakeFs: @unchecked Sendable {
                     self.dropCommits -= 1
                     throw RPCError.disconnected()
                 }
+                if self.files[upload.key] != nil && !upload.overwrite {
+                    throw RPCError(code: "invalid_argument", msg: "exists")
+                }
                 self.files[upload.key] = data
+                self.writeLog.append(upload.key)
             }
             return .object([:])
         }
         await pager.handle("fs.write.abort") { params in
-            self.note("fs.write.abort")
+            try self.note("fs.write.abort", params)
             if let id = Params.uint16(params["xfer"]) {
                 self.lock.withLock { self.uploads.removeValue(forKey: id) }?.task.cancel()
             }
             return .object([:])
         }
         await pager.handle("fs.delete") { params in
-            self.note("fs.delete")
+            try self.note("fs.delete", params)
             let vol = try self.check(params)
             let path = FilePath.normalize(params["path"]?.stringValue ?? "")
             let key = Self.key(vol, path)
@@ -186,7 +262,7 @@ final class CompanionFakeFs: @unchecked Sendable {
             }
         }
         await pager.handle("fs.mkdir") { params in
-            self.note("fs.mkdir")
+            try self.note("fs.mkdir", params)
             let vol = try self.check(params)
             let path = FilePath.normalize(params["path"]?.stringValue ?? "")
             return try self.lock.withLock {
@@ -202,7 +278,7 @@ final class CompanionFakeFs: @unchecked Sendable {
             }
         }
         await pager.handle("fs.rename") { params in
-            self.note("fs.rename")
+            try self.note("fs.rename", params)
             let vol = try self.check(params)
             let from = Self.key(vol, params["from"]?.stringValue ?? "")
             let to = Self.key(vol, params["to"]?.stringValue ?? "")

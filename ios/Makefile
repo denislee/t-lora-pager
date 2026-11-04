@@ -165,7 +165,7 @@ clean-device:
 	rm -rf $(DD)
 
 clean:
-	rm -rf PagerKit/.build NotesE2E/.build FilesE2E/.build DerivedData
+	rm -rf PagerKit/.build NotesE2E/.build FilesE2E/.build SettingsE2E/.build DerivedData
 
 help:
 	@echo "PagerCompanion — iOS companion app"
@@ -184,5 +184,5 @@ help:
 	@echo "  make device-console - launch the installed app with its console"
 	@echo "  make device-log  - stream the app's [pagerlink] log over USB (any iOS)"
 	@echo "  make clean-device - remove the device build ($(DD))"
-	@echo "  make clean       - remove PagerKit/.build and DerivedData"
+	@echo "  make clean       - remove every package's .build (PagerKit, NotesE2E, FilesE2E, SettingsE2E) and DerivedData"
 	@echo "  make help        - show this help"

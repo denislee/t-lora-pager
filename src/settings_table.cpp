@@ -27,6 +27,8 @@
 
 #include "apps/app_registry.h"
 #include "apps/menu_app.h"
+#include "apps/tg_favs.h"
+#include "core/spawn_detached.h"
 #include "core/system.h"
 #include "core/ui_post.h"
 #include "hal/audio.h"
@@ -55,14 +57,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #else
-#include <pthread.h>
 #include <random>
 #include <unistd.h>
 #endif
-
-/* Defined in apps/ui_weather.cpp (declared privately in settings_internal.h). */
-std::string weather_get_user_city();
-void weather_set_user_location(const char *city, double lat, double lon);
 
 namespace settings {
 
@@ -87,37 +84,6 @@ void apply_theme() {
 }
 
 /* ------------------------------------------------------------ workers */
-
-/** Run `fn` on its own worker (FreeRTOS task / detached pthread). */
-void spawn(const char *name, std::function<void()> fn) {
-    std::function<void()> *heap = new std::function<void()>(fn);
-#ifdef ARDUINO
-    if (xTaskCreatePinnedToCore(
-            [](void *arg) {
-                std::unique_ptr<std::function<void()>> f(static_cast<std::function<void()> *>(arg));
-                (*f)();
-                vTaskDelete(nullptr);
-            },
-            name, 6144, heap, 1, nullptr, 0) != pdPASS) {
-        delete heap;
-    }
-#else
-    (void)name;
-    pthread_t th;
-    if (pthread_create(
-            &th, nullptr,
-            [](void *arg) -> void * {
-                std::unique_ptr<std::function<void()>> f(static_cast<std::function<void()> *>(arg));
-                (*f)();
-                return nullptr;
-            },
-            heap) == 0) {
-        pthread_detach(th);
-    } else {
-        delete heap;
-    }
-#endif
-}
 
 void sleep_ms(uint32_t ms) {
 #ifdef ARDUINO
@@ -156,11 +122,16 @@ void job_done(const std::string &job, bool ok, const std::string &msg,
 bool start_job(const char *name, JsonWriter &out,
                std::function<bool(std::string &msg, std::string &result)> work) {
     const std::string job = new_job_id();
-    spawn(name, [job, work] {
-        std::string msg, result;
-        const bool ok = work(msg, result);
-        job_done(job, ok, msg, result);
-    });
+    const bool started = core::spawn_detached(
+        name, 6144,
+        [job, work] {
+            std::string msg, result;
+            const bool ok = work(msg, result);
+            job_done(job, ok, msg, result);
+        },
+        /*priority=*/1, /*core_id=*/0);
+    /* Goes out ahead of the RES: both clients keep a job event that beats its id. */
+    if (!started) job_done(job, false, "no worker");
     out.begin_object().key("job").str_val(job).end_object();
     return true;
 }
@@ -254,11 +225,6 @@ bool str_bind_nvs(Registry &r, const char *id, const char *ns, const char *key) 
                   });
 }
 
-/** Parse a JSON array of objects into raw element texts. */
-bool array_objects(const std::string &raw, std::vector<std::string> &items) {
-    return pagerlink::json_array_items(raw, items);
-}
-
 std::string ssid_list_json() {
     std::vector<std::string> ssids;
     hw_wifi_get_saved_list(ssids);
@@ -273,54 +239,6 @@ std::string fmt_coord(double v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.5f", v);
     return buf;
-}
-
-/* Telegram favorites, read and written in the Telegram app's NVS format
- * (ui_telegram.cpp load_favorites/save_favorites): ids in `favs`
- * (comma-separated), titles in `fav_titles` as `<id>\x1F<title>\x1E`. */
-void load_favs_nvs(std::vector<std::pair<long long, std::string>> &out) {
-    out.clear();
-    const std::string ids = hal::nvs_get_str("tgbridge", "favs", "");
-    const std::string titles = hal::nvs_get_str("tgbridge", "fav_titles", "");
-    size_t i = 0;
-    while (i < ids.size()) {
-        size_t j = ids.find(',', i);
-        if (j == std::string::npos) j = ids.size();
-        const long long id = std::strtoll(ids.substr(i, j - i).c_str(), nullptr, 10);
-        if (id != 0) out.push_back(std::make_pair(id, std::string()));
-        i = j + 1;
-    }
-    i = 0;
-    while (i < titles.size()) {
-        size_t end = titles.find('\x1E', i);
-        if (end == std::string::npos) end = titles.size();
-        const std::string rec = titles.substr(i, end - i);
-        const size_t sep = rec.find('\x1F');
-        if (sep != std::string::npos) {
-            const long long id = std::strtoll(rec.substr(0, sep).c_str(), nullptr, 10);
-            for (auto &f : out) {
-                if (f.first == id) f.second = rec.substr(sep + 1);
-            }
-        }
-        i = end + 1;
-    }
-}
-
-void save_favs_nvs(const std::vector<std::pair<long long, std::string>> &favs) {
-    std::string ids, titles;
-    for (const auto &f : favs) {
-        char b[24];
-        std::snprintf(b, sizeof(b), "%lld", f.first);
-        if (!ids.empty()) ids.push_back(',');
-        ids += b;
-        if (f.second.empty()) continue;
-        titles += b;
-        titles.push_back('\x1F');
-        titles += f.second;
-        titles.push_back('\x1E');
-    }
-    hal::nvs_set_str("tgbridge", "favs", ids.c_str());
-    hal::nvs_set_str("tgbridge", "fav_titles", titles.c_str());
 }
 
 /* ------------------------------------------------------------ profile */
@@ -783,11 +701,9 @@ void bind_telegram(Registry &r) {
            });
     r.bind("tg.favorites",
            [] {
-               std::vector<std::pair<long long, std::string>> favs;
-               load_favs_nvs(favs);
                JsonWriter w;
                w.begin_array();
-               for (const auto &f : favs) {
+               for (const auto &f : apps::tg_favs_load()) {
                    w.begin_object().key("id").int_val(f.first).key("title").str_val(f.second).end_object();
                }
                w.end_array();
@@ -795,8 +711,8 @@ void bind_telegram(Registry &r) {
            },
            [](const Value &v, Error &) {
                std::vector<std::string> items;
-               array_objects(v.s, items);
-               std::vector<std::pair<long long, std::string>> favs;
+               pagerlink::json_array_items(v.s, items);
+               apps::TgFavs favs;
                for (const std::string &it : items) {
                    JsonObject o;
                    int64_t id = 0;
@@ -804,16 +720,16 @@ void bind_telegram(Registry &r) {
                    o.parse(it);
                    o.get_int("id", id);
                    o.get_string("title", title);
-                   favs.push_back(std::make_pair(static_cast<long long>(id), title));
+                   favs.emplace_back(static_cast<long long>(id), title);
                }
-               save_favs_nvs(favs);
+               apps::tg_favs_save(favs);
                /* The Telegram app's in-memory set is LVGL-thread only. */
                apply_later([favs] { apps::tg_cfg_set_favorites(favs); });
                return true;
            },
            [](const Value &v, Error &err) {
                std::vector<std::string> items;
-               if (!array_objects(v.s, items) || items.size() > 32) {
+               if (!pagerlink::json_array_items(v.s, items) || items.size() > 32) {
                    err.set("invalid_argument", "up to 32 favorites");
                    return false;
                }
@@ -958,13 +874,6 @@ bool set(const char *id, const Value &v, std::string *msg, bool apply) {
     if (ok) return true;
     if (msg) *msg = err.msg;
     return false;
-}
-
-Value get(const char *id) {
-    Value v;
-    Error err;
-    registry().get(id, v, err);
-    return v;
 }
 
 void set_apply_sink(std::vector<std::function<void()>> *sink) {

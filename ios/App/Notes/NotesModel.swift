@@ -43,7 +43,6 @@ final class NotesModel: ObservableObject {
     @Published private(set) var pagerHasFS = false
     /// When the listing shown was taken (from the cache while offline).
     @Published private(set) var listedAt: Date?
-    @Published private(set) var refreshing = false
     @Published private(set) var errorText: String?
     /// A passphrase is held in memory.
     @Published private(set) var unlocked = false
@@ -149,8 +148,6 @@ final class NotesModel: ObservableObject {
     /// Pull to refresh: `fs.list` both volumes (offline: the cached list).
     func refresh() async {
         guard connected, pagerHasFS else { return }
-        refreshing = true
-        defer { refreshing = false }
         do {
             let scan = try await library.refresh()
             errorText = nil
@@ -314,7 +311,7 @@ final class NotesModel: ObservableObject {
         let bytes = try await newNoteBytes(text)
         var taken = Set(allNotes.map(\.name))
         for _ in 0..<2 {
-            let name = Self.freeName(preferredName, taken: taken)
+            let name = Journal.uniqueNoteName(preferredName, taken: { taken.contains($0) })
             do {
                 let written = try await library.create(name: name, bytes: bytes, mirrorSD: sdMounted)
                 log("notes: created 1 note (\(written.count) copies)")
@@ -358,15 +355,6 @@ final class NotesModel: ObservableObject {
         }
         if rows.contains(where: { $0.locked || $0.entry.protected == true }) { throw NewNoteError.locked }
         return Array(text.utf8)
-    }
-
-    /// `name`, or `<stem>_2.txt`, `<stem>_3.txt`, … — the first not in `taken`.
-    nonisolated static func freeName(_ name: String, taken: Set<String>) -> String {
-        guard taken.contains(name) else { return name }
-        let stem = name.hasSuffix(".txt") ? String(name.dropLast(4)) : name
-        var n = 2
-        while taken.contains("\(stem)_\(n).txt") { n += 1 }
-        return "\(stem)_\(n).txt"
     }
 
     // MARK: - Sync (move to GitHub)

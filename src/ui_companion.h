@@ -62,5 +62,5 @@ void ui_companion_send_clip(const std::string &text);
 /** phone.find on a worker; the outcome is a banner. */
 void ui_companion_find_phone();
 
-/** True while a phone→pager-initiated call is running (buttons show busy). */
+/** True while a pager→phone call is running (buttons show busy). */
 bool ui_companion_call_busy();

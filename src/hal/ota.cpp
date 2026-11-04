@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sys/stat.h>
+#include "link/fs_volume.h"
 #endif
 
 namespace {
@@ -54,11 +55,6 @@ void confirm_task(void *) {
 }
 
 #else
-
-std::string emu_root() {
-    const char *r = getenv("PAGERLINK_FS_ROOT");
-    return (r && *r) ? r : "/tmp/pagerlink-fs";
-}
 
 FILE *s_file = nullptr;
 std::string s_part_path;
@@ -133,8 +129,8 @@ bool hw_ota_slot_begin(uint32_t size, std::string &err) {
 #else
     (void)size;
     hw_ota_slot_abort();
-    const std::string dir = emu_root() + "/ota";
-    mkdir(emu_root().c_str(), 0755);
+    const std::string dir = pagerlink::emu_fs_root() + "/ota";
+    mkdir(pagerlink::emu_fs_root().c_str(), 0755);
     mkdir(dir.c_str(), 0755);
     s_part_path = dir + "/installed.bin.part";
     s_file = fopen(s_part_path.c_str(), "wb");
@@ -199,7 +195,7 @@ bool hw_ota_slot_finish(std::string &err) {
     }
     const bool ok = fclose(s_file) == 0;
     s_file = nullptr;
-    const std::string final_path = emu_root() + "/ota/installed.bin";
+    const std::string final_path = pagerlink::emu_fs_root() + "/ota/installed.bin";
     if (!ok || rename(s_part_path.c_str(), final_path.c_str()) != 0) {
         err = "cannot write " + final_path;
         return false;

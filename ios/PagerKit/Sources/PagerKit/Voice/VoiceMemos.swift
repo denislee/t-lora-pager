@@ -56,11 +56,11 @@ public enum VoiceMemos {
     /// recording time, so the Journal files it under the day it was spoken
     /// (`fallback`'s time when the name has none).
     public static func noteName(for memo: VoiceMemo, fallback: Date, calendar: Calendar = .current) -> String {
-        guard let t = memo.recordedAt, let y = t.year, let mo = t.month, let d = t.day,
-              let h = t.hour, let mi = t.minute, let s = t.second else {
+        guard let t = memo.recordedAt, t.year != nil, t.month != nil, t.day != nil,
+              t.hour != nil, t.minute != nil, t.second != nil else {
             return Journal.noteName(for: fallback, calendar: calendar)
         }
-        return String(format: "%04d%02d%02d_%02d%02d%02d.txt", y, mo, d, h, mi, s)
+        return Journal.noteName(components: t)
     }
 
     /// The note's text: a header line naming the recording, a blank line,

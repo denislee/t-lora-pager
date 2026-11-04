@@ -9,7 +9,8 @@
 // end to end (fs.go), and then runs the pager-initiated steps — calls, bulk
 // DATA, chat, notes sync, Telegram and weather via the phone — through the
 // emulator-only test hooks (smoke_link.go, smoke_weather.go), plus the settings
-// catalog (settings.go), so a full pass needs the emulator. The
+// catalog (settings.go) and notify/clip/text/find, screen.capture and OTA
+// (smoke_messaging.go), so a full pass needs the emulator. The
 // ls/stat/get/put/rm/mkdir/mv commands are hand tools for the file service.
 package main
 
@@ -55,14 +56,16 @@ func main() {
 	os.Exit(code)
 }
 
+// helloParams is the sys.hello this CLI introduces itself with.
+var helloParams = map[string]any{"proto": 1, "app": "pagerlink-cli", "caps": []string{"sys"}}
+
 // command runs one subcommand on a dialed client and returns the exit code.
 type command func(c *pagerlink.Client, addr string, timeout time.Duration, args []string) int
 
 // commands is the single table main validates against and dispatches from.
 var commands = map[string]command{
 	"hello": func(c *pagerlink.Client, _ string, timeout time.Duration, _ []string) int {
-		return callOne(c, timeout, "sys.hello",
-			map[string]any{"proto": 1, "app": "pagerlink-cli", "caps": []string{"sys"}})
+		return callOne(c, timeout, "sys.hello", helloParams)
 	},
 	"info": func(c *pagerlink.Client, _ string, timeout time.Duration, _ []string) int {
 		return callOne(c, timeout, "sys.info", nil)
@@ -100,7 +103,8 @@ Commands:
   ping                           sys.ping and the measured RTT
   time [-tz ZONE]                sys.time.set with the current epoch
   call <method> [json-params]    arbitrary RPC
-  smoke                          end-to-end check: sys, fs and pager->phone (emulator)
+  smoke                          end-to-end check: sys, fs, pager->phone, settings,
+                                 messaging, screen and OTA (emulator)
   serve [-responses f.json] [-notes-out dir]  mock phone for emulator work
   ls <vol> <path>                list a directory (fs.list, paged)
   stat <vol> <path>              show file metadata (fs.stat)
@@ -125,13 +129,9 @@ func callOne(c *pagerlink.Client, timeout time.Duration, method string, params a
 }
 
 func cmdPing(c *pagerlink.Client, timeout time.Duration) int {
-	start := time.Now()
-	res, err := c.Call("sys.ping", map[string]int64{"t": start.UnixMilli()}, timeout)
-	if err != nil {
-		return fail("sys.ping", err)
+	if !pingOK(c, timeout) {
+		return 1
 	}
-	printJSON("sys.ping", res)
-	fmt.Printf("rtt: %s\n", time.Since(start).Round(time.Microsecond))
 	return 0
 }
 
@@ -168,9 +168,7 @@ func cmdSmoke(c *pagerlink.Client, addr string, timeout time.Duration) int {
 	pass := true
 
 	// Positive path: the Phase-1 methods the pager must implement.
-	pass = report(callOK(c, timeout, "sys.hello",
-		map[string]any{"proto": 1, "app": "pagerlink-cli", "caps": []string{"sys"}}),
-		"sys.hello") && pass
+	pass = report(callOK(c, timeout, "sys.hello", helloParams), "sys.hello") && pass
 	pass = report(callOK(c, timeout, "sys.info", nil), "sys.info") && pass
 	pass = report(pingOK(c, timeout), "sys.ping") && pass
 	pass = report(callOK(c, timeout, "sys.time.set",
@@ -204,7 +202,7 @@ func cmdSmoke(c *pagerlink.Client, addr string, timeout time.Duration) int {
 	pass = fsOK && pass
 	pass = smokeLink(next, timeout) && pass
 	pass = smokeSettings(next, timeout) && pass
-	pass = smokeMessaging(next, timeout) && pass
+	pass = smokeMessaging(next, addr, timeout) && pass
 	if next != c {
 		next.Close()
 	}
@@ -227,6 +225,20 @@ func callOK(c *pagerlink.Client, timeout time.Duration, method string, params an
 	return true
 }
 
+// callInto performs one request and decodes its result into a T. An ERR comes
+// back unchanged, so asRPC still sees it.
+func callInto[T any](c *pagerlink.Client, timeout time.Duration, method string, params any) (T, error) {
+	var v T
+	res, err := c.Call(method, params, timeout)
+	if err != nil {
+		return v, err
+	}
+	if err := json.Unmarshal(res, &v); err != nil {
+		return v, fmt.Errorf("result %q: %w", res, err)
+	}
+	return v, nil
+}
+
 // pingOK sends sys.ping and reports the RTT.
 func pingOK(c *pagerlink.Client, timeout time.Duration) bool {
 	start := time.Now()
@@ -239,11 +251,20 @@ func pingOK(c *pagerlink.Client, timeout time.Duration) bool {
 	return true
 }
 
+// asRPC returns the *RPCError err wraps, or nil for a non-RPC (or nil) error.
+func asRPC(err error) *pagerlink.RPCError {
+	var re *pagerlink.RPCError
+	if errors.As(err, &re) {
+		return re
+	}
+	return nil
+}
+
 // rpcErrCode asserts the call fails with the given ERR code.
 func rpcErrCode(c *pagerlink.Client, timeout time.Duration, method string, params any, code string) bool {
 	_, err := c.Call(method, params, timeout)
-	var re *pagerlink.RPCError
-	if !errors.As(err, &re) {
+	re := asRPC(err)
+	if re == nil {
 		fmt.Printf("       %s: got %v, want ERR %s\n", method, err, code)
 		return false
 	}

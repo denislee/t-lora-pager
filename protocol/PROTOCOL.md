@@ -402,10 +402,12 @@ method families each side implements (`"sys"`, `"fs"`, `"weather"`, …).
 
 ## 7. Golden vectors
 
-`vectors/*.json` — consumed by `test/test_link_frame` (via
-`support/gen_link_vectors.py`, which turns them into a C header at test-build
-time), by `ios/PagerKit/Tests/PagerKitTests` and by
-`tools/pagerlink/internal/pagerlink/frame_test.go`. Byte strings are lowercase
+`vectors/*.json` — consumed by the native tests `test/test_link_frame`,
+`test_settings_registry`, `test_companion_msg` and `test_rle565` (via
+`support/gen_link_vectors.py`, which turns them into C headers at test-build
+time), by `ios/PagerKit/Tests/PagerKitTests` and by `frame_test.go`,
+`settings_test.go` and `messaging_test.go` in
+`tools/pagerlink/internal/pagerlink`. Byte strings are lowercase
 hex with no separators. Files:
 
 - `message.json` — header encode/decode, valid and malformed.
@@ -418,7 +420,12 @@ hex with no separators. Files:
 - `messaging.json` — §6.5: for each case the method, the params and either
   the normalized fields the pager stores or the exact error; also inbox-ring
   add/dedupe/cap sequences and their `/inbox.jsonl` text.
-  `test/test_companion_msg` checks the pager; PagerKit and Go validate the
-  same params client-side and must reach the same verdict.
+  `test/test_companion_msg` checks the pager. PagerKit validates the same
+  params client-side, `messaging_test.go` holds a test-only statement of the
+  rules in Go, and both must reach the same verdict.
 - `screen.json` — §6.6: small RGB565 images and their `rgb565-rle` bytes, plus
   malformed streams the decoder must refuse.
+- `notes_crypto.json` — the OpenSSL `enc` format `src/hal/notes_crypto.cpp`
+  uses: valid and malformed blobs and a wrong-passphrase case, checked by
+  PagerKit's `NoteCryptoTests`.
+- `git_blob.json` — git blob SHA-1s, checked by the same PagerKit tests.

@@ -139,13 +139,36 @@ final class GitHubAccountStoreTests: XCTestCase {
     func testConfigReadsLatestValues() throws {
         let store = makeStore()
         try store.save(repo: "octocat/notes", branch: "main", token: "ghp_secret")
-        let backend = GitHubNotesBackend(config: { store.config() })
-        XCTAssertEqual(backend.cacheKey, "octocat/notes@main")
 
-        // The backend re-reads on every call: a second save is visible at once.
+        // A second save is visible at once.
         try store.save(repo: "octocat/notes", branch: "dev", token: nil)
         XCTAssertEqual(store.config(),
                        GitHubNotesConfig(repo: "octocat/notes", branch: "dev", token: "ghp_secret"))
-        XCTAssertEqual(backend.cacheKey, "octocat/notes@dev")
+    }
+}
+
+/// An in-memory `SecretStore` for these tests.
+final class MemorySecretStore: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    init() {}
+
+    func read(_ key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key]
+    }
+
+    func write(_ key: String, _ value: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        values[key] = value
+    }
+
+    func delete(_ key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        values.removeValue(forKey: key)
     }
 }

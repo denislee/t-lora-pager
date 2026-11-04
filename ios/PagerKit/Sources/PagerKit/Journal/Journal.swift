@@ -63,18 +63,21 @@ public enum Journal {
     /// The leaf name the pager's editor would give a note saved at `date`
     /// in `calendar`'s zone: `YYYYMMDD_HHMMSS.txt`.
     public static func noteName(for date: Date, calendar: Calendar = .current) -> String {
-        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
-        return String(format: "%04d%02d%02d_%02d%02d%02d.txt",
-                      c.year ?? 0, c.month ?? 0, c.day ?? 0, c.hour ?? 0, c.minute ?? 0, c.second ?? 0)
+        noteName(components: calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date))
     }
 
-    /// `noteName`, with `_2`, `_3`, … before `.txt` until `taken` says no
-    /// (the title still parses: only the first 15 characters count).
-    public static func uniqueNoteName(for date: Date, calendar: Calendar = .current,
-                                      taken: (String) -> Bool) -> String {
-        let base = noteName(for: date, calendar: calendar)
-        guard taken(base) else { return base }
-        let stem = String(base.dropLast(4))
+    /// The same leaf name from clock fields (a missing field is 0).
+    public static func noteName(components c: DateComponents) -> String {
+        String(format: "%04d%02d%02d_%02d%02d%02d.txt",
+               c.year ?? 0, c.month ?? 0, c.day ?? 0, c.hour ?? 0, c.minute ?? 0, c.second ?? 0)
+    }
+
+    /// `name`, or `<stem>_2.txt`, `<stem>_3.txt`, … — the first `taken` says
+    /// no to (a timestamp title still parses: only the first 15 characters
+    /// count). A name without `.txt` is its own stem.
+    public static func uniqueNoteName(_ name: String, taken: (String) -> Bool) -> String {
+        guard taken(name) else { return name }
+        let stem = name.hasSuffix(".txt") ? String(name.dropLast(4)) : name
         var n = 2
         while taken("\(stem)_\(n).txt") { n += 1 }
         return "\(stem)_\(n).txt"

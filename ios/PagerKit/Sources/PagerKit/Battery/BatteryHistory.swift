@@ -83,9 +83,7 @@ public final class BatteryHistoryStore: @unchecked Sendable {
 
     /// `Application Support/battery-history.json` in the app container.
     public static func defaultURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("battery-history.json")
+        applicationSupportURL("battery-history.json")
     }
 
     public init(url: URL = BatteryHistoryStore.defaultURL(),

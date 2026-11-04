@@ -1,12 +1,4 @@
 {
- "action_job": {
-  "params": {
-   "id": "wifi.scan"
-  },
-  "result": {
-   "job": "j1"
-  }
- },
  "cases": [
   {
    "method": "settings.schema",

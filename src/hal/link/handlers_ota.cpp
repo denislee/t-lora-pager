@@ -22,6 +22,7 @@
 #include "../pbkdf2_sha256.h"
 #include "../result.h"
 
+#include "core/spawn_detached.h"
 #include "hal/link/fs_volume.h"
 #include "hal/link/link_json.h"
 #include "hal/link/link_log.h"
@@ -31,9 +32,6 @@
 #ifdef ARDUINO
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#else
-#include <chrono>
-#include <thread>
 #endif
 
 namespace pagerlink {
@@ -133,19 +131,6 @@ void run(std::unique_ptr<Job> j) {
     s_running.store(false);
 }
 
-#ifdef ARDUINO
-void task_entry(void *arg) {
-    run(std::unique_ptr<Job>(static_cast<Job *>(arg)));
-    vTaskDelete(nullptr);
-}
-#endif
-
-bool bad(RpcError &err, const char *msg) {
-    err.code = hal_error_code(HalError::InvalidArgument);
-    err.msg = msg;
-    return false;
-}
-
 bool handle_ota_status(const JsonObject &, JsonWriter &result, RpcError &) {
     const HwOtaStatus st = hw_ota_status();
     result.begin_object()
@@ -160,37 +145,33 @@ bool handle_ota_status(const JsonObject &, JsonWriter &result, RpcError &) {
 
 /** Start the job's worker; on failure the phone learns it from evt.ota. */
 void spawn(Job *raw) {
-#ifdef ARDUINO
-    if (xTaskCreate(task_entry, "ota_apply", 8192, raw, 2, nullptr) != pdPASS) {
+    if (!core::spawn_detached("ota_apply", 8192, [raw] { run(std::unique_ptr<Job>(raw)); }, /*priority=*/2)) {
         emit(*raw, "error", 0, "no task for the update");
         delete raw;
         s_running.store(false);
     }
-#else
-    std::thread([](Job *j) { run(std::unique_ptr<Job>(j)); }, raw).detach();
-#endif
 }
 
 bool handle_ota_apply(Rpc &rpc, const JsonObject &params, JsonWriter &result, RpcError &err) {
     std::unique_ptr<Job> j(new Job());
     std::string vol, path, sha;
     int64_t size = -1;
-    if (!params.get_string("vol", vol) || !vol_from_string(vol, j->vol)) return bad(err, "bad vol");
+    if (!params.get_string("vol", vol) || !vol_from_string(vol, j->vol)) return rpc_invalid(err, "bad vol");
     char norm[256];
     if (!params.get_string("path", path) || !sandbox_path(path.c_str(), norm, sizeof(norm)) ||
         std::strcmp(norm, "/") == 0) {
-        return bad(err, "bad path");
+        return rpc_invalid(err, "bad path");
     }
     j->path = norm;
-    if (!params.get_int("size", size) || size <= 0) return bad(err, "bad size");
+    if (!params.get_int("size", size) || size <= 0) return rpc_invalid(err, "bad size");
     if (!params.get_string("sha256", sha) || !hal::sha256_hex_parse(sha, j->sha)) {
-        return bad(err, "bad sha256");
+        return rpc_invalid(err, "bad sha256");
     }
-    if (!vol_available(j->vol)) return bad(err, "sd not mounted");
+    if (!vol_available(j->vol)) return rpc_invalid(err, "sd not mounted");
     VolEntry st;
-    if (!vol_stat(j->vol, j->path, st) || st.dir) return bad(err, "no such file");
-    if (st.size != static_cast<uint64_t>(size)) return bad(err, "size differs from the file");
-    if (static_cast<uint64_t>(size) > hw_ota_status().max_size) return bad(err, "image larger than the slot");
+    if (!vol_stat(j->vol, j->path, st) || st.dir) return rpc_invalid(err, "no such file");
+    if (st.size != static_cast<uint64_t>(size)) return rpc_invalid(err, "size differs from the file");
+    if (static_cast<uint64_t>(size) > hw_ota_status().max_size) return rpc_invalid(err, "image larger than the slot");
     j->size = static_cast<uint32_t>(size);
 
     bool expected = false;

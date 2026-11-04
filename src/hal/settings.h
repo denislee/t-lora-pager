@@ -33,12 +33,6 @@ Registry &registry();
  * still does.
  */
 bool set(const char *id, const Value &v, std::string *msg = nullptr, bool apply = true);
-inline bool set_bool(const char *id, bool v) { return set(id, Value::of_bool(v)); }
-inline bool set_int(const char *id, int64_t v) { return set(id, Value::of_int(v)); }
-inline bool set_str(const char *id, const std::string &v) { return set(id, Value::of_str(v)); }
-
-/** Read one value (a default-constructed Value for an unknown id). */
-Value get(const char *id);
 
 /**
  * Hardware applies are run on the LVGL thread (core::ui_post), after the

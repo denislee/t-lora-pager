@@ -3,119 +3,6 @@ import XCTest
 
 @testable import PagerKit
 
-// MARK: - Fake pager filesystem with writes
-
-/// An in-memory pager filesystem behind `fs.stat`, `fs.read`, `fs.write.*`
-/// and `fs.delete` (PROTOCOL.md §6.1), for the phone-side editing paths:
-/// `LinkSession.writeFile`, `NotesLibrary.write/delete` and `TasksService`.
-private final class EditFakeFs: @unchecked Sendable {
-    private let lock = NSLock()
-    private var files: [String: [UInt8]] = [:]
-    private var uploads: [UInt16: (key: String, size: UInt32, crc: UInt32, overwrite: Bool, task: Task<[UInt8], Error>)] = [:]
-    private var writeLog: [String] = []
-    private var mountedSD = true
-
-    private static func key(_ vol: String, _ path: String) -> String { "\(vol):\(path)" }
-
-    var sdMounted: Bool {
-        get { lock.withLock { mountedSD } }
-        set { lock.withLock { mountedSD = newValue } }
-    }
-
-    func set(_ vol: String, _ path: String, _ bytes: [UInt8]) {
-        lock.withLock { files[Self.key(vol, path)] = bytes }
-    }
-
-    func bytes(_ vol: String, _ path: String) -> [UInt8]? {
-        lock.withLock { files[Self.key(vol, path)] }
-    }
-
-    /// "<vol>:<path>" of every committed write, in order.
-    var writes: [String] { lock.withLock { writeLog } }
-
-    private func check(_ vol: String) throws {
-        if vol == "sd" && !sdMounted { throw RPCError(code: "invalid_argument", msg: "sd not mounted") }
-    }
-
-    func register(_ pager: LinkSession) async {
-        await pager.handle("fs.stat") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            try self.check(vol)
-            guard let bytes = self.bytes(vol, params["path"]?.stringValue ?? "") else {
-                throw RPCError(code: "invalid_argument", msg: "not found")
-            }
-            return ["dir": .bool(false), "size": .number(Double(bytes.count)), "mtime": .number(0),
-                    "protected": .bool(NoteCrypto.isEncrypted(bytes))]
-        }
-        await pager.handle("fs.read") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            try self.check(vol)
-            guard let xfer = Params.uint16(params["xfer"]) else {
-                throw RPCError(code: "invalid_argument", msg: "bad xfer")
-            }
-            guard let bytes = self.bytes(vol, params["path"]?.stringValue ?? "") else {
-                throw RPCError(code: "invalid_argument", msg: "not found")
-            }
-            Task { try? await pager.sendBytes(xfer: xfer, data: bytes, timeout: .seconds(5)) }
-            return ["xfer": .number(Double(xfer)), "size": .number(Double(bytes.count)),
-                    "crc32": .number(Double(CRC32.checksum(bytes))), "protected": .bool(false)]
-        }
-        await pager.handle("fs.write.begin") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            try self.check(vol)
-            let path = params["path"]?.stringValue ?? ""
-            guard let size = Params.uint32(params["size"]), let crc = Params.uint32(params["crc32"]) else {
-                throw RPCError(code: "invalid_argument", msg: "bad size")
-            }
-            let id = await pager.openIncoming()
-            let task = Task { try await pager.receiveBytes(xfer: id, size: size, crc32: crc, timeout: .seconds(5)) }
-            self.lock.withLock {
-                self.uploads[id] = (Self.key(vol, path), size, crc, params["overwrite"]?.boolValue ?? false, task)
-            }
-            return ["xfer": .number(Double(id)), "offset": .number(0)]
-        }
-        await pager.handle("fs.write.commit") { params in
-            guard let id = Params.uint16(params["xfer"]),
-                  let upload = self.lock.withLock({ self.uploads.removeValue(forKey: id) }) else {
-                throw RPCError(code: "invalid_argument", msg: "no such transfer")
-            }
-            let data = try await upload.task.value
-            try self.lock.withLock {
-                if self.files[upload.key] != nil && !upload.overwrite {
-                    throw RPCError(code: "invalid_argument", msg: "exists")
-                }
-                self.files[upload.key] = data
-                self.writeLog.append(upload.key)
-            }
-            return .object([:])
-        }
-        await pager.handle("fs.write.abort") { params in
-            if let id = Params.uint16(params["xfer"]) {
-                self.lock.withLock { self.uploads.removeValue(forKey: id) }?.task.cancel()
-            }
-            return .object([:])
-        }
-        await pager.handle("fs.delete") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            try self.check(vol)
-            let key = Self.key(vol, params["path"]?.stringValue ?? "")
-            return try self.lock.withLock {
-                guard let bytes = self.files[key] else {
-                    throw RPCError(code: "invalid_argument", msg: "not found")
-                }
-                if let size = params["size"], Params.uint32(size) != UInt32(bytes.count) {
-                    throw RPCError(code: "invalid_argument", msg: "changed")
-                }
-                if let crc = params["crc32"], Params.uint32(crc) != CRC32.checksum(bytes) {
-                    throw RPCError(code: "invalid_argument", msg: "changed")
-                }
-                self.files[key] = nil
-                return .object([:])
-            }
-        }
-    }
-}
-
 final class NotesEditTests: XCTestCase {
     private func makeSessions() async -> (phone: LinkSession, pager: LinkSession) {
         let (a, b) = LoopbackTransport.pair(packetSize: PagerLink.tcpPacket)
@@ -138,7 +25,8 @@ final class NotesEditTests: XCTestCase {
 
     func testWriteFileCreatesAndOverwrites() async throws {
         let (phone, pager) = await makeSessions()
-        let fs = EditFakeFs()
+        let fs = CompanionFakeFs()
+        fs.mkdirs("int", "/notes")
         await fs.register(pager)
 
         // Bigger than one DATA chunk, so credits and ACKs are exercised.
@@ -195,7 +83,7 @@ final class NotesEditTests: XCTestCase {
 
     func testLibraryWriteRewritesEveryCopy() async throws {
         let (phone, pager) = await makeSessions()
-        let fs = EditFakeFs()
+        let fs = CompanionFakeFs()
         let old = Array("old".utf8)
         fs.set("int", "/notes/n.txt", old)
         fs.set("sd", "/notes/n.txt", Array("older sd copy".utf8))
@@ -222,7 +110,7 @@ final class NotesEditTests: XCTestCase {
 
     func testLibraryWriteRefusesWhenChangedOnPager() async throws {
         let (phone, pager) = await makeSessions()
-        let fs = EditFakeFs()
+        let fs = CompanionFakeFs()
         fs.set("int", "/notes/n.txt", Array("changed on the pager".utf8))
         await fs.register(pager)
         let library = await makeLibrary(phone)
@@ -254,7 +142,7 @@ final class NotesEditTests: XCTestCase {
 
     func testLibraryDeleteConditional() async throws {
         let (phone, pager) = await makeSessions()
-        let fs = EditFakeFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("bye".utf8)
         fs.set("int", "/notes/n.txt", bytes)
         fs.set("sd", "/notes/n.txt", bytes)
@@ -295,7 +183,7 @@ final class NotesEditTests: XCTestCase {
 
     func testTasksLoadPrefersSDAndSaveMirrors() async throws {
         let (phone, pager) = await makeSessions()
-        let fs = EditFakeFs()
+        let fs = CompanionFakeFs()
         fs.set("int", "/tasks.txt", Array("[ ] stale\n".utf8))
         fs.set("sd", "/tasks.txt", Array("[ ] milk\n[x] eggs\n".utf8))
         await fs.register(pager)
@@ -303,7 +191,6 @@ final class NotesEditTests: XCTestCase {
 
         var snapshot = try await service.load()
         XCTAssertEqual(snapshot.items.map(\.text), ["milk", "eggs"], "the pager reads the SD copy first")
-        XCTAssertTrue(snapshot.sdMounted)
 
         snapshot.items[0].checked = true
         snapshot = try await service.save(snapshot.items, base: snapshot.base)
@@ -327,7 +214,7 @@ final class NotesEditTests: XCTestCase {
 
     func testTasksWithoutFileOrCard() async throws {
         let (phone, pager) = await makeSessions()
-        let fs = EditFakeFs()
+        let fs = CompanionFakeFs()
         fs.sdMounted = false
         await fs.register(pager)
         let service = TasksService(session: phone, timeout: .seconds(5))
@@ -335,7 +222,6 @@ final class NotesEditTests: XCTestCase {
         let empty = try await service.load()
         XCTAssertEqual(empty.items, [])
         XCTAssertNil(empty.base)
-        XCTAssertFalse(empty.sdMounted)
 
         _ = try await service.save([TaskItem(text: "first")], base: nil)
         XCTAssertEqual(fs.bytes("int", "/tasks.txt"), Array("[ ] first\n".utf8))

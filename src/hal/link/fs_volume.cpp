@@ -424,8 +424,7 @@ namespace {
 /** The backing root, created once: $PAGERLINK_FS_ROOT or /tmp/pagerlink-fs. */
 const std::string &root() {
     static const std::string r = [] {
-        const char *env = std::getenv("PAGERLINK_FS_ROOT");
-        const std::string base = (env && env[0]) ? env : "/tmp/pagerlink-fs";
+        const std::string base = emu_fs_root();
         ::mkdir(base.c_str(), 0755);  // ignore EEXIST / errors
         ::mkdir((base + "/int").c_str(), 0755);
         ::mkdir((base + "/sd").c_str(), 0755);
@@ -466,6 +465,11 @@ bool remove_recursive(const std::string &p) {
 }  // namespace
 
 std::string host_dir(Vol v) { return host(v, "/"); }
+
+std::string emu_fs_root() {
+    const char *env = std::getenv("PAGERLINK_FS_ROOT");
+    return (env && env[0]) ? env : "/tmp/pagerlink-fs";
+}
 
 bool vol_available(Vol v) {
     (void)v;

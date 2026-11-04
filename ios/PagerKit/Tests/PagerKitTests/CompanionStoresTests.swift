@@ -86,18 +86,11 @@ final class CompanionStoresTests: XCTestCase {
         XCTAssertEqual(reopened.search("boom").map(\.kind), [.error])
         XCTAssertEqual(reopened.search("  ").count, 4)
 
-        let conversations = ChatHistoryStore.conversations(reopened.all)
-        XCTAssertEqual(conversations.map(\.count), [1, 2])
-
         let text = ChatHistoryStore.exportText(reopened.all)
         XCTAssertTrue(text.contains("[2025-10-29T01:06:40Z] Pager: Qual é a capital?"), text)
         XCTAssertTrue(text.contains("--- new conversation"))
         XCTAssertTrue(text.contains("Pager (voice): weather"))
         XCTAssertTrue(text.contains("Error: llm: boom"))
-        let json = try ChatHistoryStore.exportJSON(reopened.all)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        XCTAssertEqual(try decoder.decode([ChatRecord].self, from: json), reopened.all)
 
         reopened.append(ChatRecord(at: t0.addingTimeInterval(4), kind: .reset))
         XCTAssertEqual(reopened.all.count, 4, "capacity drops the oldest")

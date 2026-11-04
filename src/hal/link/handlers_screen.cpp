@@ -10,7 +10,6 @@
 #include <cstdio>
 #include <string>
 
-#include "../result.h"
 #include "../../ui_companion.h"
 
 #include "hal/link/link_json.h"

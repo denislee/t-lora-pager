@@ -20,9 +20,9 @@ enum AppTab: Hashable {
     case diagnostics
 }
 
-/// The app's tabs: live device state, the pager's notes, files, journal and
-/// tasks, its settings, weather, voice memos, the chat history, the phone's
-/// Telegram login, and the link log.
+/// The app's tabs, in order: Dashboard, Inbox, Notes, Files and Settings, then
+/// (under More) Journal, Tasks, Weather, Voice memos, Chat, Telegram and
+/// Diagnostics.
 struct RootView: View {
     @EnvironmentObject private var session: PagerSession
     @EnvironmentObject private var notes: NotesModel

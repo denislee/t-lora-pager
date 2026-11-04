@@ -260,7 +260,7 @@ static void poll_cb(lv_timer_t *t)
     // Pause while the password prompt is open (its textarea is focused) —
     // hw_get_wifi_scan_result does a scan-result pull over the instance
     // mutex that the keyboard reader also needs.
-    if (ui_text_input_focused()) return;
+    if (core::isTextInputFocused()) return;
 
     if (g_ctx->scan_in_flight && !hw_get_wifi_scanning()) {
         g_ctx->scan_in_flight = false;

@@ -24,7 +24,7 @@ static std::mutex s_imu_start_mtx;
 static bool s_imu_start_attempted = false;
 #endif
 
-void hw_imu_ensure_started()
+static void hw_imu_ensure_started()
 {
 #if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)
     std::lock_guard<std::mutex> guard(s_imu_start_mtx);

@@ -21,6 +21,10 @@
 #define APP_FACTORY(fn, cls) \
     std::shared_ptr<core::App> fn() { return std::make_shared<cls>(); }
 
+// The weather app's stored location (ui_weather.cpp), for the settings registry.
+std::string weather_get_user_city();
+void weather_set_user_location(const char *city, double lat, double lon);
+
 namespace apps {
 
 std::shared_ptr<core::App> make_text_editor_app();
@@ -74,9 +78,8 @@ bool tg_cfg_is_favorite(long long id);
 // chat list and jump straight into the favorited chat when there is only
 // one. Pass nullptr/"" if no title is known; existing title is preserved.
 void tg_cfg_set_favorite(long long id, const char *title, bool on);
-// Every favorite id with its title ("" when unknown), ascending id.
-void tg_cfg_get_favorites(std::vector<std::pair<long long, std::string>> &out);
-// Replaces the whole favorites set (ids != 0) and titles, then persists.
+// Replaces the in-memory favorites (ids != 0) and titles. RAM only: the settings
+// registry has already stored the list, in the order it was given.
 void tg_cfg_set_favorites(const std::vector<std::pair<long long, std::string>> &favs);
 
 // Notification channel toggles for new-message alerts raised by the
@@ -104,9 +107,7 @@ bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,
 // notes passphrase (hal::secret_store refuses plaintext). Default branch is
 // "main".
 std::string nsync_cfg_get_repo();
-void        nsync_cfg_set_repo(const char *v);
 std::string nsync_cfg_get_branch();
-void        nsync_cfg_set_branch(const char *v);
 std::string nsync_cfg_get_token_display();
 // Cheap form for the UI thread; false = needs a decrypt (hal::secret_mask_peek).
 bool nsync_cfg_peek_token_display(std::string &out);

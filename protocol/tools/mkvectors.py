@@ -241,10 +241,6 @@ def gmul(a, b):
     return p
 
 
-def xtime(a):
-    return gmul(a, 2)
-
-
 def _build_sbox():
     """GF(2^8) multiplicative inverse, then the FIPS-197 affine transform."""
     inv = [0] * 256
@@ -641,7 +637,6 @@ def settings_vectors():
         "rev_schema": rs,
         "cases": cases,
         "events": events,
-        "action_job": {"params": {"id": "wifi.scan"}, "result": {"job": "j1"}},
     }
 
 

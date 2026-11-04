@@ -1067,17 +1067,17 @@ static bool read_preferred_header(const char *path, uint8_t out[8 + NC_SALT_LEN]
 }
 #endif
 
-void notes_crypto_prewarm_fixed()
-{
 #ifdef ARDUINO
+static void notes_crypto_prewarm_fixed()
+{
     if (!g_unlocked) return;
     uint8_t hdr[8 + NC_SALT_LEN];
     if (read_preferred_header("/journal_idx.bin", hdr)) {
         notes_crypto_pin_key(NC_PIN_JOURNAL_INDEX, hdr, sizeof(hdr), /*derive=*/true);
     }
     hal::secret_prewarm_pinned();
-#endif
 }
+#endif
 
 #ifdef ARDUINO
 static std::atomic<bool> s_prewarm_fixed_running{false};

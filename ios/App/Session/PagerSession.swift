@@ -322,17 +322,17 @@ final class PagerSession: ObservableObject {
 
             await refresh()
             location.requestAuthorizationIfNeeded()
-            await startNotes(on: session, pagerCaps: Self.caps(of: hello))
-            await tasks.attach(session, pagerCaps: Self.caps(of: hello))
+            await startNotes(on: session, pagerCaps: pagerCaps)
+            await tasks.attach(session, pagerCaps: pagerCaps)
             // Settings before the weather push: the pager's weather.location
             // names the key even if Weather was never opened on the pager.
-            await settings.attach(session, pagerCaps: Self.caps(of: hello))
+            await settings.attach(session, pagerCaps: pagerCaps)
             if autoWeather {
                 if weatherKey != nil { await pushWeather() }
                 startWeatherRefresh()
             }
-            await files.attach(session, pagerCaps: Self.caps(of: hello))
-            await voiceMemos.attach(session, pagerCaps: Self.caps(of: hello))
+            await files.attach(session, pagerCaps: pagerCaps)
+            await voiceMemos.attach(session, pagerCaps: pagerCaps)
             if pagerCaps.contains("ota") {
                 let ota = OTAService(session: session)
                 self.ota = ota
@@ -356,7 +356,8 @@ final class PagerSession: ObservableObject {
     private func startNotes(on session: LinkSession, pagerCaps: [String]) async {
         let account = notes.account
         let backend = GitHubNotesBackend(config: { account.config() })
-        let service = NotesSyncService(session: session, github: backend, phoneDirectory: nil,
+        let service = NotesSyncService(session: session, github: backend,
+                                       phoneDirectory: Self.phoneNotesDirectory(),
                                        pagerCaps: pagerCaps)
         await service.onPagerMove { [weak self] result in
             await MainActor.run { self?.notes.pagerMoveFinished(result) }
@@ -372,6 +373,17 @@ final class PagerSession: ObservableObject {
         await notes.attach(session, sync: service, pagerCaps: pagerCaps)
     }
 
+    /// Where the pager's "Copy Notes to Phone" lands: `Documents/Notes`, which
+    /// the Files app shows (`UIFileSharingEnabled` in project.yml).
+    nonisolated private static func phoneNotesDirectory() -> URL? {
+        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let directory = documents.appendingPathComponent("Notes", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
     /// The `caps` strings of a `sys.hello` result.
     nonisolated static func caps(of hello: JSONValue) -> [String] {
         guard case .array(let caps)? = hello["caps"] else { return [] }
@@ -383,14 +395,16 @@ final class PagerSession: ObservableObject {
         let location = self.location
         let service = WeatherService(session: session, locator: { try await location.place() })
         weather = service
+        // Reads the live service rather than capturing `service`: the log holds
+        // this closure, and a capture would keep the service (and link) alive.
+        service.onActivity { [weak self] in
+            Task { @MainActor in
+                if let activity = self?.weather?.activity() { self?.weatherActivity = activity }
+            }
+        }
         await service.register { [weak self] key in
             UserDefaults.standard.set(key, forKey: PagerSession.weatherKeyDefault)
-            Task { @MainActor in
-                self?.appendLog("weather.get for \"\(key)\"")
-                // The reply is built after this callback; pick the fetch up shortly.
-                try? await Task.sleep(for: .seconds(2))
-                self?.weatherActivity = service.activity()
-            }
+            Task { @MainActor in self?.appendLog("weather.get for \"\(key)\"") }
         }
     }
 

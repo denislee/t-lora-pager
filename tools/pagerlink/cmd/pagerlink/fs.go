@@ -8,7 +8,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -49,15 +48,11 @@ func fsList(c *pagerlink.Client, timeout time.Duration, vol, path string) ([]fsE
 		if cursor != nil {
 			params["cursor"] = *cursor
 		}
-		res, err := c.Call("fs.list", params, timeout)
-		if err != nil {
-			return nil, err
-		}
-		var body struct {
+		body, err := callInto[struct {
 			Entries []fsEntry `json:"entries"`
 			Cursor  *uint32   `json:"cursor"`
-		}
-		if err := json.Unmarshal(res, &body); err != nil {
+		}](c, timeout, "fs.list", params)
+		if err != nil {
 			return nil, err
 		}
 		all = append(all, body.Entries...)
@@ -83,31 +78,7 @@ func fsListNames(c *pagerlink.Client, timeout time.Duration, vol, path string) (
 
 // fsStatOf calls fs.stat and decodes the metadata.
 func fsStatOf(c *pagerlink.Client, timeout time.Duration, vol, path string) (fsStat, error) {
-	res, err := c.Call("fs.stat", map[string]any{"vol": vol, "path": path}, timeout)
-	if err != nil {
-		return fsStat{}, err
-	}
-	var st fsStat
-	err = json.Unmarshal(res, &st)
-	return st, err
-}
-
-// rpcCode returns err's ERR code, or "" for a non-RPC error.
-func rpcCode(err error) string {
-	var re *pagerlink.RPCError
-	if errors.As(err, &re) {
-		return re.Code
-	}
-	return ""
-}
-
-// rpcMsg returns err's ERR message, or "" for a non-RPC error.
-func rpcMsg(err error) string {
-	var re *pagerlink.RPCError
-	if errors.As(err, &re) {
-		return re.Msg
-	}
-	return ""
+	return callInto[fsStat](c, timeout, "fs.stat", map[string]any{"vol": vol, "path": path})
 }
 
 // cmdLS lists a directory, one entry per line: "d name" for a directory and
@@ -317,10 +288,11 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 
 	// e. A second write without overwrite must be refused.
 	err = c.WriteFile("int", dir+"/big.bin", []byte("x"), false, timeout)
-	if rpcCode(err) != "invalid_argument" {
+	re := asRPC(err)
+	if re == nil || re.Code != "invalid_argument" {
 		fmt.Printf("       fs.write: got %v, want ERR invalid_argument (exists)\n", err)
 	}
-	pass = report(rpcCode(err) == "invalid_argument",
+	pass = report(re != nil && re.Code == "invalid_argument",
 		"fs.write existing without overwrite -> invalid_argument (exists)") && pass
 
 	// f. Rename, then confirm the old name is gone and the new one is there.
@@ -328,7 +300,8 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 		map[string]any{"vol": "int", "from": dir + "/big.bin", "to": dir + "/big2.bin"}, timeout)
 	_, oerr := c.Call("fs.stat", map[string]any{"vol": "int", "path": dir + "/big.bin"}, timeout)
 	_, nerr := c.Call("fs.stat", map[string]any{"vol": "int", "path": dir + "/big2.bin"}, timeout)
-	ok = rerr == nil && rpcCode(oerr) == "invalid_argument" && nerr == nil
+	statRe := asRPC(oerr)
+	ok = rerr == nil && statRe != nil && statRe.Code == "invalid_argument" && nerr == nil
 	if !ok {
 		fmt.Printf("       rename=%v old=%v new=%v\n", rerr, oerr, nerr)
 	}
@@ -346,7 +319,7 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 		"fs.write bad CRC -> invalid_argument, no .part") && pass
 
 	// i. The pager announces filesystem changes on evt.fs.changed.
-	_, ok = waitEvent(c, "evt.fs.changed", 3*time.Second)
+	_, ok = waitFor(c, "evt.fs.changed", 3*time.Second, nil)
 	pass = report(ok, "evt.fs.changed received") && pass
 
 	// j. A dropped upload must leave neither the file nor a .part behind. This
@@ -391,7 +364,8 @@ func smokeFS(c *pagerlink.Client, addr string, timeout time.Duration) (*pagerlin
 	// k. Clean up the scratch directory.
 	_, derr := c.Call("fs.delete", map[string]any{"vol": "int", "path": dir}, timeout)
 	_, kerr := c.Call("fs.stat", map[string]any{"vol": "int", "path": dir}, timeout)
-	ok = derr == nil && rpcCode(kerr) == "invalid_argument"
+	statRe = asRPC(kerr)
+	ok = derr == nil && statRe != nil && statRe.Code == "invalid_argument"
 	if !ok {
 		fmt.Printf("       fs.delete=%v fs.stat=%v\n", derr, kerr)
 	}
@@ -408,14 +382,10 @@ func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) boo
 	pass := true
 
 	// a. The pager advertises the capability the rest of this section relies on.
-	var hello struct {
+	hello, err := callInto[struct {
 		Caps []string `json:"caps"`
-	}
-	res, err := c.Call("sys.hello",
-		map[string]any{"proto": 1, "app": "pagerlink-smoke", "caps": []string{"sys"}}, timeout)
-	if err == nil {
-		err = json.Unmarshal(res, &hello)
-	}
+	}](c, timeout, "sys.hello",
+		map[string]any{"proto": 1, "app": "pagerlink-smoke", "caps": []string{"sys"}})
 	if err != nil {
 		fmt.Printf("       sys.hello: %v\n", err)
 	}
@@ -436,7 +406,8 @@ func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) boo
 	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path,
 		"size": uint32(len(body)), "crc32": crc ^ 1}, timeout)
 	_, serr := c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
-	ok := rpcCode(err) == "invalid_argument" && rpcMsg(err) == "changed" && serr == nil
+	re := asRPC(err)
+	ok := re != nil && re.Code == "invalid_argument" && re.Msg == "changed" && serr == nil
 	if !ok {
 		fmt.Printf("       fs.delete stale crc32: %v, fs.stat %v\n", err, serr)
 	}
@@ -446,7 +417,8 @@ func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) boo
 	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path,
 		"size": uint32(len(body) + 1), "crc32": crc}, timeout)
 	_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
-	ok = rpcCode(err) == "invalid_argument" && rpcMsg(err) == "changed" && serr == nil
+	re = asRPC(err)
+	ok = re != nil && re.Code == "invalid_argument" && re.Msg == "changed" && serr == nil
 	if !ok {
 		fmt.Printf("       fs.delete stale size: %v, fs.stat %v\n", err, serr)
 	}
@@ -456,7 +428,8 @@ func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) boo
 	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": dir,
 		"size": uint32(0), "crc32": uint32(0)}, timeout)
 	_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": dir}, timeout)
-	ok = rpcCode(err) == "invalid_argument" && serr == nil
+	re = asRPC(err)
+	ok = re != nil && re.Code == "invalid_argument" && serr == nil
 	if !ok {
 		fmt.Printf("       fs.delete dir with precondition: %v, fs.stat %v\n", err, serr)
 	}
@@ -466,7 +439,8 @@ func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) boo
 	_, err = c.Call("fs.delete", map[string]any{"vol": "int", "path": path,
 		"size": uint32(len(body)), "crc32": crc}, timeout)
 	_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
-	ok = err == nil && rpcCode(serr) == "invalid_argument"
+	re = asRPC(serr)
+	ok = err == nil && re != nil && re.Code == "invalid_argument"
 	if !ok {
 		fmt.Printf("       fs.delete matching: %v, fs.stat %v\n", err, serr)
 	}
@@ -487,10 +461,11 @@ func smokeCondDelete(c *pagerlink.Client, timeout time.Duration, dir string) boo
 	}
 	if ok {
 		_, serr = c.Call("fs.stat", map[string]any{"vol": "int", "path": path}, timeout)
-		if rpcCode(serr) != "invalid_argument" {
+		re = asRPC(serr)
+		if re == nil || re.Code != "invalid_argument" {
 			fmt.Printf("       fs.stat: got %v, want invalid_argument\n", serr)
 		}
-		ok = rpcCode(serr) == "invalid_argument"
+		ok = re != nil && re.Code == "invalid_argument"
 	}
 	pass = report(ok, "fs.delete without precondition unchanged") && pass
 
@@ -512,10 +487,12 @@ func smokeSandbox(c *pagerlink.Client, timeout time.Duration, dir string) bool {
 	}
 	for _, tc := range cases {
 		_, err := c.Call(tc.method, tc.params, timeout)
-		if rpcCode(err) != "invalid_argument" {
+		re := asRPC(err)
+		refused := re != nil && re.Code == "invalid_argument"
+		if !refused {
 			fmt.Printf("       %s: got %v, want ERR invalid_argument\n", tc.method, err)
 		}
-		pass = report(rpcCode(err) == "invalid_argument",
+		pass = report(refused,
 			"%s sandbox escape -> invalid_argument", tc.method) && pass
 	}
 	return pass
@@ -540,12 +517,12 @@ func smokeBadCRC(c *pagerlink.Client, timeout time.Duration, dir string) bool {
 	time.Sleep(200 * time.Millisecond)
 
 	_, err = c.Call("fs.write.commit", map[string]any{"xfer": id}, timeout)
-	if rpcCode(err) != "invalid_argument" {
+	if re := asRPC(err); re == nil || re.Code != "invalid_argument" {
 		fmt.Printf("       fs.write.commit: got %v, want invalid_argument\n", err)
 		return false
 	}
 	_, err = c.Call("fs.stat", map[string]any{"vol": "int", "path": dir + "/bad.bin"}, timeout)
-	if rpcCode(err) != "invalid_argument" {
+	if re := asRPC(err); re == nil || re.Code != "invalid_argument" {
 		fmt.Printf("       fs.stat bad.bin: got %v, want invalid_argument\n", err)
 		return false
 	}

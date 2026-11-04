@@ -17,6 +17,7 @@ private final class MockGitHub: @unchecked Sendable {
 
     // Configuration (the Go struct's fields, same names).
     var notesFiles: Set<String> = []      // listRemote result
+    var notesFileSHAs: [String: String] = [:] // blob SHA per listed name (default "s")
     var listTruncated = false             // the trees listing claims `truncated: true`
     var headSHA = "commit-0"
     var treeSHA = "tree-0"
@@ -47,7 +48,7 @@ private final class MockGitHub: @unchecked Sendable {
             listCalls += 1
             if notesFiles.isEmpty { return StubResponse(status: 404) }
             var entries: [JSONValue] = notesFiles.sorted().map {
-                .object(["path": .string($0), "type": "blob", "mode": "100644", "sha": .string("s")])
+                .object(["path": .string($0), "type": "blob", "mode": "100644", "sha": .string(notesFileSHAs[$0] ?? "s")])
             }
             // A non-blob tree entry: never a note name.
             entries.append(.object(["path": "subdir", "type": "tree", "mode": "040000", "sha": .string("d")]))
@@ -129,47 +130,6 @@ private extension StubResponse {
 
 // MARK: - Two-session helpers
 
-/// A lock-protected notes store the pager-side `fs.read` handler serves from,
-/// recording every `(vol, path)` it was asked for.
-private final class NotesFs: @unchecked Sendable {
-    private let lock = NSLock()
-    private var files: [String: [UInt8]] = [:]
-    private var log: [(vol: String, path: String)] = []
-
-    private func key(_ vol: String, _ path: String) -> String { "\(vol):\(path)" }
-
-    func set(_ vol: String, _ path: String, _ bytes: [UInt8]) {
-        lock.lock()
-        defer { lock.unlock() }
-        files[key(vol, path)] = bytes
-    }
-
-    func bytes(_ vol: String, _ path: String) -> [UInt8]? {
-        lock.lock()
-        defer { lock.unlock() }
-        return files[key(vol, path)]
-    }
-
-    func record(_ vol: String, _ path: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        log.append((vol, path))
-    }
-
-    func asked(_ vol: String, _ path: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return log.contains { $0.vol == vol && $0.path == path }
-    }
-
-    /// How many times a `(vol, path)` was read.
-    func reads(_ vol: String, _ path: String) -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return log.filter { $0.vol == vol && $0.path == path }.count
-    }
-}
-
 /// Collects `evt.notes.sync` params from a session's events, shared between the
 /// consuming task and the test under a lock.
 private final class NotesCollector: @unchecked Sendable {
@@ -235,29 +195,6 @@ final class NotesSyncServiceTests: XCTestCase {
         await phone.start()
         await pager.start()
         return (phone, pager)
-    }
-
-    /// Register the pager-side `fs.read` handler serving `fs`.
-    private static func registerFsRead(_ pager: LinkSession, fs: NotesFs) async {
-        let salted = Array("Salted__".utf8)
-        await pager.handle("fs.read") { params in
-            let vol = params["vol"]?.stringValue ?? "int"
-            let path = params["path"]?.stringValue ?? ""
-            let xfer = UInt16(exactly: params["xfer"]!.intValue!)!
-            fs.record(vol, path)
-            guard let bytes = fs.bytes(vol, path) else {
-                throw RPCError(code: "invalid_argument", msg: "not found")
-            }
-            Task { () -> Void in
-                try? await pager.sendBytes(xfer: xfer, data: bytes, timeout: .seconds(5))
-            }
-            return [
-                "xfer": .number(Double(xfer)),
-                "size": .number(Double(bytes.count)),
-                "crc32": .number(Double(CRC32.checksum(bytes))),
-                "protected": .bool(bytes.starts(with: salted)),
-            ]
-        }
     }
 
     /// Collect `evt.notes.sync` params until the terminal `done:true` event or
@@ -357,15 +294,12 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testRunSyncCommitsNewFilesInOneCommit() async throws {
         let mock = MockGitHub()
-        mock.notesFiles = ["already.txt"]
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
 
-        let result = try await backend.push([
-            NoteFile(name: "already.txt", bytes: Array("existing".utf8)),
+        let result = await backend.commit([
             NoteFile(name: "a.txt", bytes: Array("a".utf8)),
             NoteFile(name: "b.txt", bytes: Array("b".utf8)),
         ])
-        XCTAssertEqual(result.already, 1)
         XCTAssertEqual(result.uploaded, 2)
         XCTAssertTrue(result.errors.isEmpty)
 
@@ -385,7 +319,7 @@ final class NotesSyncServiceTests: XCTestCase {
         mock.blobFailContent = ["YmFk"] // base64("bad") fails to blob
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
 
-        let result = try await backend.push([
+        let result = await backend.commit([
             NoteFile(name: "good.txt", bytes: Array("good".utf8)),
             NoteFile(name: "bad.txt", bytes: Array("bad".utf8)),
         ])
@@ -400,7 +334,7 @@ final class NotesSyncServiceTests: XCTestCase {
         mock.blobFailContent = ["YmFk"]
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
 
-        let result = try await backend.push([NoteFile(name: "bad.txt", bytes: Array("bad".utf8))])
+        let result = await backend.commit([NoteFile(name: "bad.txt", bytes: Array("bad".utf8))])
         XCTAssertEqual(result.uploaded, 0)
         XCTAssertEqual(result.errors.count, 1)
         XCTAssertEqual(mock.branchHeadCalls, 0)
@@ -411,10 +345,18 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testRunSyncNoNewFilesSkipsGitDataAPICalls() async throws {
         let mock = MockGitHub()
+        let bytes = Array("a".utf8)
         mock.notesFiles = ["a.txt"]
+        mock.notesFileSHAs = ["a.txt": GitBlob.sha1(bytes)]
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
+        let fs = CompanionFakeFs()
+        fs.set("int", "/notes/a.txt", bytes)
+        let (phone, pager) = await fs.makeSessions()
 
-        let result = try await backend.push([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+        // The skip lives in the move engine: everything is on the remote byte
+        // for byte, so nothing reaches the Git Data API.
+        let service = NotesSyncService(session: phone, github: backend, phoneDirectory: nil)
+        let result = await service.move([NoteEntry(vol: "int", name: "a.txt", size: 1)])
         XCTAssertEqual(result.already, 1)
         XCTAssertEqual(result.uploaded, 0)
         XCTAssertTrue(result.errors.isEmpty)
@@ -424,6 +366,9 @@ final class NotesSyncServiceTests: XCTestCase {
         XCTAssertEqual(mock.treeCalls, 0)
         XCTAssertEqual(mock.commitCalls, 0)
         XCTAssertEqual(mock.refCalls, 0)
+
+        await phone.stop()
+        await pager.stop()
     }
 
     func testRunSyncRefConflictRetriesAgainstFreshHead() async throws {
@@ -431,7 +376,7 @@ final class NotesSyncServiceTests: XCTestCase {
         mock.refConflictsLeft = 1
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
 
-        let result = try await backend.push([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+        let result = await backend.commit([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
         XCTAssertEqual(result.uploaded, 1)
         XCTAssertTrue(result.errors.isEmpty)
 
@@ -445,7 +390,7 @@ final class NotesSyncServiceTests: XCTestCase {
         mock.refConflictsLeft = 999 // always conflicts
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
 
-        let result = try await backend.push([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+        let result = await backend.commit([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
         XCTAssertEqual(result.uploaded, 0)
         XCTAssertEqual(result.errors.count, 1)
         XCTAssertEqual(result.errors.first?.name, "a.txt")
@@ -463,7 +408,7 @@ final class NotesSyncServiceTests: XCTestCase {
         )
 
         do {
-            _ = try await backend.push([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+            _ = try await backend.existingBlobs()
             XCTFail("expected error")
         } catch let error as NotesSyncError {
             XCTAssertTrue(error.msg.contains("github 401"), "msg = \(error.msg)")
@@ -479,7 +424,7 @@ final class NotesSyncServiceTests: XCTestCase {
         mock.notesFiles = ["a.txt", "b.txt"]
         let (backend, server) = NotesSyncServiceTests.makeBackend(mock)
 
-        let names = try await backend.existingNames()
+        let names = Set(try await backend.existingBlobs().keys)
         // The tree route also returns a "subdir"/type "tree" entry; only blobs
         // are notes.
         XCTAssertEqual(names, Set(["a.txt", "b.txt"]))
@@ -488,14 +433,14 @@ final class NotesSyncServiceTests: XCTestCase {
         XCTAssertEqual(listings.count, 1, "exactly one trees listing")
     }
 
-    func testExistingNamesTruncatedThrows() async throws {
+    func testExistingBlobsTruncatedThrows() async throws {
         let mock = MockGitHub()
         mock.notesFiles = ["a.txt"]
         mock.listTruncated = true
         let (backend, _) = NotesSyncServiceTests.makeBackend(mock)
 
         do {
-            _ = try await backend.existingNames()
+            _ = try await backend.existingBlobs()
             XCTFail("expected error")
         } catch let error as NotesSyncError {
             // A truncated tree would look like missing notes and get them
@@ -511,7 +456,8 @@ final class NotesSyncServiceTests: XCTestCase {
     func testRequestsCarryGitHubHeaders() async throws {
         let mock = MockGitHub()
         let (backend, server) = NotesSyncServiceTests.makeBackend(mock)
-        _ = try await backend.push([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+        _ = try await backend.existingBlobs()
+        _ = await backend.commit([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
 
         XCTAssertFalse(server.requests.isEmpty)
         for request in server.requests {
@@ -544,13 +490,16 @@ final class NotesSyncServiceTests: XCTestCase {
         for (config, message) in cases {
             let (backend, server) = makeBackend(config)
             do {
-                _ = try await backend.push([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+                _ = try await backend.existingBlobs()
                 XCTFail("expected \(message)")
             } catch let error as NotesSyncError {
                 XCTAssertEqual(error, NotesSyncError(message))
             } catch {
                 XCTFail("unexpected error \(error)")
             }
+            let committed = await backend.commit([NoteFile(name: "a.txt", bytes: Array("a".utf8))])
+            XCTAssertEqual(committed.errors, [NotesPushError(name: "a.txt", error: message)])
+            XCTAssertNil(committed.commitSHA)
             XCTAssertTrue(server.requests.isEmpty, "no request may be sent for an invalid config")
         }
     }
@@ -560,7 +509,7 @@ final class NotesSyncServiceTests: XCTestCase {
         let (backend, server) = NotesSyncServiceTests.makeBackend(mock)
         let raw = NotesSyncServiceTests.saltedBytes()
 
-        let result = try await backend.push([NoteFile(name: "secret.txt", bytes: raw)])
+        let result = await backend.commit([NoteFile(name: "secret.txt", bytes: raw)])
         XCTAssertEqual(result.uploaded, 1)
         XCTAssertTrue(result.errors.isEmpty)
         XCTAssertEqual(mock.blobCalls, 1)
@@ -585,12 +534,12 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testPhoneTargetWritesFilesAndEmitsProgress() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
+        let fs = CompanionFakeFs()
         let aBytes = Array("alpha".utf8)
         let bBytes = Array("bravo".utf8)
         fs.set("int", "/notes/a.txt", aBytes)
         fs.set("sd", "/notes/b.txt", bBytes)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
+        await fs.register(pager)
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let notes = NotesSyncService(session: phone, github: nil, phoneDirectory: dir)
@@ -627,8 +576,8 @@ final class NotesSyncServiceTests: XCTestCase {
         XCTAssertEqual(Array(writtenA), aBytes)
         XCTAssertEqual(Array(writtenB), bBytes)
 
-        XCTAssertTrue(fs.asked("int", "/notes/a.txt"))
-        XCTAssertTrue(fs.asked("sd", "/notes/b.txt"))
+        XCTAssertTrue(fs.reads("int", "/notes/a.txt") > 0)
+        XCTAssertTrue(fs.reads("sd", "/notes/b.txt") > 0)
 
         await phone.stop()
         await pager.stop()
@@ -636,10 +585,10 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testManifestCRCMismatchIsError() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("alpha".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
+        await fs.register(pager)
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let notes = NotesSyncService(session: phone, github: nil, phoneDirectory: dir)
@@ -666,10 +615,10 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testManifestSizeMismatchIsError() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("alpha".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
+        await fs.register(pager)
 
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let notes = NotesSyncService(session: phone, github: nil, phoneDirectory: dir)
@@ -695,14 +644,14 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testGitHubTargetUploadsMissingAndCountsExisting() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
+        let fs = CompanionFakeFs()
         let existing = Array("existing".utf8)
         let hello = Array("hello".utf8)
         let raw = NotesSyncServiceTests.saltedBytes()
         fs.set("int", "/notes/already.txt", existing)
         fs.set("int", "/notes/new.txt", hello)
         fs.set("int", "/notes/salted.txt", raw)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
+        await fs.register(pager)
 
         let repo = FakeGitHubRepo()
         repo.seed(["already.txt": existing])
@@ -739,7 +688,7 @@ final class NotesSyncServiceTests: XCTestCase {
         XCTAssertEqual(remote["new.txt"] ?? [], hello)
         XCTAssertEqual(remote["salted.txt"] ?? [], raw, "the Salted__ note goes up byte for byte")
         XCTAssertEqual(repo.commitPosts, 1)
-        XCTAssertTrue(fs.asked("int", "/notes/already.txt"),
+        XCTAssertTrue(fs.reads("int", "/notes/already.txt") > 0,
                       "an existing note is pulled too: the move hashes its bytes")
 
         await phone.stop()
@@ -750,10 +699,10 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testPhoneTargetSkipsMatchingLocalCopy() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
+        let fs = CompanionFakeFs()
         let bytes = Array("alpha".utf8)
         fs.set("int", "/notes/a.txt", bytes)
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
+        await fs.register(pager)
 
         // The phone folder already holds a.txt byte for byte.
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -777,7 +726,72 @@ final class NotesSyncServiceTests: XCTestCase {
         XCTAssertEqual(last?["already"]?.intValue, 1)
         XCTAssertEqual(last?["uploaded"]?.intValue, 0)
         XCTAssertEqual(last?["errors"], JSONValue.array([]))
-        XCTAssertFalse(fs.asked("int", "/notes/a.txt"), "a matching phone copy needs no pull")
+        XCTAssertFalse(fs.reads("int", "/notes/a.txt") > 0, "a matching phone copy needs no pull")
+
+        await phone.stop()
+        await pager.stop()
+    }
+
+    /// No phone folder: every note fails up front, without pulling a byte.
+    func testPhoneTargetWithoutDirectoryFailsWithoutReading() async throws {
+        let (phone, pager) = await NotesSyncServiceTests.makeSessions()
+        let fs = CompanionFakeFs()
+        let bytes = Array("alpha".utf8)
+        fs.set("int", "/notes/a.txt", bytes)
+        await fs.register(pager)
+
+        let notes = NotesSyncService(session: phone, github: nil, phoneDirectory: nil)
+        await notes.register()
+
+        async let events = NotesSyncServiceTests.collectNotes(pager, timeout: .seconds(5))
+        _ = try await pager.call("notes.sync", params: [
+            "targets": ["phone"],
+            "files": [
+                ["name": "a.txt", "size": .number(Double(bytes.count)), "mtime": 0,
+                 "crc32": .number(Double(CRC32.checksum(bytes)))],
+            ],
+        ], timeout: .seconds(5))
+        let collected = await events
+
+        let last = collected.last
+        XCTAssertEqual(last?["done"]?.boolValue, true)
+        XCTAssertEqual(last?["uploaded"]?.intValue, 0)
+        XCTAssertEqual(last?["errors"], JSONValue.array([.string("a.txt")]))
+        XCTAssertEqual(fs.reads("int", "/notes/a.txt"), 0, "no phone folder, so no pull")
+
+        await phone.stop()
+        await pager.stop()
+    }
+
+    /// `Documents/Notes` does not exist on a first run: the first copy makes it.
+    func testPhoneTargetCreatesMissingDirectoryAndStoresTheFile() async throws {
+        let (phone, pager) = await NotesSyncServiceTests.makeSessions()
+        let fs = CompanionFakeFs()
+        let bytes = Array("alpha".utf8)
+        fs.set("int", "/notes/a.txt", bytes)
+        await fs.register(pager)
+
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("Documents/Notes", isDirectory: true)
+        let notes = NotesSyncService(session: phone, github: nil, phoneDirectory: dir)
+        await notes.register()
+
+        async let events = NotesSyncServiceTests.collectNotes(pager, timeout: .seconds(5))
+        _ = try await pager.call("notes.sync", params: [
+            "targets": ["phone"],
+            "files": [
+                ["name": "a.txt", "size": .number(Double(bytes.count)), "mtime": 0,
+                 "crc32": .number(Double(CRC32.checksum(bytes)))],
+            ],
+        ], timeout: .seconds(5))
+        let collected = await events
+
+        let last = collected.last
+        XCTAssertEqual(last?["uploaded"]?.intValue, 1)
+        XCTAssertEqual(last?["errors"], JSONValue.array([]))
+        XCTAssertEqual(fs.reads("int", "/notes/a.txt"), 1)
+        XCTAssertEqual(Array(try Data(contentsOf: dir.appendingPathComponent("a.txt"))), bytes)
 
         await phone.stop()
         await pager.stop()
@@ -785,10 +799,10 @@ final class NotesSyncServiceTests: XCTestCase {
 
     func testGitHubNotConfiguredErrorsEveryFile() async throws {
         let (phone, pager) = await NotesSyncServiceTests.makeSessions()
-        let fs = NotesFs()
+        let fs = CompanionFakeFs()
         fs.set("int", "/notes/a.txt", Array("a".utf8))
         fs.set("int", "/notes/b.txt", Array("b".utf8))
-        await NotesSyncServiceTests.registerFsRead(pager, fs: fs)
+        await fs.register(pager)
 
         let server = StubServer { _ in .json(500, "{}") }
         let backend = GitHubNotesBackend(
@@ -811,7 +825,7 @@ final class NotesSyncServiceTests: XCTestCase {
         let last = collected.last
         XCTAssertEqual(last?["uploaded"]?.intValue, 0)
         XCTAssertEqual(last?["errors"], JSONValue.array([.string("a.txt"), .string("b.txt")]))
-        XCTAssertFalse(fs.asked("int", "/notes/a.txt"))
+        XCTAssertFalse(fs.reads("int", "/notes/a.txt") > 0)
 
         await phone.stop()
         await pager.stop()

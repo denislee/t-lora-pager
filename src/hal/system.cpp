@@ -73,8 +73,6 @@ static uint32_t s_fake_sleep_entry_ms = 0;
 static bool s_imu_was_registered = false;
 #endif
 
-uint32_t hw_ms_since_input();
-
 // idle_ms == 0: unconditional. Otherwise the set is skipped unless no input
 // arrived for idle_ms, re-checked under the mutex (see hw_set_cpu_freq_if_idle).
 static void set_cpu_freq_locked(uint32_t mhz, uint32_t idle_ms)
@@ -184,7 +182,7 @@ uint32_t hw_fake_sleep_target_freq()
 //     that is not byte-compatible (field reorder, type change, field removed).
 //     Adding a new field to the *end* keeps the size check effective and is
 //     safe without a version bump — missing bytes keep their default values
-//     (load_grown_settings() copies a shorter same-version payload).
+//     (apply_settings_blob() copies a shorter same-version payload).
 static constexpr uint32_t SETTINGS_MAGIC   = 0x50414752u; // "PAGR"
 // v11: dropped user_setting_params_t.led_indicator_level (removed LED slider).
 // A struct-layout change: the size guard in load already forces a clean
@@ -209,6 +207,16 @@ struct SettingsHeader {
     uint16_t payload_size;
 };
 
+static constexpr size_t SETTINGS_BLOB_SIZE = sizeof(SettingsHeader) + sizeof(user_setting_params_t);
+
+// The stored bytes for the current user_setting.
+static void build_blob(uint8_t (&buf)[SETTINGS_BLOB_SIZE])
+{
+    const SettingsHeader h{SETTINGS_MAGIC, SETTINGS_VERSION, (uint16_t)sizeof(user_setting_params_t)};
+    memcpy(buf, &h, sizeof(h));
+    memcpy(buf + sizeof(h), &user_setting, sizeof(user_setting_params_t));
+}
+
 #ifdef ARDUINO
 #include "Esp.h"
 #include <LilyGoLib.h>
@@ -224,10 +232,8 @@ static Preferences           prefs;
 
 void save_user_setting_nvs()
 {
-    uint8_t buf[sizeof(SettingsHeader) + sizeof(user_setting_params_t)];
-    SettingsHeader h{SETTINGS_MAGIC, SETTINGS_VERSION, (uint16_t)sizeof(user_setting_params_t)};
-    memcpy(buf, &h, sizeof(h));
-    memcpy(buf + sizeof(h), &user_setting, sizeof(user_setting_params_t));
+    uint8_t buf[SETTINGS_BLOB_SIZE];
+    build_blob(buf);
     prefs.putBytes(NVS_NAME, buf, sizeof(buf));
 }
 
@@ -247,10 +253,8 @@ extern "C" bool testSPIRAM(void) { return true; }
 // the emulator's settings survive a restart.
 void save_user_setting_nvs()
 {
-    uint8_t buf[sizeof(SettingsHeader) + sizeof(user_setting_params_t)];
-    SettingsHeader h{SETTINGS_MAGIC, SETTINGS_VERSION, (uint16_t)sizeof(user_setting_params_t)};
-    memcpy(buf, &h, sizeof(h));
-    memcpy(buf + sizeof(h), &user_setting, sizeof(user_setting_params_t));
+    uint8_t buf[SETTINGS_BLOB_SIZE];
+    build_blob(buf);
     hal::nvs_set_blob("pager", "pager", buf, sizeof(buf));
 }
 #endif
@@ -507,23 +511,22 @@ static void load_default_settings()
     user_setting.auto_off_min = 0;
 }
 
-#ifdef ARDUINO
-// A current-version blob shorter than today's struct: fields were appended
-// since it was saved. Copy its payload over the defaults and report success;
-// any other header (magic/version/size disagreeing) is left to the reset path.
-static bool load_grown_settings(size_t stored_size)
+// Copy a stored blob's payload over user_setting. It must be this version with
+// a size the header agrees with, at most today's struct; a shorter payload
+// predates appended fields, so its prefix is kept and the new tail keeps its
+// defaults. Anything else returns false and leaves user_setting untouched.
+static bool apply_settings_blob(const uint8_t *buf, size_t size)
 {
-    uint8_t buf[sizeof(SettingsHeader) + sizeof(user_setting_params_t)];
-    prefs.getBytes(NVS_NAME, buf, stored_size);
-    const SettingsHeader *h = reinterpret_cast<const SettingsHeader *>(buf);
-    if (h->magic != SETTINGS_MAGIC || h->version != SETTINGS_VERSION ||
-        h->payload_size != stored_size - sizeof(SettingsHeader)) {
+    if (size <= sizeof(SettingsHeader) || size > SETTINGS_BLOB_SIZE) return false;
+    SettingsHeader h;
+    memcpy(&h, buf, sizeof(h));
+    if (h.magic != SETTINGS_MAGIC || h.version != SETTINGS_VERSION ||
+        h.payload_size != size - sizeof(SettingsHeader)) {
         return false;
     }
-    memcpy(&user_setting, buf + sizeof(SettingsHeader), h->payload_size);
+    memcpy(&user_setting, buf + sizeof(SettingsHeader), h.payload_size);
     return true;
 }
-#endif
 
 void hw_load_setting()
 {
@@ -531,31 +534,29 @@ void hw_load_setting()
 #ifdef ARDUINO
     prefs.begin(NVS_NAME);
     const size_t stored_size = prefs.getBytesLength(NVS_NAME);
-    constexpr size_t kVersionedSize = sizeof(SettingsHeader) + sizeof(user_setting_params_t);
 
     bool needs_save = true;
 
-    if (stored_size == kVersionedSize) {
-        uint8_t buf[kVersionedSize];
-        prefs.getBytes(NVS_NAME, buf, sizeof(buf));
-        const SettingsHeader *h = reinterpret_cast<const SettingsHeader *>(buf);
-        if (h->magic == SETTINGS_MAGIC &&
-            h->version == SETTINGS_VERSION &&
-            h->payload_size == sizeof(user_setting_params_t)) {
-            memcpy(&user_setting, buf + sizeof(SettingsHeader), sizeof(user_setting_params_t));
+    uint8_t buf[SETTINGS_BLOB_SIZE];
+    const bool may_be_versioned = stored_size > sizeof(SettingsHeader) && stored_size <= sizeof(buf);
+    if (may_be_versioned) prefs.getBytes(NVS_NAME, buf, stored_size);
+
+    if (may_be_versioned && apply_settings_blob(buf, stored_size)) {
+        if (stored_size == sizeof(buf)) {
             // Fast path: the stored blob is already valid current-format, so
             // there is nothing to rewrite.
             needs_save = false;
         } else {
-            log_i("Settings header mismatch (magic=%08x ver=%u size=%u), resetting to defaults",
-                  (unsigned)h->magic, (unsigned)h->version, (unsigned)h->payload_size);
+            // Same version, fields appended since it was saved (see SETTINGS_VERSION):
+            // the stored prefix was kept, the new tail keeps its defaults; re-save.
+            log_i("Settings grew %u -> %u bytes, new fields defaulted",
+                  (unsigned)(stored_size - sizeof(SettingsHeader)), (unsigned)sizeof(user_setting_params_t));
         }
-    } else if (stored_size > sizeof(SettingsHeader) && stored_size < kVersionedSize &&
-               load_grown_settings(stored_size)) {
-        // Same version, fields appended since it was saved (see SETTINGS_VERSION):
-        // the stored prefix was kept, the new tail keeps its defaults; re-save.
-        log_i("Settings grew %u -> %u bytes, new fields defaulted",
-              (unsigned)(stored_size - sizeof(SettingsHeader)), (unsigned)sizeof(user_setting_params_t));
+    } else if (stored_size == sizeof(buf)) {
+        SettingsHeader h;
+        memcpy(&h, buf, sizeof(h));
+        log_i("Settings header mismatch (magic=%08x ver=%u size=%u), resetting to defaults",
+              (unsigned)h.magic, (unsigned)h.version, (unsigned)h.payload_size);
     } else if (stored_size > 0 && stored_size <= sizeof(user_setting_params_t)) {
         // Legacy unversioned blob: copy what fits onto defaults, then re-save with header.
         prefs.getBytes(NVS_NAME, &user_setting, stored_size);
@@ -575,17 +576,8 @@ void hw_load_setting()
     // Emulator: the blob is a file under $PAGERLINK_NVS_DIR/pager/pager, so a
     // restart keeps the last saved settings instead of reverting to defaults.
     std::string b;
-    // A shorter payload of the same version predates appended fields: keep
-    // its prefix, the new tail keeps its defaults.
-    if (hal::nvs_get_blob("pager", "pager", b) &&
-        b.size() > sizeof(SettingsHeader) &&
-        b.size() <= sizeof(SettingsHeader) + sizeof(user_setting_params_t)) {
-        const SettingsHeader *h = reinterpret_cast<const SettingsHeader *>(b.data());
-        if (h->magic == SETTINGS_MAGIC &&
-            h->version == SETTINGS_VERSION &&
-            h->payload_size == b.size() - sizeof(SettingsHeader)) {
-            memcpy(&user_setting, b.data() + sizeof(SettingsHeader), h->payload_size);
-        }
+    if (hal::nvs_get_blob("pager", "pager", b)) {
+        apply_settings_blob(reinterpret_cast<const uint8_t *>(b.data()), b.size());
     }
 #endif
 }
@@ -599,14 +591,6 @@ uint8_t hw_get_auto_off_min()
 {
     return user_setting.auto_off_min;
 }
-
-void hw_set_user_setting(user_setting_params_t &param)
-{
-    user_setting = param;
-    save_user_setting_nvs();
-}
-
-
 
 bool hw_get_haptic_enable() { return user_setting.haptic_enable; }
 void hw_set_haptic_enable(bool en) {

@@ -70,12 +70,10 @@ public struct TasksService: Sendable {
         public var items: [TaskItem]
         /// CRC-32 of the bytes read (nil: no file), the base of the next save.
         public var base: UInt32?
-        public var sdMounted: Bool
 
-        public init(items: [TaskItem], base: UInt32?, sdMounted: Bool) {
+        public init(items: [TaskItem], base: UInt32?) {
             self.items = items
             self.base = base
-            self.sdMounted = sdMounted
         }
     }
 
@@ -94,10 +92,10 @@ public struct TasksService: Sendable {
 
     /// The pager's tasks, from the copy the pager itself reads.
     public func load() async throws -> Snapshot {
-        let (bytes, sdMounted) = try await current()
-        guard let bytes else { return Snapshot(items: [], base: nil, sdMounted: sdMounted) }
+        let (bytes, _) = try await current()
+        guard let bytes else { return Snapshot(items: [], base: nil) }
         return Snapshot(items: TasksFile.parse(String(decoding: bytes, as: UTF8.self)),
-                        base: CRC32.checksum(bytes), sdMounted: sdMounted)
+                        base: CRC32.checksum(bytes))
     }
 
     /// Save `items` if the pager's file is still the one `base` describes
@@ -115,7 +113,7 @@ public struct TasksService: Sendable {
                                         overwrite: true, timeout: timeout)
         }
         return Snapshot(items: TasksFile.parse(String(decoding: data, as: UTF8.self)),
-                        base: CRC32.checksum(data), sdMounted: sdMounted)
+                        base: CRC32.checksum(data))
     }
 
     /// The bytes the pager reads (SD copy first, then internal; nil when

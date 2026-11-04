@@ -13,15 +13,11 @@ import ActivityKit
 /// "No pager yet".
 @MainActor
 final class PagerStatusPublisher {
-    /// The widget kind `PagerWidgets` registers (`StatusWidget.kind`).
-    static let widgetKind = "PagerStatus"
-
     private let store: PagerStatusStore?
     private var snapshot: PagerStatusSnapshot
 
     init(bundleID: String? = Bundle.main.bundleIdentifier) {
-        let group = PagerStatusStore.appGroupID(bundleID: bundleID ?? "")
-        let store = UserDefaults(suiteName: group).map(PagerStatusStore.init(defaults:))
+        let store = PagerStatusStore.appGroupDefaults(bundleID: bundleID).map(PagerStatusStore.init(defaults:))
         self.store = store
         snapshot = store?.load() ?? PagerStatusSnapshot(link: .disconnected, updatedAt: Date())
     }
@@ -41,7 +37,7 @@ final class PagerStatusPublisher {
     private func publish() {
         guard let store else { return }
         store.save(snapshot)
-        WidgetCenter.shared.reloadTimelines(ofKind: Self.widgetKind)
+        WidgetCenter.shared.reloadTimelines(ofKind: PagerStatusStore.widgetKind)
     }
 }
 
@@ -68,7 +64,7 @@ final class NotesSyncLiveActivity {
     private func update(_ event: NotesSyncProgressEvent) {
         let state = NotesSyncActivityAttributes.ContentState(
             phase: event.phaseLabel, summary: event.summary, uploaded: event.uploaded, already: event.already,
-            deleted: event.deleted ?? 0, errors: event.errors, done: event.done)
+            done: event.done)
         if let id = currentID, job == event.job {
             if event.done {
                 currentID = nil
@@ -89,7 +85,7 @@ final class NotesSyncLiveActivity {
         // A job that is already done (one message) is not worth an activity.
         guard !event.done, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
         currentID = try? Activity.request(
-            attributes: NotesSyncActivityAttributes(job: event.job, startedAt: Date()),
+            attributes: NotesSyncActivityAttributes(),
             contentState: state, pushType: nil).id
         job = event.job
     }

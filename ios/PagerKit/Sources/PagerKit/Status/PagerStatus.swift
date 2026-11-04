@@ -61,6 +61,8 @@ public struct PagerStatusStore: @unchecked Sendable {
     /// at runtime by the app; this is the suffix.
     public static let appGroupSuffix = "pagercompanion.shared"
     public static let key = "PagerStatus.snapshot"
+    /// The widget kind `PagerWidgets` registers and the app reloads.
+    public static let widgetKind = "PagerStatus"
 
     private let defaults: UserDefaults
 
@@ -76,6 +78,12 @@ public struct PagerStatusStore: @unchecked Sendable {
         while let last = parts.last, ["widgets", "share", "pagercompanion"].contains(last) { parts.removeLast() }
         let prefix = parts.joined(separator: ".")
         return "group." + (prefix.isEmpty ? "" : prefix + ".") + appGroupSuffix
+    }
+
+    /// The App Group's `UserDefaults`; nil without the group (a build whose
+    /// signing has none).
+    public static func appGroupDefaults(bundleID: String? = Bundle.main.bundleIdentifier) -> UserDefaults? {
+        UserDefaults(suiteName: appGroupID(bundleID: bundleID ?? ""))
     }
 
     public func load() -> PagerStatusSnapshot? {

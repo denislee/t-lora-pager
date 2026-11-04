@@ -103,6 +103,13 @@ public struct WeatherService: Sendable {
         log.snapshot()
     }
 
+    /// `handler` runs after every recorded fetch, push and pager request, on
+    /// the task that recorded it; `activity()` then has the news. Shared by
+    /// copies of one service.
+    public func onActivity(_ handler: @escaping @Sendable () -> Void) {
+        log.observe(handler)
+    }
+
     private static func describe(_ error: Error) -> String {
         if let rpc = error as? RPCError { return rpc.msg.isEmpty ? rpc.code : "\(rpc.code): \(rpc.msg)" }
         return "\(error)"
@@ -180,10 +187,6 @@ public struct WeatherService: Sendable {
                 .joined(separator: ", ")
             return CityMatch(name: r.name, label: label, lat: r.latitude, lon: r.longitude)
         }
-    }
-
-    func resolve(key: String) async throws -> WeatherPlace {
-        try await resolveWithSource(key: key).place
     }
 
     /// The place for `key` and where it came from.
@@ -466,11 +469,22 @@ public struct WeatherActivity: Sendable, Equatable {
 final class WeatherActivityLog: @unchecked Sendable {
     private let lock = NSLock()
     private var value = WeatherActivity()
+    private var observer: (@Sendable () -> Void)?
 
     func snapshot() -> WeatherActivity { lock.withLock { value } }
-    func fetch(_ fetch: WeatherActivity.Fetch) { lock.withLock { value.lastFetch = fetch } }
-    func push(_ push: WeatherActivity.Push) { lock.withLock { value.lastPush = push } }
+    func observe(_ observer: @escaping @Sendable () -> Void) { lock.withLock { self.observer = observer } }
+    func fetch(_ fetch: WeatherActivity.Fetch) { record { $0.lastFetch = fetch } }
+    func push(_ push: WeatherActivity.Push) { record { $0.lastPush = push } }
     func request(key: String, at: Date) {
-        lock.withLock { value.lastRequest = WeatherActivity.Request(at: at, key: key) }
+        record { $0.lastRequest = WeatherActivity.Request(at: at, key: key) }
+    }
+
+    /// Apply `change`, then tell the observer outside the lock.
+    private func record(_ change: (inout WeatherActivity) -> Void) {
+        let observer = lock.withLock { () -> (@Sendable () -> Void)? in
+            change(&value)
+            return self.observer
+        }
+        observer?()
     }
 }

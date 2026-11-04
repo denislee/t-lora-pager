@@ -44,9 +44,14 @@ ios/
     Files/, Voice/, Chat/, Battery/  per-tab models (FilesModel, VoiceMemosModel, ChatHistoryModel,
                                   BatteryHistoryModel), owned by PagerSession like TasksModel
     Status/PagerStatusPublisher.swift  widget snapshot (App Group) + notes-sync Live Activity
-    Features/RootView.swift       Dashboard / Notes / Files / Journal / Settings, then (More) Tasks /
-                                  Weather / Voice memos / Chat / Telegram / Diagnostics
+    Inbox/InboxModel.swift        Inbox tab state: messages from the pager, the share outbox
+    Intents/PagerIntents.swift    App Intents (Shortcuts) reaching the running app's link
+    Firmware/FirmwareModel.swift  Firmware screen state: a GitHub repo's releases, OTA install
+    Screen/CapturedScreen.swift   a pager screen capture as the app keeps it
+    Features/RootView.swift       Dashboard / Inbox / Notes / Files / Settings, then (More) Journal /
+                                  Tasks / Weather / Voice memos / Chat / Telegram / Diagnostics
     Features/Dashboard/…          connection, quick actions, sys.info, battery history link
+    Features/Inbox/…              write to the pager, read what it sent
     Features/Files/…              browse Internal/SD, download + preview/share, upload (Files, Photos)
     Features/Journal/…            notes by day, calendar, append to today
     Features/Weather/…            location source, last fetch/push, Push now, pager-style preview
@@ -56,19 +61,22 @@ ios/
     Features/Notes/…              note list + detail/editor, unlock, sync sheets, GitHub settings
     Features/Tasks/…              task list: check off, add, rename, reorder, delete
     Features/Telegram/…           api keys, phone/code/2FA login, log out
-    Features/Settings/…           the pager's settings: generic form + Wi-Fi, time zone,
-                                  weather location, Telegram favorites screens
-    Features/Diagnostics/…        ping, diagnostics export (ShareLink), session log
+    Features/Settings/…           the pager's settings: generic form + Wi-Fi, time zone, weather
+                                  location, Telegram favorites screens, SSHSettingsView (SSH client)
+    Features/Diagnostics/…        ping, diagnostics export (ShareLink), session log, link to Firmware
+    Features/Firmware/…           firmware update over Bluetooth (from Diagnostics)
   Shared/                         types compiled into the app and PagerWidgets (Live Activity attributes)
   Widgets/                        PagerWidgets extension: status widget + notes-sync Live Activity
   ShareExtension/                 PagerShare extension: "Share -> Pager" into the App Group outbox
   PagerKit/                       Swift package (no UIKit/SwiftUI)
     Sources/PagerKit/…            Transport (BLE, TCP) / Link / RPC / Model /
-                                  Services (sys, weather, tg + TDLib, chat, notes
-                                  sync + move engine, fs) / Notes (indexer,
-                                  cache, library, NoteCrypto, GitBlob, account) /
-                                  Tasks (TasksFile format, TasksService) /
-                                  settings (SettingsService, SettingsStore)
+                                  Services (sys, fs, HTTP, weather, tg + TDLib, chat,
+                                  notes sync + move engine, settings) /
+                                  Notes (indexer, cache, library, NoteCrypto, GitBlob,
+                                  account, GitHub setup) / Tasks / Files (FileBrowser) /
+                                  Journal / Voice / Chat / Battery / Weather /
+                                  Messaging (+ outbox) / Screen / OTA / SSH / Status /
+                                  Diagnostics / Support (JSONFile, AsyncGate)
     Tests/PagerKitTests/…         XCTest (reads ../../protocol/vectors)
   NotesE2E/                       notes viewer + move checks against the emulator
   FilesE2E/                       Files engine: SD round trips with CRC-32, folders, evt.fs.changed
@@ -260,9 +268,17 @@ falls back to the bridge the pager sends, if any.
 
 ## Status
 
-- **Phase 1, in progress.** The emulator/TCP path is wired end to end: the
-  Dashboard connects, shows live battery/storage/Wi‑Fi, sets the clock and
-  zone on connect, and Diagnostics pings and logs.
+- **App target, last Xcode build:** `a3301de` (2026-10-29) built for a device
+  (iPhone 8, Xcode 27.1). **Everything in the App target since then has no
+  Xcode build:** `3f966ed` (extension plists), `269621b` (automatic weather
+  refresh, guided GitHub notes setup) and the 2026-11-04 dead-code round, whose
+  edits to `App/`, `Widgets/`, `ShareExtension/`, `Shared/` and `project.yml`
+  were written on Linux and have not been compiled.
+- **Checks that need no Xcode:** `make test-linux` runs the PagerKit suite;
+  `make notes-e2e`, `make files-e2e` and `make settings-e2e` run its engines
+  against the emulator.
+  `TCPTransportTests` drives `TCPTransport` + `LinkSession` against a
+  loopback-socket pager: connect readiness, refused connects and peer close.
 - **BLE is the main connect path.** `BLETransport` (a CoreBluetooth central)
   backs **Connect via Bluetooth** and the auto-connect toggle (retries with
   backoff). It shares the link iOS already holds for the pager as a keyboard,
@@ -270,37 +286,10 @@ falls back to the bridge the pager sends, if any.
   encrypted rx/tx characteristics. State restoration is not wired yet, and
   hardware acceptance is still open (`HUB_REMOVAL_PLAN.md` W15). See
   `IOS_COMPANION_PLAN.md` §7.
-- **Notes editing and Tasks tab:** PagerKit parts unit-tested
-  (`NotesEditTests`: `fs.write`, re-encryption, conflict checks, tasks
-  format); the app builds for the Simulator but the screens have not been
-  driven against the emulator or hardware yet. The pager's Tasks app picks up
-  a phone edit within a second while it is open (not mid-edit).
-- **Notes tab (viewer + move to GitHub):** PagerKit parts tested on Linux
-  (`make test-linux`, `make notes-e2e` against the emulator); the SwiftUI
-  views, `NotesModel` wiring and Keychain store have not been built with Xcode
-  or run in the Simulator / on hardware yet (`IOS_NOTES_VIEWER_PLAN.md` W8,
-  W9, W15).
-- **Settings tab:** PagerKit parts (`SettingsService`, `SettingsStore`)
-  tested on Linux (`make test-linux`) and end to end against the emulator
-  (`make settings-e2e`); `SettingsModel`, `SettingsView` and the custom
-  screens were written on Linux and have not been built with Xcode or run in
-  the Simulator yet (`IOS_SETTINGS_PLAN.md` W10, W11).
-- **Companion screens (Files, Weather, Journal, Voice memos, Chat history,
-  battery chart, diagnostics export, widget + Live Activity):** the PagerKit
-  parts (`FileBrowser`, `WeatherForecast`/`WeatherActivity`, `Journal`,
-  `VoiceMemoImporter`, `ChatHistoryStore`, `BatteryHistoryStore`,
-  `PagerStatusStore`, `DiagnosticsReport`) are tested on Linux
-  (`make test-linux`); the SwiftUI views, the PagerWidgets extension and the
-  App Group were written on Linux and have not been built with Xcode yet, and
-  `make files-e2e` has not been run against the emulator.
-- **Phase 4/6 screens (Inbox, share extension, App Intents, screen
-  capture, Firmware/OTA, SSH key):** PagerKit `MessagingService` (every
-  `vectors/messaging.json` verdict), `PagerOutbox`, `RLE565` /
-  `ScreenCaptureService` (`vectors/screen.json`), `OTAService`,
-  `FirmwareReleases` and `SSHKeyCheck` are tested on Linux; the app and
-  extension code (`App/Inbox`, `App/Intents`, `ShareExtension/`, Firmware,
-  SSH and screen views) has not been built with Xcode yet.
-- **The app target builds on macOS** (`make gen && make sim`, Xcode 26, no
-  warnings under strict concurrency). `TCPTransportTests` drives
-  `TCPTransport` + `LinkSession` against a loopback-socket pager: connect
-  readiness, refused connects and peer close.
+- **Screen acceptance on the Simulator or a phone** is tracked in the plans,
+  not here: Notes in `IOS_NOTES_VIEWER_PLAN.md` W8, W9, W15; Settings in
+  `IOS_SETTINGS_PLAN.md` W10, W11. The pager's Tasks app picks up a phone edit
+  within a second while it is open (not mid-edit).
+- **"Copy Notes to Phone"** (the pager's Settings > Storage) writes to
+  `Documents/Notes`, which the Files app shows. The engine is unit-tested; the
+  folder and the two Info.plist keys need a phone to confirm.

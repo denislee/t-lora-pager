@@ -18,7 +18,9 @@ AppManager& AppManager::getInstance() {
 void AppManager::registerApp(std::shared_ptr<App> app) {
     if (app) {
         _appMap[app->getName()] = app;
+#ifndef ARDUINO
         _apps.push_back(app);
+#endif
         log_d("App registered: %s", app->getName().c_str());
     }
 }

@@ -95,6 +95,13 @@ void service_rx_window(uint16_t &credits, unsigned &ack_every);
  * sys.hello `board` and the BLE info characteristic. */
 const char *board_tag();
 
+/** Fail a handler with invalid_argument: `return rpc_invalid(err, "bad path");`. */
+inline bool rpc_invalid(RpcError &err, const std::string &msg) {
+    err.code = hal_error_code(HalError::InvalidArgument);
+    err.msg = msg;
+    return false;
+}
+
 /** Register the sys.* handlers on `rpc` (implemented in handlers_sys.cpp). */
 void register_sys_handlers(Rpc &rpc);
 

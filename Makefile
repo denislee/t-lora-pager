@@ -37,7 +37,7 @@ emulator:
 	$(PIO) run -e emulator_lora_pager
 
 envs:
-	$(PIO) project config | grep '^\[env:'
+	$(PIO) project config | grep '^env:'
 
 ios-gen:
 	$(MAKE) -C ios gen

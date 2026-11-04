@@ -6,7 +6,6 @@ import FoundationNetworking
 /// One firmware image offered by a GitHub release.
 public struct FirmwareAsset: Sendable, Equatable, Identifiable, Hashable {
     public let tag: String
-    public let releaseName: String
     public let prerelease: Bool
     public let name: String
     public let size: Int
@@ -14,20 +13,16 @@ public struct FirmwareAsset: Sendable, Equatable, Identifiable, Hashable {
     /// The asset's SHA-256 (lowercase hex) when GitHub provides `digest`
     /// (`"sha256:…"`); nil for older assets.
     public let sha256: String?
-    public let publishedAt: Date?
 
     public var id: String { url.absoluteString }
 
-    public init(tag: String, releaseName: String, prerelease: Bool, name: String, size: Int, url: URL,
-                sha256: String?, publishedAt: Date?) {
+    public init(tag: String, prerelease: Bool, name: String, size: Int, url: URL, sha256: String?) {
         self.tag = tag
-        self.releaseName = releaseName
         self.prerelease = prerelease
         self.name = name
         self.size = size
         self.url = url
         self.sha256 = sha256
-        self.publishedAt = publishedAt
     }
 }
 
@@ -44,19 +39,6 @@ public enum FirmwareReleaseError: Error, Equatable, Sendable {
 /// ending in `.bin` (`GET /repos/{owner}/{repo}/releases`, no token) and
 /// download one, checked against its `digest` when GitHub has one.
 public enum FirmwareReleases {
-    public static let apiBase = URL(string: "https://api.github.com")!
-
-    /// `owner/name` → (owner, name), both non-empty and URL-path safe.
-    public static func parseRepo(_ text: String) -> (owner: String, repo: String)? {
-        let parts = text.trimmingCharacters(in: .whitespaces).split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 2 else { return nil }
-        let ok = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
-        for part in parts where part.isEmpty || part.unicodeScalars.contains(where: { !ok.contains($0) }) {
-            return nil
-        }
-        return (String(parts[0]), String(parts[1]))
-    }
-
     /// Every `.bin` asset of every published release, newest release first
     /// (drafts skipped).
     public static func parse(_ data: Data) throws -> [FirmwareAsset] {
@@ -68,10 +50,8 @@ public enum FirmwareReleases {
                 let digest: String?
             }
             let tag_name: String
-            let name: String?
             let draft: Bool?
             let prerelease: Bool?
-            let published_at: String?
             let assets: [Asset]
         }
         let releases: [Release]
@@ -80,7 +60,6 @@ public enum FirmwareReleases {
         } catch {
             throw FirmwareReleaseError.badResponse
         }
-        let iso = ISO8601DateFormatter()
         var out: [FirmwareAsset] = []
         for release in releases where release.draft != true {
             for asset in release.assets where asset.name.lowercased().hasSuffix(".bin") {
@@ -91,17 +70,18 @@ public enum FirmwareReleases {
                     if hex.count == 64, hex.allSatisfy(\.isHexDigit) { sha = hex }
                 }
                 out.append(FirmwareAsset(
-                    tag: release.tag_name, releaseName: release.name ?? release.tag_name,
-                    prerelease: release.prerelease ?? false, name: asset.name, size: asset.size, url: url,
-                    sha256: sha, publishedAt: release.published_at.flatMap { iso.date(from: $0) }))
+                    tag: release.tag_name, prerelease: release.prerelease ?? false, name: asset.name,
+                    size: asset.size, url: url, sha256: sha))
             }
         }
         return out
     }
 
+    /// `repo` is anything `GitHubSetup.parseRepo` takes (`owner/name` or a
+    /// pasted link).
     public static func fetch(repo: String, urlSession: URLSession = .shared) async throws -> [FirmwareAsset] {
-        guard let (owner, name) = parseRepo(repo) else { throw FirmwareReleaseError.badRepo }
-        let url = apiBase.appendingPathComponent("repos/\(owner)/\(name)/releases")
+        guard let parsed = GitHubSetup.parseRepo(repo) else { throw FirmwareReleaseError.badRepo }
+        let url = GitHubNotesBackend.defaultAPIBase.appendingPathComponent("repos/\(parsed.repo)/releases")
         var request = try HTTP.request(url: url, timeout: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         let reply = try await HTTP.send(request, using: urlSession)

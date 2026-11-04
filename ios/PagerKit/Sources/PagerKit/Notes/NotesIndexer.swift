@@ -73,7 +73,7 @@ public enum NotesIndexer {
             .sorted(by: Self.journalOrder)
     }
 
-    public struct Scan: Sendable, Equatable {
+    public struct Scan: Codable, Sendable, Equatable {
         /// What the Journal shows.
         public var merged: [NoteEntry]
         /// Every note file on the pager, internal then SD (each in Journal

@@ -326,21 +326,6 @@ bool Registry::check_one(const std::string &id, const Value &v, const Def *&d, E
     return validate(*d, v, err);
 }
 
-bool Registry::get(const std::string &id, Value &out, Error &err) const {
-    std::lock_guard<std::recursive_mutex> lock(mu_);
-    const Def *d = find(id);
-    if (!d) {
-        err.set("invalid_argument", id + ": unknown setting");
-        return false;
-    }
-    if (!d->supported) {
-        err.set("unsupported", id + ": not on this board");
-        return false;
-    }
-    out = d->get ? d->get() : Value();
-    return true;
-}
-
 bool Registry::set(const std::string &id, const Value &v, Error &err) {
     std::vector<std::pair<std::string, Value>> one;
     one.push_back(std::make_pair(id, v));

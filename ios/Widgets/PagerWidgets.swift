@@ -28,9 +28,7 @@ struct StatusEntry: TimelineEntry {
 
 struct StatusProvider: TimelineProvider {
     private func load() -> PagerStatusSnapshot? {
-        let group = PagerStatusStore.appGroupID(bundleID: Bundle.main.bundleIdentifier ?? "")
-        guard let defaults = UserDefaults(suiteName: group) else { return nil }
-        return PagerStatusStore(defaults: defaults).load()
+        PagerStatusStore.appGroupDefaults().map(PagerStatusStore.init(defaults:))?.load()
     }
 
     func placeholder(in context: Context) -> StatusEntry {
@@ -52,8 +50,7 @@ struct StatusProvider: TimelineProvider {
 }
 
 struct StatusWidget: Widget {
-    /// `PagerStatusPublisher.widgetKind` in the app.
-    static let kind = "PagerStatus"
+    static let kind = PagerStatusStore.widgetKind
 
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: Self.kind, provider: StatusProvider()) { entry in

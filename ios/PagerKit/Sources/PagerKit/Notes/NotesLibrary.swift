@@ -34,9 +34,8 @@ public actor NotesLibrary {
     /// The live link, nil when disconnected.
     private var session: LinkSession?
 
-    /// The one operation holding the gate, and the callers queued behind it.
-    private var busy = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// One operation at a time; the other callers queue behind it.
+    private let gate = AsyncGate()
 
     public init(cache: NotesCache, readTimeout: Duration = .seconds(60)) {
         self.cache = cache
@@ -57,8 +56,8 @@ public actor NotesLibrary {
     /// Throws `RPCError` `disconnected` "not connected" when detached.
     public func refresh() async throws -> NotesIndexer.Scan {
         guard let session = self.session else { throw Self.notConnected }
-        await acquire()
-        defer { release() }
+        await gate.acquire()
+        defer { gate.release() }
 
         let scan = try await NotesIndexer.scan(FileService(session: session, timeout: readTimeout))
         cache.saveScan(scan, at: Date())
@@ -69,8 +68,8 @@ public actor NotesLibrary {
     /// filled.
     public func stat(_ entry: NoteEntry) async throws -> NoteEntry {
         guard let session = self.session else { throw Self.notConnected }
-        await acquire()
-        defer { release() }
+        await gate.acquire()
+        defer { gate.release() }
 
         let info = try await FileService(session: session, timeout: readTimeout)
             .stat(vol: entry.vol, path: entry.path)
@@ -96,8 +95,8 @@ public actor NotesLibrary {
         if let cached = cache.bytes(for: entry) { return cached }
 
         guard let session = self.session else { throw Self.notConnected }
-        await acquire()
-        defer { release() }
+        await gate.acquire()
+        defer { gate.release() }
 
         // A read that queued behind another may have been cached meanwhile.
         if let cached = cache.bytes(for: entry) { return cached }
@@ -154,8 +153,8 @@ public actor NotesLibrary {
         guard let size = UInt32(exactly: bytes.count) else {
             throw RPCError(code: "invalid_argument", msg: "too large")
         }
-        await acquire()
-        defer { release() }
+        await gate.acquire()
+        defer { gate.release() }
 
         do {
             let (current, _) = try await session.readFile(vol: entry.vol, path: entry.path, timeout: readTimeout)
@@ -190,8 +189,8 @@ public actor NotesLibrary {
         guard let size = UInt32(exactly: bytes.count) else {
             throw RPCError(code: "invalid_argument", msg: "too large")
         }
-        await acquire()
-        defer { release() }
+        await gate.acquire()
+        defer { gate.release() }
 
         func entry(_ vol: String) -> NoteEntry {
             NoteEntry(vol: vol, name: name, size: size, mtime: nil,
@@ -227,8 +226,8 @@ public actor NotesLibrary {
     public func delete(_ copies: [NoteEntry], base: (size: UInt32, crc32: UInt32)?,
                        conditional: Bool) async throws {
         guard let session = self.session else { throw Self.notConnected }
-        await acquire()
-        defer { release() }
+        await gate.acquire()
+        defer { gate.release() }
 
         let fs = FileService(session: session, timeout: readTimeout)
         for copy in copies {
@@ -257,28 +256,5 @@ public actor NotesLibrary {
     /// The sync deleted a note on the pager: drop its cached bytes.
     public func noteDeleted(vol: String, name: String) {
         cache.remove(vol: vol, name: name)
-    }
-
-    // MARK: - Gate
-
-    /// Take the one-operation gate, waiting for whoever holds it.
-    private func acquire() async {
-        if !busy {
-            busy = true
-            return
-        }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            waiters.append(continuation)
-        }
-        // Ownership was handed over by `release()`; `busy` is still true.
-    }
-
-    /// Hand the gate to the next caller, or free it.
-    private func release() {
-        if waiters.isEmpty {
-            busy = false
-        } else {
-            waiters.removeFirst().resume()
-        }
     }
 }

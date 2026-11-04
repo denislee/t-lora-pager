@@ -192,8 +192,7 @@ public actor FileBrowser {
     private let timeout: Duration
     private var session: LinkSession?
     private var listings: [String: [FsEntry]] = [:]
-    private var transferBusy = false
-    private var transferWaiters: [CheckedContinuation<Void, Never>] = []
+    private let transferGate = AsyncGate()
 
     /// Uploads cut off by a dropped link, oldest first.
     public private(set) var interrupted: [Upload] = []
@@ -212,11 +211,6 @@ public actor FileBrowser {
     /// `evt.fs.changed`: every cached listing is stale.
     public func invalidate() {
         listings.removeAll()
-    }
-
-    /// Whether `vol:path` has a cached listing (tests, the UI's spinner).
-    public func isCached(vol: String, path: String) -> Bool {
-        listings[Self.key(vol, path)] != nil
     }
 
     // MARK: - Listing
@@ -278,8 +272,8 @@ public actor FileBrowser {
     public func download(vol: String, path: String,
                          progress: Progress? = nil) async throws -> ([UInt8], FileInfo) {
         let session = try link()
-        await acquireTransfer()
-        defer { releaseTransfer() }
+        await transferGate.acquire()
+        defer { transferGate.release() }
         return try await session.readFile(vol: vol, path: FilePath.normalize(path), timeout: timeout,
                                           progress: progress)
     }
@@ -291,8 +285,8 @@ public actor FileBrowser {
         interrupted.removeAll { $0.id == upload.id }
         do {
             let session = try link()
-            await acquireTransfer()
-            defer { releaseTransfer() }
+            await transferGate.acquire()
+            defer { transferGate.release() }
             try await session.writeFile(vol: upload.vol, path: FilePath.normalize(upload.path), data: upload.data,
                                         overwrite: upload.overwrite, timeout: timeout, progress: progress)
         } catch let error as RPCError where Self.isLinkFailure(error) {
@@ -355,23 +349,5 @@ public actor FileBrowser {
 
     private func files() throws -> FileService {
         FileService(session: try link(), timeout: timeout)
-    }
-
-    private func acquireTransfer() async {
-        if !transferBusy {
-            transferBusy = true
-            return
-        }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            transferWaiters.append(continuation)
-        }
-    }
-
-    private func releaseTransfer() {
-        if transferWaiters.isEmpty {
-            transferBusy = false
-        } else {
-            transferWaiters.removeFirst().resume()
-        }
     }
 }

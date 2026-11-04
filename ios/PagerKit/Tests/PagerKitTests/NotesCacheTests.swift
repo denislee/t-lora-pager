@@ -262,4 +262,46 @@ final class NotesCacheTests: XCTestCase {
         XCTAssertEqual(reopened.cachedScan()?.scan.sdMounted, false)
         XCTAssertEqual(reopened.cachedScan()?.stale, false)
     }
+
+    /// An `index.json` as the app already has it on disk (a flat `scan`, dates
+    /// in `JSONEncoder`'s default reference-date seconds) still decodes: the
+    /// answer is a hit, with its scan and records, not a cache miss. A save
+    /// keeps the same shape.
+    func testExistingIndexFileStillDecodes() throws {
+        let (cache, root) = makeCache()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let existing = #"""
+            {"records":[{"crc32":7,"name":"a.txt","size":5,"vol":"int"}],
+             "scan":{"all":[{"name":"a.txt","size":5,"vol":"int"},{"name":"b.txt","size":6,"vol":"sd"}],
+                     "at":700000000,
+                     "merged":[{"name":"a.txt","size":5,"vol":"int"}],
+                     "sdMounted":true,"stale":true}}
+            """#
+        let url = root.appendingPathComponent("index.json")
+        try Data(existing.utf8).write(to: url)
+
+        let cached = try XCTUnwrap(cache.cachedScan())
+        XCTAssertEqual(cached.scan.merged.map(\.name), ["a.txt"])
+        XCTAssertEqual(cached.scan.all.map(\.name), ["a.txt", "b.txt"])
+        XCTAssertTrue(cached.scan.sdMounted)
+        XCTAssertEqual(cached.at, Date(timeIntervalSinceReferenceDate: 700_000_000))
+        XCTAssertTrue(cached.stale)
+        XCTAssertEqual(cache.record(vol: "int", name: "a.txt")?.crc32, 7)
+
+        cache.remove(vol: "sd", name: "b.txt")  // forces a save
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let scan = try XCTUnwrap(saved["scan"] as? [String: Any])
+        XCTAssertEqual(Set(scan.keys), ["all", "at", "merged", "sdMounted", "stale"])
+    }
+}
+
+extension NotesCache {
+    /// The record for `(vol, name)` as `index.json` holds it (the cache saves
+    /// the file on every change).
+    func record(vol: String, name: String) -> Record? {
+        struct OnDisk: Decodable { let records: [NotesCache.Record] }
+        guard let data = try? Data(contentsOf: root.appendingPathComponent("index.json")),
+              let index = try? JSONDecoder().decode(OnDisk.self, from: data) else { return nil }
+        return index.records.first { $0.vol == vol && $0.name == name }
+    }
 }

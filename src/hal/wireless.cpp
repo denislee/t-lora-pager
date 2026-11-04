@@ -97,6 +97,28 @@ static int wifi_saved_count_ro(Preferences &p)
     return n;
 }
 
+// Store `kept` as the saved list and clear the old slots between its end and clear_end.
+static void wifi_saved_rewrite(Preferences &p,
+                               const std::vector<std::pair<std::string, std::string>> &kept,
+                               size_t clear_end)
+{
+    for (size_t i = 0; i < kept.size(); ++i) {
+        char sk[8], pk[8];
+        wifi_key_ssid((int)i, sk);
+        wifi_key_pass((int)i, pk);
+        p.putString(sk, kept[i].first.c_str());
+        p.putString(pk, kept[i].second.c_str());
+    }
+    for (size_t i = kept.size(); i < clear_end && i < WIFI_MAX_SAVED; ++i) {
+        char sk[8], pk[8];
+        wifi_key_ssid((int)i, sk);
+        wifi_key_pass((int)i, pk);
+        p.remove(sk);
+        p.remove(pk);
+    }
+    p.putUChar(WIFI_PREFS_COUNT, (uint8_t)kept.size());
+}
+
 static bool wifi_load_at(int i, std::string &ssid, std::string &password)
 {
     Preferences p;
@@ -380,22 +402,7 @@ void hw_wifi_add_saved(const std::string &ssid, const std::string &password)
         kept.emplace_back(s.c_str(), pw.c_str());
     }
 
-    for (size_t i = 0; i < kept.size(); ++i) {
-        char sk[8], pk[8];
-        wifi_key_ssid((int)i, sk);
-        wifi_key_pass((int)i, pk);
-        p.putString(sk, kept[i].first.c_str());
-        p.putString(pk, kept[i].second.c_str());
-    }
-    // Clear any trailing slots that used to be populated.
-    for (size_t i = kept.size(); i < (size_t)n + 1 && i < WIFI_MAX_SAVED; ++i) {
-        char sk[8], pk[8];
-        wifi_key_ssid((int)i, sk);
-        wifi_key_pass((int)i, pk);
-        p.remove(sk);
-        p.remove(pk);
-    }
-    p.putUChar(WIFI_PREFS_COUNT, (uint8_t)kept.size());
+    wifi_saved_rewrite(p, kept, (size_t)n + 1);
     p.end();
 #else
     (void)ssid; (void)password;
@@ -439,22 +446,7 @@ bool hw_wifi_forget_ssid(const std::string &ssid)
         kept.emplace_back(s.c_str(), pw.c_str());
     }
 
-    for (size_t i = 0; i < kept.size(); ++i) {
-        char sk[8], pk[8];
-        wifi_key_ssid((int)i, sk);
-        wifi_key_pass((int)i, pk);
-        p.putString(sk, kept[i].first.c_str());
-        p.putString(pk, kept[i].second.c_str());
-    }
-    // Clear any trailing slots that used to be populated.
-    for (size_t i = kept.size(); i < (size_t)n && i < WIFI_MAX_SAVED; ++i) {
-        char sk[8], pk[8];
-        wifi_key_ssid((int)i, sk);
-        wifi_key_pass((int)i, pk);
-        p.remove(sk);
-        p.remove(pk);
-    }
-    p.putUChar(WIFI_PREFS_COUNT, (uint8_t)kept.size());
+    wifi_saved_rewrite(p, kept, (size_t)n);
     p.end();
 
     // Dropping the network we are associated with leaves a stale link up.

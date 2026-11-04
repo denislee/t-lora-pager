@@ -342,7 +342,7 @@ static void rebuild_task_list() {
             lv_obj_set_width(t.obj, LV_PCT(100));
             lv_checkbox_set_text(t.obj, ""); // Clear built-in text
             
-            // Create a separate label for the text to support scrolling
+            // A separate label for the text, so it can dot within the row
             lv_obj_t * label = lv_label_create(t.obj);
             // Dotted, never CLIP: a clipped label overflowed the row and gave
             // the list a horizontal scrollbar across the text (VB.13).

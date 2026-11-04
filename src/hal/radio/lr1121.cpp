@@ -33,10 +33,6 @@ int16_t configure(const radio_params_t &params)
     // re-init here. Matches the original pre-refactor behavior.
     instance.initLoRa();
 
-#ifdef ARDUINO_T_DECK_V2
-    instance.setRFFrequencyBand(params.freq);
-#endif
-
     int16_t state = radio.setFrequency(params.freq);
     if (state == RADIOLIB_ERR_INVALID_FREQUENCY) {
         Serial.println(F("Selected frequency is invalid for this module!"));

@@ -283,7 +283,7 @@ func testStep(c *pagerlink.Client, timeout time.Duration, method string, params 
 		fmt.Printf("       %s: %v\n", method, err)
 		return testResult{}, false
 	}
-	n, ok := waitEvent(c, "evt.test.result", within)
+	n, ok := waitFor(c, "evt.test.result", within, nil)
 	if !ok {
 		fmt.Printf("       no evt.test.result within %s\n", within)
 		return testResult{}, false
@@ -296,17 +296,22 @@ func testStep(c *pagerlink.Client, timeout time.Duration, method string, params 
 	return r, true
 }
 
-// waitEvent drains c.Events() until an event called name arrives, ignoring
-// every other event, or within elapses.
-func waitEvent(c *pagerlink.Client, name string, within time.Duration) (pagerlink.Notification, bool) {
+// waitFor drains c.Events() until an event called name whose params satisfy match
+// arrives (a nil match takes the first one), ignoring every other event. ok is
+// false when within elapses or the link drops; a dropped link fails at once.
+func waitFor(c *pagerlink.Client, name string, within time.Duration,
+	match func(json.RawMessage) bool) (pagerlink.Notification, bool) {
 	deadline := time.After(within)
 	for {
 		select {
 		case n := <-c.Events():
-			if n.Name == name {
+			if n.Name == name && (match == nil || match(n.Params)) {
 				return n, true
 			}
 		case <-deadline:
+			return pagerlink.Notification{}, false
+		case <-c.Done():
+			fmt.Printf("       link lost waiting for %s\n", name)
 			return pagerlink.Notification{}, false
 		}
 	}

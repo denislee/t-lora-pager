@@ -47,9 +47,7 @@ void register_sys_handlers(Rpc &rpc) {
                                RpcError &err) -> bool {
         int64_t proto = 0;
         if (!params.get_int("proto", proto)) {
-            err.code = hal_error_code(HalError::InvalidArgument);
-            err.msg = "proto required";
-            return false;
+            return rpc_invalid(err, "proto required");
         }
         if (proto != PROTO_VERSION) {
             err.code = "unsupported";
@@ -154,9 +152,7 @@ void register_sys_handlers(Rpc &rpc) {
                               RpcError &err) -> bool {
         int64_t t = 0;
         if (!params.get_int("t", t)) {
-            err.code = hal_error_code(HalError::InvalidArgument);
-            err.msg = "t required";
-            return false;
+            return rpc_invalid(err, "t required");
         }
         result.begin_object().key("t").int_val(t).end_object();
         return true;
@@ -167,16 +163,12 @@ void register_sys_handlers(Rpc &rpc) {
                                   RpcError &err) -> bool {
         int64_t epoch = 0;
         if (!params.get_int("epoch", epoch) || epoch < 1577836800 /* 2020-01-01 */) {
-            err.code = hal_error_code(HalError::InvalidArgument);
-            err.msg = "epoch out of range";
-            return false;
+            return rpc_invalid(err, "epoch out of range");
         }
         std::string tz;
         /* T6: only a zone the pager can apply is stored. */
         if (!params.get_string("tz", tz) || !tz_charset_ok(tz) || !timezone_is_known(tz.c_str())) {
-            err.code = hal_error_code(HalError::InvalidArgument);
-            err.msg = "bad tz";
-            return false;
+            return rpc_invalid(err, "bad tz");
         }
 
         timezone_set_user_tz(tz.c_str());

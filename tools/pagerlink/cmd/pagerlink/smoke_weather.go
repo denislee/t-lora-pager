@@ -157,11 +157,5 @@ func weatherGetSteps(c *pagerlink.Client, timeout time.Duration) bool {
 // readWeatherCache fetches the forecast the pager stored under key through the
 // emulator-only test.weather.cache hook and decodes it into a forecastPayload.
 func readWeatherCache(c *pagerlink.Client, timeout time.Duration, key string) (forecastPayload, error) {
-	var got forecastPayload
-	res, err := c.Call("test.weather.cache", map[string]any{"key": key}, timeout)
-	if err != nil {
-		return got, err
-	}
-	err = json.Unmarshal(res, &got)
-	return got, err
+	return callInto[forecastPayload](c, timeout, "test.weather.cache", map[string]any{"key": key})
 }

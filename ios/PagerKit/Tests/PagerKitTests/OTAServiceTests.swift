@@ -177,21 +177,22 @@ final class OTAServiceTests: XCTestCase {
         XCTAssertEqual(assets[0].sha256, OTAService.sha256Hex(payload))
         XCTAssertNil(assets[1].sha256)
         XCTAssertTrue(assets[1].prerelease)
-        XCTAssertNotNil(assets[0].publishedAt)
         let bytes = try await FirmwareReleases.download(assets[0], urlSession: session)
         XCTAssertEqual(bytes, payload)
 
-        let tampered = FirmwareAsset(tag: "v", releaseName: "v", prerelease: false, name: "firmware.bin", size: 4,
-                                     url: assets[0].url, sha256: String(repeating: "0", count: 64), publishedAt: nil)
+        let tampered = FirmwareAsset(tag: "v", prerelease: false, name: "firmware.bin", size: 4,
+                                     url: assets[0].url, sha256: String(repeating: "0", count: 64))
         do {
             _ = try await FirmwareReleases.download(tampered, urlSession: session)
             XCTFail("digest mismatch accepted")
         } catch let error as FirmwareReleaseError {
             guard case .digestMismatch = error else { return XCTFail("\(error)") }
         }
-        XCTAssertNil(FirmwareReleases.parseRepo("o/r/x"))
-        XCTAssertNil(FirmwareReleases.parseRepo("o/"))
-        XCTAssertNil(FirmwareReleases.parseRepo("o r/x"))
-        XCTAssertEqual(FirmwareReleases.parseRepo(" lilygo/t-lora-pager ")?.repo, "t-lora-pager")
+        XCTAssertNil(GitHubSetup.parseRepo("o/r/x"))
+        XCTAssertNil(GitHubSetup.parseRepo("o/"))
+        XCTAssertNil(GitHubSetup.parseRepo("o r/x"))
+        XCTAssertEqual(GitHubSetup.parseRepo(" lilygo/t-lora-pager ")?.repo, "lilygo/t-lora-pager")
+        let pasted = try await FirmwareReleases.fetch(repo: "https://github.com/o/r.git", urlSession: session)
+        XCTAssertEqual(pasted, assets, "a pasted link names the same repo")
     }
 }

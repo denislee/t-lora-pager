@@ -8,32 +8,6 @@ public protocol SecretStore: Sendable {
     func delete(_ key: String)
 }
 
-/// An in-memory `SecretStore` (tests, previews).
-public final class MemorySecretStore: SecretStore, @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [String: String] = [:]
-
-    public init() {}
-
-    public func read(_ key: String) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return values[key]
-    }
-
-    public func write(_ key: String, _ value: String) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        values[key] = value
-    }
-
-    public func delete(_ key: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        values.removeValue(forKey: key)
-    }
-}
-
 /// A rejected GitHub notes connection setting.
 public struct GitHubAccountError: Error, Equatable, Sendable {
     public let msg: String

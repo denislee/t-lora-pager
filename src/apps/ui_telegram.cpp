@@ -69,6 +69,8 @@
 #include "../core/input_focus.h"
 #include "../core/one_shot_job.h"
 #include "app_registry.h"
+#include "tg_favs.h"
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdlib>
@@ -297,73 +299,22 @@ static void show_not_configured();
 
 // --- helpers --------------------------------------------------------------
 
-// Favorites: ids in `favs` (comma-separated) and titles in `fav_titles`
-// (`<id>\x1F<title>\x1E` records — separators that telegram chat titles
-// won't contain). Title pref is best-effort; missing entries leave the
-// chat-name pill blank but don't otherwise break anything.
-static void load_favorites()
+// Favorites in RAM. An id set, because all this app asks is "is this chat a
+// favorite?": the chat list keeps the bridge's order. The stored order belongs
+// to apps::tg_favs_load/save.
+static void adopt_favorites(const apps::TgFavs &favs)
 {
     s_favorites.clear();
     s_favorite_titles.clear();
     s_favorites_loaded = true;
-    std::string raw = load_pref("favs");
-    if (!raw.empty()) {
-        size_t i = 0;
-        while (i < raw.size()) {
-            size_t j = raw.find(',', i);
-            std::string tok = raw.substr(i, j == std::string::npos ? std::string::npos : j - i);
-            if (!tok.empty()) {
-                long long v = strtoll(tok.c_str(), nullptr, 10);
-                if (v != 0) s_favorites.insert(v);
-            }
-            if (j == std::string::npos) break;
-            i = j + 1;
-        }
-    }
-    std::string traw = load_pref("fav_titles");
-    if (!traw.empty()) {
-        size_t i = 0;
-        while (i < traw.size()) {
-            size_t end = traw.find('\x1E', i);
-            std::string rec = traw.substr(i, end == std::string::npos ? std::string::npos : end - i);
-            size_t sep = rec.find('\x1F');
-            if (sep != std::string::npos) {
-                long long id = strtoll(rec.substr(0, sep).c_str(), nullptr, 10);
-                if (id != 0 && s_favorites.count(id)) {
-                    s_favorite_titles[id] = rec.substr(sep + 1);
-                }
-            }
-            if (end == std::string::npos) break;
-            i = end + 1;
-        }
+    for (const auto &f : favs) {
+        if (f.first == 0) continue;
+        s_favorites.insert(f.first);
+        if (!f.second.empty()) s_favorite_titles[f.first] = f.second;
     }
 }
 
-static void save_favorites()
-{
-    std::string joined;
-    joined.reserve(s_favorites.size() * 12);
-    for (auto it = s_favorites.begin(); it != s_favorites.end(); ++it) {
-        if (!joined.empty()) joined.push_back(',');
-        char b[24];
-        snprintf(b, sizeof(b), "%lld", *it);
-        joined += b;
-    }
-    save_pref("favs", joined.c_str());
-
-    std::string blob;
-    for (long long id : s_favorites) {
-        auto it = s_favorite_titles.find(id);
-        if (it == s_favorite_titles.end() || it->second.empty()) continue;
-        char b[24];
-        snprintf(b, sizeof(b), "%lld", id);
-        blob += b;
-        blob.push_back('\x1F');
-        blob += it->second;
-        blob.push_back('\x1E');
-    }
-    save_pref("fav_titles", blob.c_str());
-}
+static void load_favorites() { adopt_favorites(apps::tg_favs_load()); }
 
 static void reload_config()
 {
@@ -1900,33 +1851,39 @@ void tg_cfg_set_favorite(long long id, const char *title, bool on)
         changed = s_favorites.erase(id) > 0;
         if (s_favorite_titles.erase(id) > 0) changed = true;
     }
-    if (changed) save_favorites();
+    if (!changed) return;
+    // Edit the stored list in place rather than rewriting it from the sorted
+    // set, so an order set from the phone survives a toggle here.
+    TgFavs stored = tg_favs_load();
+    const auto same_id = [id](const TgFavs::value_type &f) { return f.first == id; };
+    const auto it = std::find_if(stored.begin(), stored.end(), same_id);
+    if (!on) {
+        stored.erase(std::remove_if(stored.begin(), stored.end(), same_id), stored.end());
+    } else if (it == stored.end()) {
+        stored.emplace_back(id, title ? title : "");
+    } else if (title && *title) {
+        it->second = title;
+    }
+    tg_favs_save(stored);
 }
 
-void tg_cfg_get_favorites(std::vector<std::pair<long long, std::string>> &out)
+TgFavs tg_favs_load()
 {
-    out.clear();
-    if (!s_favorites_loaded) load_favorites();
-    out.reserve(s_favorites.size());
-    for (long long id : s_favorites) {
-        auto it = s_favorite_titles.find(id);
-        out.emplace_back(id, it == s_favorite_titles.end() ? std::string() : it->second);
-    }
+    return tg_favs_decode(load_pref("favs"), load_pref("fav_titles"));
+}
+
+void tg_favs_save(const TgFavs &favs)
+{
+    std::string ids, titles;
+    tg_favs_encode(favs, ids, titles);
+    save_pref("favs", ids.c_str());
+    save_pref("fav_titles", titles.c_str());
 }
 
 void tg_cfg_set_favorites(const std::vector<std::pair<long long, std::string>> &favs)
 {
-    // Same guard-free shape as tg_cfg_set_favorite(): UI thread only, and the
-    // in-memory set is authoritative until this rewrite persists it.
-    s_favorites.clear();
-    s_favorite_titles.clear();
-    s_favorites_loaded = true;
-    for (const auto &f : favs) {
-        if (f.first == 0) continue;
-        s_favorites.insert(f.first);
-        if (!f.second.empty()) s_favorite_titles[f.first] = f.second;
-    }
-    save_favorites();
+    // UI thread only, like tg_cfg_set_favorite().
+    adopt_favorites(favs);
 }
 
 bool tg_cfg_fetch_all_chats(std::vector<std::pair<long long, std::string>> &out,

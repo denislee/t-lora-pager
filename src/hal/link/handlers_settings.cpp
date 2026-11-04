@@ -50,6 +50,7 @@ bool handle_get(const JsonObject &params, JsonWriter &result, RpcError &err) {
     return false;
 }
 
+#if LINK_LOG_ENABLED
 /** "a,b,c" of the ids in values{} for the log line (never the values). */
 std::string id_list(const JsonObject &params) {
     JsonObject values;
@@ -61,6 +62,7 @@ std::string id_list(const JsonObject &params) {
     }
     return out;
 }
+#endif
 
 }  // namespace
 

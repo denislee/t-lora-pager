@@ -5,7 +5,7 @@
 
 namespace core {
 
-bool isTextInputFocused()
+lv_obj_t *focusedTextarea()
 {
     lv_indev_t *indev = nullptr;
     while ((indev = lv_indev_get_next(indev)) != nullptr) {
@@ -14,15 +14,16 @@ bool isTextInputFocused()
         if (!g) continue;
         lv_obj_t *focused = lv_group_get_focused(g);
         if (focused && lv_obj_has_class(focused, &lv_textarea_class)) {
-            return true;
+            return focused;
         }
     }
-    return false;
+    return nullptr;
+}
+
+bool isTextInputFocused()
+{
+    return focusedTextarea() != nullptr;
 }
 
 } // namespace core
 
-extern "C" bool ui_text_input_focused(void)
-{
-    return core::isTextInputFocused();
-}

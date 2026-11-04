@@ -54,10 +54,13 @@ public:
      */
     void update();
 
+#ifndef ARDUINO
+    // The emulator's screenshot sweep walks them.
     /**
      * @brief Every registered app, in registration order.
      */
     const std::vector<std::shared_ptr<App>>& apps() const { return _apps; }
+#endif
 
 private:
     static lv_obj_t* createAppRoot(lv_obj_t* parent);
@@ -66,7 +69,9 @@ private:
     AppManager& operator=(const AppManager&) = delete;
 
     std::map<std::string, std::shared_ptr<App>> _appMap;
+#ifndef ARDUINO
     std::vector<std::shared_ptr<App>> _apps;
+#endif
     std::shared_ptr<App> _activeApp;
 
     bool _hasPendingSwitch = false;

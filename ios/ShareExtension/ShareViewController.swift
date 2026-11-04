@@ -41,10 +41,7 @@ final class ShareModel: ObservableObject {
     var finish: () -> Void = {}
     var cancel: () -> Void = {}
 
-    private let outbox: PagerOutboxStore? = {
-        let group = PagerStatusStore.appGroupID(bundleID: Bundle.main.bundleIdentifier ?? "")
-        return UserDefaults(suiteName: group).map(PagerOutboxStore.init(defaults:))
-    }()
+    private let outbox = PagerStatusStore.appGroupDefaults().map(PagerOutboxStore.init(defaults:))
 
     func load(_ providers: [NSItemProvider]) async {
         var text: String?

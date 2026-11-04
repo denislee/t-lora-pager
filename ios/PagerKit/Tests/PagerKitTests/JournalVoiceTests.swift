@@ -30,8 +30,11 @@ final class JournalVoiceTests: XCTestCase {
         let date = Date(timeIntervalSince1970: 1_761_700_000)  // 2025-10-29 01:06:40 UTC
         XCTAssertEqual(Journal.noteName(for: date, calendar: utc), "20251029_010640.txt")
         let taken: Set<String> = ["20251029_010640.txt", "20251029_010640_2.txt"]
-        XCTAssertEqual(Journal.uniqueNoteName(for: date, calendar: utc, taken: taken.contains),
+        XCTAssertEqual(Journal.uniqueNoteName(Journal.noteName(for: date, calendar: utc), taken: taken.contains),
                        "20251029_010640_3.txt")
+        XCTAssertEqual(Journal.uniqueNoteName("free.txt", taken: taken.contains), "free.txt")
+        XCTAssertEqual(Journal.uniqueNoteName("plain", taken: { $0 == "plain" }), "plain_2.txt",
+                       "a name without .txt gains it when numbered")
         XCTAssertNotNil(Journal.timestamp(ofNoteName: "20251029_010640_3.txt"))
     }
 

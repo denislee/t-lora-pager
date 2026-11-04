@@ -51,6 +51,7 @@
 #include "../ui_define.h"
 #include "kitchen.h"
 #include "kitchen_crank.h"
+#include "app_registry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -69,6 +70,10 @@
 // *_profile envs (INPUT_PROFILE), KITCHEN_BENCH builds and the emulator.
 #if defined(INPUT_PROFILE) || defined(KITCHEN_BENCH) || !defined(ARDUINO)
 #define KITCHEN_PROBE 1
+// The bench itself only on the emulator and in KITCHEN_BENCH builds: the *_profile/_fps envs only report the frame probe.
+#if defined(KITCHEN_BENCH) || !defined(ARDUINO)
+#define KITCHEN_HAS_BENCH 1
+#endif
 #ifdef ARDUINO
 #include <esp_timer.h>
 #include <Arduino.h>
@@ -158,9 +163,11 @@ struct KpStats {
     }
 };
 
+#ifdef KITCHEN_HAS_BENCH
 // Bench phases (KF.1); -1 is everything in between.
 enum { KB_EARLY_CHOP, KB_LATE_CHOP, KB_PEEL_STROKE, KB_PEEL_TURN, KB_N };
 const char *const kBenchNames[KB_N] = {"early chop", "late chop", "peel stroke", "peel turn"};
+#endif
 
 // Counted during one refresh, then added to the stats at REFR_READY.
 struct KpFrame {
@@ -171,33 +178,43 @@ struct KpFrame {
 };
 
 struct KitchenProbe {
-    KpStats win, bench[KB_N];
+    KpStats win;
     KpFrame cur;
     uint32_t win_t0;
     uint64_t refr_t0;
+    bool muted;
+#ifdef KITCHEN_HAS_BENCH
+    KpStats bench[KB_N];
     uint32_t casts_since_refr, multi_cast_refrs;
-    bool bench_on, bench_finished, muted;
+    bool bench_on, bench_finished;
+#endif
 };
 KitchenProbe s_kp;
 
+#ifdef KITCHEN_HAS_BENCH
 int kp_bucket();   // the game phase now, for the bench (defined with the game)
+#endif
 
 // Apply f to the window and, while the bench runs, to the current phase.
 template <typename F> void kp_add(F f)
 {
     f(s_kp.win);
+#ifdef KITCHEN_HAS_BENCH
     if (s_kp.bench_on) {
         int b = kp_bucket();
         if (b >= 0) f(s_kp.bench[b]);
     }
+#endif
 }
 
 void kp_refr_cb(lv_event_t *e)
 {
+#ifdef KITCHEN_HAS_BENCH
     if (lv_event_get_code(e) == LV_EVENT_REFR_READY) {
         if (s_kp.casts_since_refr > 1) s_kp.multi_cast_refrs++;
         s_kp.casts_since_refr = 0;
     }
+#endif
     if (s_kp.muted) return;
     if (lv_event_get_code(e) == LV_EVENT_REFR_START) {
         s_kp.refr_t0 = kp_now();
@@ -613,9 +630,8 @@ void draw_round_end(const Ctx &c, V3 base, V3 out, float r)
 // ---- Game state ---------------------------------------------------------------
 
 struct Slice {
-    V3 from, to;
+    V3 to;
     float yaw;       // spin about y while it tumbles
-    float lean;      // final tilt off flat (radians)
     float t;         // tumble progress 0..1
     bool tip;        // the rounded front end, cut first; rolls onto its side
 };
@@ -896,9 +912,7 @@ float pile_top(float x, float z, float base)
 void spawn_slice()
 {
     Slice &s = s_game.slices[s_game.cuts];
-    s.from = {0, R, T * 0.5f};
     s.t = 0;
-    s.lean = 0;
     s.tip = s_game.cuts == 0;
     if (s.tip) {
         // Rolls off to the left, in front of the blade and clear of the
@@ -939,7 +953,8 @@ void cut()
 void slice_pose(const Slice &s, V3 &center, V3 &axis)
 {
     float e = 1.0f - (1.0f - s.t) * (1.0f - s.t);   // ease out
-    center = s.from + (s.to - s.from) * e;
+    const V3 from = {0, R, T * 0.5f};   // where every slice leaves the cucumber
+    center = from + (s.to - from) * e;
     center.y += sinf(s.t * 3.14159265f) * 0.6f;
     if (s.tip) {
         // Swing the axis round to horizontal, dipping a little as it rolls.
@@ -948,7 +963,7 @@ void slice_pose(const Slice &s, V3 &center, V3 &axis)
         return;
     }
     // Tip forward from upright (axis +z) to lying flat (axis ~+y).
-    float phi = e * (1.5707963f - s.lean);
+    float phi = e * 1.5707963f;
     V3 ax = {0, sinf(phi), cosf(phi)};
     float yaw = s.yaw * e;
     axis = {ax.z * sinf(yaw), ax.y, ax.z * cosf(yaw)};
@@ -1153,18 +1168,27 @@ void draw_flying(const Ctx &c)
     }
 }
 
+bool pile_layout_is(const Ctx &v)
+{
+    return s_pile.landed == count_landed() && s_pile.s == v.s && s_pile.ox == v.ox && s_pile.oy == v.oy;
+}
+
 bool pile_ready(const Ctx &c)
 {
-    return s_pile.valid && s_pile.landed == count_landed() && s_pile.s == c.s && s_pile.ox == c.ox &&
-           s_pile.oy == c.oy;
+    return s_pile.valid && pile_layout_is(c);
+}
+
+void pile_drop_buf()
+{
+    if (!s_pile.buf) return;
+    lv_image_cache_drop(s_pile.buf);
+    lv_draw_buf_destroy(s_pile.buf);
+    s_pile.buf = nullptr;
 }
 
 void pile_free()
 {
-    if (s_pile.buf) {
-        lv_image_cache_drop(s_pile.buf);
-        lv_draw_buf_destroy(s_pile.buf);
-    }
+    pile_drop_buf();
     if (s_pile.canvas) lv_obj_delete(s_pile.canvas);
     s_pile = PileImage{};
 }
@@ -1190,11 +1214,7 @@ bool pile_bake_step(lv_layer_t *layer)
 // The bake can't be done: free what it holds and leave the pile drawn live.
 void pile_give_up()
 {
-    if (s_pile.buf) {
-        lv_image_cache_drop(s_pile.buf);
-        lv_draw_buf_destroy(s_pile.buf);
-        s_pile.buf = nullptr;
-    }
+    pile_drop_buf();
     s_pile.failed = true;
 }
 
@@ -1203,7 +1223,7 @@ lv_area_t pile_update(const Ctx &v)
 {
     if (pile_ready(v)) return NO_AREA;
     // Failed for this pile already: it is drawn live, nothing changed. Try again when a slice lands.
-    if (s_pile.failed && s_pile.landed == count_landed() && s_pile.s == v.s && s_pile.ox == v.ox && s_pile.oy == v.oy) return NO_AREA;
+    if (s_pile.failed && pile_layout_is(v)) return NO_AREA;
     s_pile.failed = false;
     lv_area_t changed = s_pile.valid && s_pile.buf ? s_pile.area : NO_AREA;
     lv_area_t box = NO_AREA;
@@ -1213,17 +1233,12 @@ lv_area_t pile_update(const Ctx &v)
     s_pile.s = v.s, s_pile.ox = v.ox, s_pile.oy = v.oy;
     area_add(changed, box);
     if (area_empty(box)) {
-        if (s_pile.buf) lv_image_cache_drop(s_pile.buf), lv_draw_buf_destroy(s_pile.buf);
-        s_pile.buf = nullptr;
+        pile_drop_buf();
         s_pile.valid = true;
         return changed;
     }
     int32_t w = lv_area_get_width(&box), h = lv_area_get_height(&box);
-    if (s_pile.buf && ((int32_t)s_pile.buf->header.w != w || (int32_t)s_pile.buf->header.h != h)) {
-        lv_image_cache_drop(s_pile.buf);
-        lv_draw_buf_destroy(s_pile.buf);
-        s_pile.buf = nullptr;
-    }
+    if (s_pile.buf && ((int32_t)s_pile.buf->header.w != w || (int32_t)s_pile.buf->header.h != h)) pile_drop_buf();
     if (!s_pile.buf && !kf_fail("pile_buf")) s_pile.buf = lv_draw_buf_create(w, h, LV_COLOR_FORMAT_ARGB8888, 0);
     if (!s_pile.canvas && !kf_fail("pile_canvas")) s_pile.canvas = lv_canvas_create(nullptr);
     if (!s_pile.buf || !s_pile.canvas) {
@@ -1450,7 +1465,9 @@ struct CastMode {
     bool fast;       // KF.4c: approximate normalisation
     int iters;       // KF.4b: refinements of the surface hit
 };
+#ifndef ARDUINO
 constexpr CastMode CAST_EXACT = {false, false, 3};
+#endif
 // Two refinements instead of three moved band edges on 2-4.5% of the pixels
 // (the emulator's cast check), past the plan's 0.25 px bound, for a 10-15%
 // gain: KF.4b stays at three.
@@ -1803,7 +1820,9 @@ lv_area_t update_potato(const Ctx &c, const PotPose &q, const float *pc)
         dirty = {im.x0, im.y0, im.x0 + size - 1, im.y0 + size - 1};
 #ifdef KITCHEN_PROBE
         uint64_t us = kp_now() - t0;
+#ifdef KITCHEN_HAS_BENCH
         s_kp.casts_since_refr++;
+#endif
         kp_add([&](KpStats &st) {
             st.casts++;
             st.cast_us += us;
@@ -1922,8 +1941,7 @@ void draw_ribbon(const Ctx &c, const Ribbon &r, int step = 1)
     }
     line2(c, L[SH_PTS - 1], R[SH_PTS - 1], C_PRIM, 1);
     if (r.nrm[SH_PTS / 2].z > 0) {
-        int er = std::max(1, (int)lroundf(c.s * 0.035f));
-        for (int k = 0; k < r.n_eye; k++) dot2(c, proj_o(c, r.eye[k]), er, C_PEYE);
+        for (int k = 0; k < r.n_eye; k++) dot2(c, proj_o(c, r.eye[k]), pot_eye_r(c), C_PEYE);
     }
 }
 
@@ -2283,7 +2301,7 @@ PeelerSprite *py_sprite(const Ctx &c, const PeelerPose &p, bool bake)
         return &s_py.slot[i];
     }
     if (!bake) return nullptr;
-    s_py.misses++;
+    KP(s_py.misses++);
 
     PeelerPose at0 = p;
     at0.o = {0, 0, 0};
@@ -2319,7 +2337,7 @@ PeelerSprite *py_sprite(const Ctx &c, const PeelerPose &p, bool bake)
     lv_draw_buf_set_flag(&sp.buf, LV_IMAGE_FLAGS_MODIFIABLE);
     s_py.n++;
     s_py.bytes += bytes;
-    s_py.bakes++;
+    KP(s_py.bakes++);
     lv_canvas_set_draw_buf(s_py.canvas, &sp.buf);
     lv_canvas_fill_bg(s_py.canvas, lv_color_black(), LV_OPA_TRANSP);
     lv_layer_t layer;
@@ -2472,29 +2490,34 @@ enum : unsigned {
     MV_KNIFE = 1,      // stage 1: the knife
     MV_CUKE = 2,       //          the cucumber (pushed forward, or cut)
     MV_FLY = 4,        //          slices in the air
-    MV_LAND = 8,       //          a slice landed on the pile
     MV_POTATO = 16,    // stage 2: the crank (potato, peeler, live peel)
     MV_SHAVINGS = 32,  //          peels in the air
 };
+
+// Ease phase toward target, never more than half a stroke per frame so a fast
+// spin cannot skip a cut. False when it was already there.
+bool ease_crank(float &phase, float target, float period, float dt)
+{
+    float diff = target - phase;
+    if (fabsf(diff) <= 0.001f) return false;
+    float step = diff * std::min(1.0f, dt * 16.0f);
+    if (fabsf(diff) < 0.02f) step = diff;
+    phase += std::max(-period * 0.45f, std::min(period * 0.45f, step));
+    return true;
+}
 
 unsigned cucumber_step(float dt)
 {
     unsigned mv = 0;
 
-    // Crank: ease toward the wheel position, never more than half a stroke
-    // per frame so a fast spin cannot skip a cut.
-    float diff = s_game.phase_target - s_game.phase;
-    if (fabsf(diff) > 0.001f) {
-        float step = diff * std::min(1.0f, dt * 16.0f);
-        if (fabsf(diff) < 0.02f) step = diff;
-        step = std::max(-PERIOD * 0.45f, std::min(PERIOD * 0.45f, step));
-        float before = s_game.phase;
-        s_game.phase += step;
+    // Crank: ease toward the wheel position.
+    const float before = s_game.phase;
+    if (ease_crank(s_game.phase, s_game.phase_target, PERIOD, dt)) {
         mv |= MV_KNIFE;
 
         // The cut: the blade arriving on the board, moving down.
         constexpr float BOTTOM = PERIOD * 0.5f - 0.01f;
-        if (step > 0 && before < BOTTOM && s_game.phase >= BOTTOM && s_game.armed && !s_game.done && s_game.zf > T * 0.6f) { cut(); mv |= MV_CUKE | MV_FLY; }
+        if (before < BOTTOM && s_game.phase >= BOTTOM && s_game.armed && !s_game.done && s_game.zf > T * 0.6f) { cut(); mv |= MV_CUKE | MV_FLY; }
     }
 
     if (!s_game.armed && tri_wave(s_game.phase) > 0.8f) {
@@ -2515,7 +2538,7 @@ unsigned cucumber_step(float dt)
         Slice &s = s_game.slices[i];
         if (s.t < 1.0f) {
             s.t = std::min(1.0f, s.t + dt / 0.45f);
-            mv |= s.t >= 1.0f ? MV_FLY | MV_LAND : MV_FLY;
+            mv |= MV_FLY;
         }
     }
     return mv;
@@ -2524,13 +2547,8 @@ unsigned cucumber_step(float dt)
 unsigned potato_step(float dt)
 {
     unsigned mv = 0;
-    // Same easing as the knife, either way: the wheel can back the peeler up.
-    float diff = s_pot.phase_target - s_pot.phase;
-    if (fabsf(diff) > 0.001f) {
-        float step = diff * std::min(1.0f, dt * 16.0f);
-        if (fabsf(diff) < 0.02f) step = diff;
-        step = std::max(-P_PERIOD * 0.45f, std::min(P_PERIOD * 0.45f, step));
-        s_pot.phase += step;
+    // Either way: the wheel can back the peeler up.
+    if (ease_crank(s_pot.phase, s_pot.phase_target, P_PERIOD, dt)) {
         mv |= MV_POTATO;
         // The blade reaching the bottom of the strip releases its peel, once.
         int k = s_pot.strips;
@@ -2648,7 +2666,7 @@ void invalidate_moved(unsigned mv)
     dirty.flush();
 }
 
-#ifdef KITCHEN_PROBE
+#ifdef KITCHEN_HAS_BENCH
 void bench_tick(float dt);
 #endif
 
@@ -2656,8 +2674,10 @@ void frame_cb(lv_timer_t *)
 {
     float dt = std::min(0.1f, lv_tick_elaps(s_last_tick) / 1000.0f);
     s_last_tick = lv_tick_get();
-#ifdef KITCHEN_PROBE
+#ifdef KITCHEN_HAS_BENCH
     bench_tick(dt);
+#endif
+#ifdef KITCHEN_PROBE
     kp_report_tick();
 #endif
     unsigned mv = s_stage == 0 ? cucumber_step(dt) : potato_step(dt);
@@ -2681,7 +2701,7 @@ void crank(float notches)
 
 // ---- Bench (KF.1) and emulator hooks (KF.2) --------------------------------
 
-#ifdef KITCHEN_PROBE
+#ifdef KITCHEN_HAS_BENCH
 constexpr uint32_t BENCH_SEED = 0x2545f491u;
 constexpr float BENCH_NOTCHES_PER_S = 12.0f;
 
@@ -2705,7 +2725,6 @@ int kp_bucket()
     return pot_pose().ret > 0 ? KB_PEEL_TURN : KB_PEEL_STROKE;
 }
 
-#if defined(KITCHEN_BENCH) || !defined(ARDUINO)
 void bench_begin()
 {
     for (auto &b : s_kp.bench) b = KpStats{};
@@ -2717,7 +2736,6 @@ void bench_begin()
     s_game.paused = false;
     printf("[kitchen] bench: start (%.0f notches/s)\n", BENCH_NOTCHES_PER_S);
 }
-#endif
 
 // Crank at a fixed rate through both stages, then print the totals.
 void bench_tick(float dt)
@@ -2883,7 +2901,9 @@ void ui_kitchen_exit()
         }
 #endif
     }
+#ifdef KITCHEN_HAS_BENCH
     s_kp.bench_on = false;
+#endif
 #endif
 #if KITCHEN_REFR_MS != LV_DEF_REFR_PERIOD
     if (lv_display_t *disp = lv_display_get_default()) lv_timer_set_period(lv_display_get_refr_timer(disp), LV_DEF_REFR_PERIOD);
@@ -2899,8 +2919,6 @@ void ui_kitchen_exit()
 }
 
 } // namespace
-
-#include "app_registry.h"
 
 namespace {
 class KitchenApp : public core::App {
@@ -3028,12 +3046,6 @@ const char *shot_setup(int i)
 void shot_release()
 {
     if (frame_timer) lv_timer_resume(frame_timer);
-}
-
-void debug_crank(float notches)
-{
-    s_game.paused = false;
-    crank(notches);
 }
 
 void debug_invalidate_all()

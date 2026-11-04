@@ -16,13 +16,7 @@ struct NotesSyncActivityAttributes: ActivityAttributes, Sendable {
         var summary: String
         var uploaded: Int
         var already: Int
-        var deleted: Int
-        var errors: Int
         var done: Bool
     }
-
-    /// The pager's job id.
-    var job: Int
-    var startedAt: Date
 }
 #endif

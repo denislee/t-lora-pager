@@ -39,8 +39,7 @@ final class InboxModel: ObservableObject {
     static let maxReceived = 100
 
     init() {
-        let group = PagerStatusStore.appGroupID(bundleID: Bundle.main.bundleIdentifier ?? "")
-        outbox = UserDefaults(suiteName: group).map(PagerOutboxStore.init(defaults:))
+        outbox = PagerStatusStore.appGroupDefaults().map(PagerOutboxStore.init(defaults:))
         outboxChanged()
     }
 

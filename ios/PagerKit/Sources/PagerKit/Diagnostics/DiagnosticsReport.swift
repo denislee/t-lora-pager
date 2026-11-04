@@ -55,8 +55,8 @@ public struct DiagnosticsReport: Sendable, Equatable {
     /// The report as a JSON value (keys sorted on encode).
     public var json: JSONValue {
         var battery: [String: JSONValue] = ["count": .number(Double(self.battery.count))]
-        if let first = self.battery.first { battery["first"] = .string(Self.iso(first)) }
-        if let last = self.battery.last { battery["last"] = .string(Self.iso(last)) }
+        if let first = self.battery.first { battery["first"] = .string(isoUTC(first)) }
+        if let last = self.battery.last { battery["last"] = .string(isoUTC(last)) }
         if let pct = self.battery.latestPct { battery["latest_pct"] = .number(Double(pct)) }
         if let pct = self.battery.minPct { battery["min_pct"] = .number(Double(pct)) }
         if let pct = self.battery.maxPct { battery["max_pct"] = .number(Double(pct)) }
@@ -64,7 +64,7 @@ public struct DiagnosticsReport: Sendable, Equatable {
             battery["discharge_pct_per_hour"] = .number((rate * 100).rounded() / 100)
         }
         return .object([
-            "generated_at": .string(Self.iso(generatedAt)),
+            "generated_at": .string(isoUTC(generatedAt)),
             "app": .object([
                 "version": .string(appVersion),
                 "build": .string(appBuild),
@@ -81,7 +81,7 @@ public struct DiagnosticsReport: Sendable, Equatable {
             "screenshot": screenshot.map { shot in
                 .object([
                     "w": .number(Double(shot.width)), "h": .number(Double(shot.height)),
-                    "captured_at": .string(Self.iso(shot.capturedAt)),
+                    "captured_at": .string(isoUTC(shot.capturedAt)),
                     "png_base64": .string(Data(shot.png).base64EncodedString()),
                 ])
             } ?? .null,
@@ -104,11 +104,5 @@ public struct DiagnosticsReport: Sendable, Equatable {
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let fw = firmware.map { String($0.filter { $0.isLetter || $0.isNumber }.prefix(7)) } ?? "nofw"
         return "pager-diagnostics-\(fw.isEmpty ? "nofw" : fw)-\(formatter.string(from: generatedAt)).json"
-    }
-
-    static func iso(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        return formatter.string(from: date)
     }
 }

@@ -11,25 +11,16 @@
  */
 #pragma once
 
-#include <stdbool.h>
-
-#ifdef __cplusplus
-
 #include <lvgl.h>
 
 namespace core {
 
-// True when any keypad input device's default-focused object is an
-// LVGL textarea. Safe to call from any LVGL timer callback.
+// The first keypad input device's focused object that is an LVGL textarea, or
+// nullptr. Safe to call from any LVGL timer callback.
+lv_obj_t *focusedTextarea();
+
+// True when focusedTextarea() finds one.
 bool isTextInputFocused();
 
 } // namespace core
 
-extern "C" {
-#endif
-
-bool ui_text_input_focused(void);
-
-#ifdef __cplusplus
-}
-#endif

@@ -92,7 +92,6 @@ namespace {
 // Thin namespace-binding wrappers over the shared hal::nvs_* helpers; the
 // begin/get/put/end boilerplate (and its emulator stub) lives in hal/nvs.cpp.
 static std::string load_pref(const char *key, const char *dflt = "") { return hal::nvs_get_str(NSYNC_PREFS_NS, key, dflt); }
-static void        save_pref(const char *key, const char *value)     { hal::nvs_set_str(NSYNC_PREFS_NS, key, value); }
 
 // GitHub PAT persistence delegates to hal/secrets — same encrypted-NVS
 // wrapper the Telegram bearer uses, sharing the notes passphrase. A PAT
@@ -658,7 +657,6 @@ APP_FACTORY(make_notes_sync_app, NotesSyncApp)
 
 // --- config helpers called from settings_notes_sync.cpp -------------------
 std::string nsync_cfg_get_repo()            { return load_pref("repo"); }
-void        nsync_cfg_set_repo(const char *v)    { save_pref("repo", v ? v : ""); }
 
 std::string nsync_cfg_get_branch()
 {
@@ -666,7 +664,6 @@ std::string nsync_cfg_get_branch()
     if (v.empty()) v = NSYNC_DEFAULT_BRANCH;
     return v;
 }
-void nsync_cfg_set_branch(const char *v) { save_pref("branch", v ? v : ""); }
 
 std::string nsync_cfg_get_token_display()
 {

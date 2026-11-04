@@ -35,20 +35,36 @@ public final class NotesCache: @unchecked Sendable {
 
     /// The last listing of both volumes, and whether `evt.fs.changed` has
     /// invalidated it since (`stale` → re-list).
+    ///
+    /// Flat in `index.json` (the scan's fields beside `at` and `stale`), the
+    /// format the cache has always written, so an existing index still loads.
     public struct CachedScan: Codable, Sendable, Equatable {
-        public var merged: [NoteEntry]
-        public var all: [NoteEntry]
-        public var sdMounted: Bool
+        public var scan: NotesIndexer.Scan
         public var at: Date
         public var stale: Bool
 
-        public init(merged: [NoteEntry], all: [NoteEntry], sdMounted: Bool,
-                    at: Date, stale: Bool = false) {
-            self.merged = merged
-            self.all = all
-            self.sdMounted = sdMounted
+        private enum CodingKeys: String, CodingKey {
+            case at, stale
+        }
+
+        public init(scan: NotesIndexer.Scan, at: Date, stale: Bool = false) {
+            self.scan = scan
             self.at = at
             self.stale = stale
+        }
+
+        public init(from decoder: any Decoder) throws {
+            scan = try NotesIndexer.Scan(from: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            at = try container.decode(Date.self, forKey: .at)
+            stale = try container.decode(Bool.self, forKey: .stale)
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            try scan.encode(to: encoder)
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(at, forKey: .at)
+            try container.encode(stale, forKey: .stale)
         }
     }
 
@@ -59,7 +75,7 @@ public final class NotesCache: @unchecked Sendable {
     }
 
     /// The notes file (the bytes are the pager's; names come from it).
-    private let root: URL
+    let root: URL
     private let lock = NSLock()
     private var index = Index()
     private var loaded = false
@@ -96,18 +112,6 @@ public final class NotesCache: @unchecked Sendable {
         return bytes
     }
 
-    /// The record for `(vol, name)`, if one is cached.
-    public func record(vol: String, name: String) -> (size: UInt32, crc32: UInt32, mtime: Int64?)? {
-        guard Self.isSafe(vol: vol, name: name) else { return nil }
-        lock.lock()
-        defer { lock.unlock() }
-        loadIfNeeded()
-        guard let record = index.records.first(where: { $0.vol == vol && $0.name == name }) else {
-            return nil
-        }
-        return (size: record.size, crc32: record.crc32, mtime: record.mtime)
-    }
-
     /// The last saved scan, when there is one.
     public func cachedScan() -> (scan: NotesIndexer.Scan, at: Date, stale: Bool)? {
         lock.lock()
@@ -116,8 +120,7 @@ public final class NotesCache: @unchecked Sendable {
         lock.unlock()
 
         guard let cached else { return nil }
-        let scan = NotesIndexer.Scan(merged: cached.merged, all: cached.all, sdMounted: cached.sdMounted)
-        return (scan: scan, at: cached.at, stale: cached.stale)
+        return (scan: cached.scan, at: cached.at, stale: cached.stale)
     }
 
     // MARK: - Writing
@@ -170,10 +173,10 @@ public final class NotesCache: @unchecked Sendable {
         lock.lock()
         loadIfNeeded()
         index.records.removeAll { $0.vol == vol && $0.name == name }
-        if var scan = index.scan {
-            scan.merged.removeAll { $0.vol == vol && $0.name == name }
-            scan.all.removeAll { $0.vol == vol && $0.name == name }
-            index.scan = scan
+        if var cached = index.scan {
+            cached.scan.merged.removeAll { $0.vol == vol && $0.name == name }
+            cached.scan.all.removeAll { $0.vol == vol && $0.name == name }
+            index.scan = cached
         }
         saveIndex()
         lock.unlock()
@@ -195,13 +198,7 @@ public final class NotesCache: @unchecked Sendable {
             }
         }
         index.records = kept
-        index.scan = CachedScan(
-            merged: scan.merged,
-            all: scan.all,
-            sdMounted: scan.sdMounted,
-            at: at,
-            stale: false
-        )
+        index.scan = CachedScan(scan: scan, at: at)
         saveIndex()
         lock.unlock()
 

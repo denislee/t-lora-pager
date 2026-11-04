@@ -46,6 +46,9 @@ struct VolEntry {
 #ifndef ARDUINO
 /** Emulator: the host directory backing `v`, created on first use. */
 std::string host_dir(Vol v);
+
+/** Emulator: the backing root, $PAGERLINK_FS_ROOT or /tmp/pagerlink-fs. Creates nothing. */
+std::string emu_fs_root();
 #endif
 
 /** True when the volume can be used now (the SD card is mounted). */

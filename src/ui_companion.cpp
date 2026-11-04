@@ -11,7 +11,6 @@
 #include <lvgl.h>
 
 #include <atomic>
-#include <memory>
 
 #include "core/input_focus.h"
 #include "core/notify.h"
@@ -42,17 +41,6 @@ void wake_display() {
 #if defined(ARDUINO) && defined(ARDUINO_T_LORA_PAGER)
     if (ui_is_fake_sleep()) lilygo_request_fake_sleep_toggle();
 #endif
-}
-
-lv_obj_t *focused_textarea() {
-    lv_indev_t *indev = nullptr;
-    while ((indev = lv_indev_get_next(indev)) != nullptr) {
-        if (lv_indev_get_type(indev) != LV_INDEV_TYPE_KEYPAD) continue;
-        lv_group_t *g = lv_indev_get_group(indev);
-        lv_obj_t *f = g ? lv_group_get_focused(g) : nullptr;
-        if (f && lv_obj_has_class(f, &lv_textarea_class)) return f;
-    }
-    return nullptr;
 }
 
 void banner(const char *title, const std::string &body, bool error) {
@@ -95,7 +83,7 @@ void find_tick(lv_timer_t *t) {
 
 struct CallResult {
     bool ok = false;
-    std::string what;  // "Clipboard sent" / "Ringing your phone"
+    std::string what;  // "Sent to phone clipboard" / "Ringing your phone"
     std::string err;
 };
 
@@ -171,7 +159,7 @@ void ui_companion_type(hal::msg::Target target, const std::string &text) {
             banner("Phone text dropped", "the note editor closed", true);
             return;
         }
-        lv_obj_t *ta = focused_textarea();
+        lv_obj_t *ta = core::focusedTextarea();
         if (!ta) {
             banner("Phone text dropped", "no text field has focus", true);
             return;
@@ -220,8 +208,10 @@ void ui_companion_send_clip(const std::string &text) {
     }
     pagerlink::JsonWriter w;
     w.begin_object().key("text").str_val(text.substr(0, n)).end_object();
-    start_call("clip.push", w.str(),
-               n < text.size() ? "Sent to phone (first 4000 bytes)" : "Sent to phone clipboard");
+    const std::string what = n < text.size()
+                                 ? "Sent to phone (first " + std::to_string(hal::msg::kClipMax) + " bytes)"
+                                 : "Sent to phone clipboard";
+    start_call("clip.push", w.str(), what.c_str());
 }
 
 void ui_companion_find_phone() { start_call("phone.find", "{}", "Ringing your phone"); }

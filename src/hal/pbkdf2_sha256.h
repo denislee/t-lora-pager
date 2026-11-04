@@ -62,7 +62,7 @@ struct Sha256Stream {
 };
 
 /* Plain SHA-256: init, absorb any number of chunks, then final (which leaves
- * `s` spent; init again to reuse). Used to check OTA images (hal/ota.cpp). */
+ * `s` spent; init again to reuse). Used to check OTA images (hal/link/handlers_ota.cpp). */
 void sha256_init(Sha256Stream *s);
 void sha256_update(Sha256Stream *s, const uint8_t *p, size_t len);
 void sha256_final(Sha256Stream *s, uint8_t out[32]);

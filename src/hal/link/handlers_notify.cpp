@@ -25,12 +25,6 @@
 namespace pagerlink {
 namespace {
 
-bool bad(RpcError &err, const std::string &why) {
-    err.code = hal_error_code(HalError::InvalidArgument);
-    err.msg = why;
-    return false;
-}
-
 /** Pager wall clock in unix seconds, or 0 before the clock was ever set. */
 uint32_t now_epoch() {
     const time_t t = time(nullptr);
@@ -40,7 +34,7 @@ uint32_t now_epoch() {
 bool handle_notify_post(const JsonObject &params, JsonWriter &result, RpcError &err) {
     hal::msg::NotifyPost np;
     std::string why;
-    if (!hal::msg::parse_notify_post(params, np, why)) return bad(err, why);
+    if (!hal::msg::parse_notify_post(params, np, why)) return rpc_invalid(err, why);
 
     hal::msg::InboxEntry e;
     e.id = np.id;
@@ -63,7 +57,7 @@ bool handle_notify_post(const JsonObject &params, JsonWriter &result, RpcError &
 
 bool handle_clip_push(const JsonObject &params, JsonWriter &result, RpcError &err) {
     std::string text, why;
-    if (!hal::msg::parse_clip_push(params, text, why)) return bad(err, why);
+    if (!hal::msg::parse_clip_push(params, text, why)) return rpc_invalid(err, why);
 
     if (ui_companion_editor_open()) {
         ui_companion_type(hal::msg::Target::Editor, text);
@@ -85,12 +79,12 @@ bool handle_clip_push(const JsonObject &params, JsonWriter &result, RpcError &er
 bool handle_text_send(const JsonObject &params, JsonWriter &result, RpcError &err) {
     std::string text, why;
     hal::msg::Target target = hal::msg::Target::Kb;
-    if (!hal::msg::parse_text_send(params, text, target, why)) return bad(err, why);
+    if (!hal::msg::parse_text_send(params, text, target, why)) return rpc_invalid(err, why);
     if (target == hal::msg::Target::Editor && !ui_companion_editor_open()) {
-        return bad(err, "editor not open");
+        return rpc_invalid(err, "editor not open");
     }
     if (target == hal::msg::Target::Kb && !ui_companion_text_input_focused()) {
-        return bad(err, "no text input");
+        return rpc_invalid(err, "no text input");
     }
     ui_companion_type(target, text);
     result.begin_object().key("typed").uint_val(text.size()).end_object();
@@ -99,7 +93,7 @@ bool handle_text_send(const JsonObject &params, JsonWriter &result, RpcError &er
 
 bool handle_pager_find(const JsonObject &params, JsonWriter &result, RpcError &err) {
     bool stop = false;
-    if (params.has("stop") && !params.get_bool("stop", stop)) return bad(err, "stop: expected boolean");
+    if (params.has("stop") && !params.get_bool("stop", stop)) return rpc_invalid(err, "stop: expected boolean");
     ui_companion_find_pager(!stop);
     result.begin_object().end_object();
     return true;

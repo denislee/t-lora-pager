@@ -26,18 +26,15 @@ public struct NotesPushError: Sendable, Equatable {
     }
 }
 
-/// lilyhub `SyncResponse`: what landed, what was already there, what failed.
+/// What `GitHubNotesBackend.commit` landed and what failed.
 public struct NotesPushResult: Sendable, Equatable {
     public var uploaded = 0
-    public var already = 0
     public var errors: [NotesPushError] = []
     /// The commit that landed, nil when nothing was committed.
     public var commitSHA: String?
 
-    public init(uploaded: Int = 0, already: Int = 0, errors: [NotesPushError] = [],
-                commitSHA: String? = nil) {
+    public init(uploaded: Int = 0, errors: [NotesPushError] = [], commitSHA: String? = nil) {
         self.uploaded = uploaded
-        self.already = already
         self.errors = errors
         self.commitSHA = commitSHA
     }
@@ -48,26 +45,6 @@ public struct NotesSyncError: Error, Equatable, Sendable {
     public let msg: String
 
     public init(_ msg: String) { self.msg = msg }
-}
-
-/// An additive-only notes remote: list what is there (with blob SHAs), add
-/// what is not, read a commit back.
-public protocol NotesRemote: Sendable {
-    /// Names currently under `notes/`.
-    func existingNames() async throws -> Set<String>
-    /// name → git blob SHA of every blob under `notes/` on the branch (404 → empty); a truncated listing throws.
-    func existingBlobs() async throws -> [String: String]
-    /// The same listing for the tree of one commit (pinned, not the moving branch head) — what the move engine verifies against.
-    func blobs(atCommit sha: String) async throws -> [String: String]
-    /// Add `files` (none of which exist remotely); `already` stays 0.
-    func commit(_ files: [NoteFile]) async -> NotesPushResult
-    /// Identifies the remote `existingNames` lists (repo and branch), so a
-    /// cached listing is dropped when it changes. nil: don't cache.
-    var cacheKey: String? { get }
-}
-
-extension NotesRemote {
-    public var cacheKey: String? { nil }
 }
 
 /// The user's notes repo on GitHub. Repo, branch and token come from `config`
@@ -85,14 +62,14 @@ public struct GitHubNotesConfig: Sendable, Equatable {
     }
 }
 
-/// Port of lilyhub `server/internal/notessync`: additive-only push through
-/// the Git Data API — list `notes/`, create one blob per new file (bounded
-/// parallelism), then one tree + commit + ref update on top of the branch head,
-/// retried against a fresh head on a 422 non-fast-forward. Names already
-/// present are skipped, never overwritten; nothing is ever deleted. Bytes go
-/// up base64-encoded verbatim, so a `Salted__` note reaches GitHub byte for
-/// byte.
-public struct GitHubNotesBackend: NotesRemote {
+/// Port of lilyhub `server/internal/notessync`: additive-only access through
+/// the Git Data API. `existingBlobs` lists `notes/`; `commit` creates one blob
+/// per file (bounded parallelism), then one tree + commit + ref update on top
+/// of the branch head, retried against a fresh head on a 422 non-fast-forward.
+/// It is the caller (the move engine) that uploads only what the repo lacks;
+/// nothing is ever deleted. Bytes go up base64-encoded verbatim, so a
+/// `Salted__` note reaches GitHub byte for byte.
+public struct GitHubNotesBackend: Sendable {
     public static let defaultAPIBase = URL(string: "https://api.github.com")!
     /// Ref-update attempts on a non-fast-forward (lilyhub `maxRefAttempts`).
     public static let maxRefAttempts = 3
@@ -119,46 +96,11 @@ public struct GitHubNotesBackend: NotesRemote {
         self.baseBackoff = baseBackoff
     }
 
-    public var cacheKey: String? {
-        guard let cfg = config() else { return nil }
-        return "\(cfg.repo)@\(cfg.branch)"
-    }
-
-    /// lilyhub `runSync`: list, skip names already there (and unsafe names),
-    /// commit the rest in one commit.
-    public func push(_ files: [NoteFile]) async throws -> NotesPushResult {
-        let remote = try await existingNames()
-        var out = NotesPushResult()
-        var toUpload: [NoteFile] = []
-        for file in files where !file.name.isEmpty {
-            guard Self.safeName(file.name) else {
-                out.errors.append(NotesPushError(name: file.name, error: "invalid name"))
-                continue
-            }
-            if remote.contains(file.name) {
-                out.already += 1
-                continue
-            }
-            toUpload.append(file)
-        }
-        if toUpload.isEmpty { return out }
-        let committed = await commit(toUpload)
-        out.uploaded += committed.uploaded
-        out.errors.append(contentsOf: committed.errors)
-        return out
-    }
-
-    /// lilyhub `listRemote`: names under `notes/` on the branch; a 404 means
+    /// lilyhub `listRemote`: name → git blob SHA of every blob under `notes/` on the branch; a 404 means
     /// the folder (or branch) does not exist yet. Uses the Git Trees API on
     /// `<branch>:notes` (P7.58): the Contents API stops at 1,000 entries, and
     /// the notes past it would look missing and be pulled and pushed again. A
     /// `truncated` tree is an error for the same reason.
-    public func existingNames() async throws -> Set<String> {
-        Set(try await existingBlobs().keys)
-    }
-
-    /// name → git blob SHA of every blob under `notes/` on the branch; a 404
-    /// means the folder (or branch) does not exist yet.
     public func existingBlobs() async throws -> [String: String] {
         let cfg = try validConfig()
         return try await listNotes(ref: cfg.branch)
@@ -195,6 +137,7 @@ public struct GitHubNotesBackend: NotesRemote {
         return blobs
     }
 
+    /// Add `files`, none of which should exist remotely.
     /// lilyhub `commitFiles`: blobs (parallel), then tree + commit + ref,
     /// retrying the last three on a 422. Failed blobs are reported and left
     /// out; if the commit itself fails every blobbed file is reported failed.
@@ -434,7 +377,7 @@ public actor NotesSyncService {
     }
 
     private let session: LinkSession
-    private let github: (any NotesRemote)?
+    private let github: GitHubNotesBackend?
     private let phoneDirectory: URL?
     private let readTimeout: Duration
     private let canDelete: Bool
@@ -450,7 +393,7 @@ public actor NotesSyncService {
 
     /// `pagerCaps` are the pager's `sys.hello` caps: without
     /// `"fs.delete.if"` a move uploads and verifies but deletes nothing.
-    public init(session: LinkSession, github: (any NotesRemote)?, phoneDirectory: URL?,
+    public init(session: LinkSession, github: GitHubNotesBackend?, phoneDirectory: URL?,
                 pagerCaps: [String] = [],
                 readTimeout: Duration = NotesSyncService.defaultReadTimeout) {
         self.session = session
@@ -783,6 +726,8 @@ public actor NotesSyncService {
     /// Pull, check and store one manifest entry in the phone folder.
     private func deliverToPhone(_ file: Entry) async -> PhoneOutcome {
         guard GitHubNotesBackend.safeName(file.name) else { return .error }
+        // Nowhere to store it: fail now, not after pulling every byte over BLE.
+        guard phoneDirectory != nil else { return .error }
         // A phone copy with the manifest's size and CRC32 needs no pull (P7.63).
         if phoneHas(file) { return .already }
         let bytes: [UInt8]

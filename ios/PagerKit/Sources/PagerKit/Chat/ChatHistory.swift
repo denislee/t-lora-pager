@@ -36,7 +36,7 @@ public struct ChatRecord: Codable, Sendable, Equatable, Identifiable {
 /// The phone's copy of every chat the pager has had through it (the pager
 /// keeps only the last few turns): persisted as one JSON file, newest last,
 /// capped at `capacity` records (the oldest go first). Searchable and
-/// exportable as text or JSON. Thread-safe.
+/// exportable as text. Thread-safe.
 public final class ChatHistoryStore: @unchecked Sendable {
     /// Records kept; at a few hundred bytes each the file stays well under 2 MB.
     public static let defaultCapacity = 5000
@@ -48,9 +48,7 @@ public final class ChatHistoryStore: @unchecked Sendable {
 
     /// `Application Support/chat-history.json` in the app container.
     public static func defaultURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base.appendingPathComponent("chat-history.json")
+        applicationSupportURL("chat-history.json")
     }
 
     public init(url: URL = ChatHistoryStore.defaultURL(), capacity: Int = ChatHistoryStore.defaultCapacity) {
@@ -93,29 +91,12 @@ public final class ChatHistoryStore: @unchecked Sendable {
         }
     }
 
-    /// The history split into conversations at each reset (a reset starts
-    /// the next one); empty conversations are dropped. Oldest first.
-    public static func conversations(_ records: [ChatRecord]) -> [[ChatRecord]] {
-        var out: [[ChatRecord]] = []
-        var current: [ChatRecord] = []
-        for record in records {
-            if record.kind == .reset {
-                if !current.isEmpty { out.append(current) }
-                current = []
-            } else {
-                current.append(record)
-            }
-        }
-        if !current.isEmpty { out.append(current) }
-        return out
-    }
-
     /// Plain-text export: one block per record, `--- new conversation ---`
     /// at each reset. Times are ISO 8601 in UTC so exports compare across zones.
     public static func exportText(_ records: [ChatRecord]) -> String {
         var lines: [String] = []
         for record in records {
-            let stamp = Self.iso(record.at)
+            let stamp = isoUTC(record.at)
             switch record.kind {
             case .reset:
                 lines.append("--- new conversation (\(stamp)) ---")
@@ -131,19 +112,5 @@ public final class ChatHistoryStore: @unchecked Sendable {
             lines.append("")
         }
         return lines.joined(separator: "\n")
-    }
-
-    /// JSON export: the records as stored (dates as Unix seconds).
-    public static func exportJSON(_ records: [ChatRecord]) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        return try encoder.encode(records)
-    }
-
-    static func iso(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        return formatter.string(from: date)
     }
 }
