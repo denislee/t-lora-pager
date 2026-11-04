@@ -75,7 +75,7 @@ server/                            Go "lilyhub" LAN service (weather proxy, note
 protocol/                          PagerLink spec (PROTOCOL.md) + golden vectors shared by firmware, iOS and Go
 ios/                               iOS companion app: PagerKit Swift package + XcodeGen app (see ios/README.md)
 boards/, variants/                 PlatformIO board JSON + pins_arduino.h per device
-test/                              Native Unity tests (crc_cache, evict, hal_result, link_frame, link_json, link_rpc, link_xfer, notes_manifest, notes_migrate, notes_path, pbkdf2, settings_registry, str_encode, weather_payload)
+test/                              Native Unity tests (crc_cache, evict, hal_result, link_frame, link_json, link_rpc, link_xfer, nmea_rmc, notes_manifest, notes_migrate, notes_path, pbkdf2, settings_registry, str_encode, weather_payload)
 ```
 
 ### Core skeleton (`src/core/`)

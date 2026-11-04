@@ -59,6 +59,11 @@ void hw_set_gps_powered(bool on) {
     if (!on) {
         Serial1.end();
     } else {
+        // A 200 ms pump at 38400 baud is up to 768 bytes while the default RX
+        // buffer is 256, and the size can only be set while the port is closed
+        // (vendor powerControl on the watches has already opened it).
+        Serial1.end();
+        Serial1.setRxBufferSize(1024);
         Serial1.begin(38400, SERIAL_8N1, GPS_RX, GPS_TX);
     }
 #else

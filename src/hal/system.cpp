@@ -11,6 +11,7 @@
 #include "keyboard_task.h"
 #include "lvgl_task.h"
 #include "radio_chip.h"
+#include "gps_time_sync.h"
 #include "timezone.h"
 #include "nvs.h"
 #include "../core/spi_lock.h"
@@ -869,6 +870,10 @@ void hw_power_up_all()
     // and is only ever powered transiently by hw_start_time_sync_gps().
     {
         core::ScopedI2cLock i2c;  // P7.45
+        // A user sleep may have cut the rail mid-sync; the attempt continues
+        // until its deadline. Rail only: this is the vendor's task, and the
+        // pump on the LVGL task may be reading the Serial1 that stayed open.
+        if (hw_time_sync_gps_active()) instance.powerControl(POWER_GPS, true);
         if (user_setting.nfc_enable) instance.powerControl(POWER_NFC, true);
         if (user_setting.haptic_enable) instance.powerControl(POWER_HAPTIC_DRIVER, true);
         instance.powerControl(POWER_KEYBOARD, true);

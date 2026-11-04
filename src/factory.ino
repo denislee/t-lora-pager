@@ -28,6 +28,7 @@
 extern "C" void lilygo_request_fake_sleep_toggle();
 #endif
 
+#include "hal/gps_time_sync.h"
 #include "hal/timezone.h"
 #include "ui/modals.h"  // ui_device_lock_enforce (ui_lock.cpp)
 
@@ -358,6 +359,9 @@ void loop()
                 && !hw_rec_running()
                 && !core::isTextInputFocused()
                 && !ssh_session_is_active()
+                // Fake sleep freezes the pump and cuts the GPS rail, and a
+                // cold fix can outlast the 60 s default timeout.
+                && !hw_time_sync_gps_active()
                 // P4.9: do not blank the screen mid-transfer — the "Unsafe to
                 // disconnect" overlay lives on lv_layer_top() and would go
                 // invisible. Evaluated last so the (cheap) checks above

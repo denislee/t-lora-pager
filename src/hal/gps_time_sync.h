@@ -19,10 +19,14 @@
 // Resets the parser; any partial NMEA from a previous attempt is discarded.
 bool hw_start_time_sync_gps();
 
-// Pumps NMEA bytes from Serial1 through the parser. On the first valid
-// date+time it writes the clock and flips status to 1. After the deadline
-// (~90s) flips status to -1.
+// Pumps NMEA bytes from Serial1 through the parser. On the first
+// checksum-valid RMC with status A (a real fix) it writes the clock and flips
+// status to 1. After the deadline (~90s) flips status to -1.
 void hw_pump_time_sync_gps();
+
+// True while an attempt is running; auto-sleep holds off and wake re-powers
+// the rail.
+bool hw_time_sync_gps_active();
 
 // Status of the most recent attempt:
 //   1  — synced

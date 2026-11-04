@@ -48,8 +48,8 @@ static void gps_stop_timer()
     if (dt_setup.gps_timer) {
         lv_timer_del(dt_setup.gps_timer);
         dt_setup.gps_timer = nullptr;
+        hw_stop_time_sync_gps();
     }
-    hw_stop_time_sync_gps();
 }
 
 void reset_state()
@@ -220,8 +220,7 @@ static void gps_sync_cb(lv_event_t *)
         return;
     }
     sync_set_status("Waiting for GPS fix...", UI_COLOR_ACCENT);
-    // 200 ms pump is fast enough that Serial1's 256B FIFO never overflows
-    // at 38400 baud (≈4 KB/s) while still keeping the status reactive.
+    // hw_set_gps_powered() sizes the RX buffer for this 200 ms pump.
     dt_setup.gps_timer = lv_timer_create(gps_sync_poll_cb, 200, nullptr);
 }
 
