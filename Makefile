@@ -18,7 +18,12 @@ build:
 	$(PIO) run -e $(ENV)
 
 upload:
+ifneq ($(PORT),)
 	$(PIO) run -e $(ENV) --target upload $(UPLOAD_FLAGS)
+else
+	$(PIO) run -e $(ENV)
+	python3 tools/pager_upload.py --env $(ENV)
+endif
 
 monitor:
 	$(PIO) device monitor -b 115200 $(MONITOR_FLAGS)
